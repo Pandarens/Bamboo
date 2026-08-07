@@ -35,6 +35,10 @@ pub enum ObservationKind {
     BootRegression,
     /// Система просыпается сама.
     Wakeups,
+    /// Всплеск процессора в фоне.
+    BackgroundCpu,
+    /// Нагрузка на уровне драйверов.
+    DriverLoad,
 }
 
 impl ObservationKind {
@@ -46,6 +50,8 @@ impl ObservationKind {
             ObservationKind::GdiGrowth => "рост числа объектов GDI",
             ObservationKind::BootRegression => "время загрузки",
             ObservationKind::Wakeups => "пробуждения",
+            ObservationKind::BackgroundCpu => "фоновая нагрузка",
+            ObservationKind::DriverLoad => "нагрузка драйверов",
         }
     }
 }
