@@ -1,0 +1,37 @@
+[package]
+name = "bamboo-agent"
+description = "Агент Bamboo: иконка в трее и виджет"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[[bin]]
+name = "bamboo-agent"
+path = "src/main.rs"
+
+[dependencies]
+bamboo-core.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+bamboo-collect.workspace = true
+bamboo-sys.workspace = true
+
+# renderer-software и backend-winit без остального: GPU-контекст
+# не создаётся вообще (ТЗ, раздел 4.1). Виджету он не нужен, а его создание
+# стоит памяти и держит драйвер видеокарты загруженным.
+slint = { version = "1", default-features = false, features = [
+    "compat-1-2",
+    "backend-winit",
+    "renderer-software",
+    "std",
+    # Нужен, чтобы достать HWND и отдать его в bamboo-sys для оконных стилей.
+    "raw-window-handle-06",
+] }
+tray-icon = "0.21"
+raw-window-handle = "0.6"
+
+[build-dependencies]
+slint-build = "1"

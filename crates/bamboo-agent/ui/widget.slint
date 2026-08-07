@@ -1,0 +1,213 @@
+// Виджет Bamboo (ТЗ, раздел 14.2).
+//
+// Компактное окно ~340 x 420, вызывается из трея.
+//
+// Чего здесь намеренно нет: кнопок «заморозить фоновые», «профиль Игра»
+// и «откат». Действий пока не существует — они появятся вместе с брокером
+// на этапе 0.4. Нарисовать кнопку, которая ничего не делает, значит соврать
+// пользователю о готовности продукта.
+
+struct ProcessRow {
+    name: string,
+    cpu: string,
+    memory: string,
+    badge: string,
+}
+
+component Card inherits Rectangle {
+    in property <string> label;
+    in property <string> value;
+    in property <string> note;
+
+    background: #1e2a24;
+    border-radius: 8px;
+
+    VerticalLayout {
+        padding: 10px;
+        spacing: 2px;
+
+        Text {
+            text: root.label;
+            font-size: 11px;
+            color: #7d8f86;
+        }
+        Text {
+            text: root.value;
+            font-size: 20px;
+            color: #e8f0ec;
+        }
+        Text {
+            text: root.note;
+            font-size: 10px;
+            color: #7d8f86;
+        }
+    }
+}
+
+export component Widget inherits Window {
+    title: "Bamboo";
+    width: 340px;
+    height: 420px;
+    background: #141b18;
+
+    in property <string> cpu-value: "—";
+    in property <string> cpu-note: "";
+    in property <string> memory-value: "—";
+    in property <string> memory-note: "";
+    in property <string> status: "запускаюсь";
+    in property <string> own-cost: "";
+    in property <[ProcessRow]> processes: [];
+    // Спарклайн памяти: доли от максимума за окно наблюдения, 0..1.
+    in property <[float]> spark: [];
+    in property <bool> pinned: false;
+
+    callback toggle-pin();
+
+    VerticalLayout {
+        padding: 12px;
+        spacing: 10px;
+
+        // Строка состояния
+        HorizontalLayout {
+            spacing: 8px;
+
+            Text {
+                text: root.status;
+                font-size: 11px;
+                color: #7d8f86;
+                vertical-alignment: center;
+                horizontal-stretch: 1;
+            }
+
+            Rectangle {
+                width: 28px;
+                height: 20px;
+                border-radius: 5px;
+                background: root.pinned ? #2f6f4f : #1e2a24;
+
+                TouchArea {
+                    clicked => { root.toggle-pin(); }
+                }
+                Text {
+                    text: "\u{1f4cc}";
+                    font-size: 11px;
+                }
+            }
+        }
+
+        // Две карточки
+        HorizontalLayout {
+            spacing: 8px;
+            Card {
+                label: "Процессор";
+                value: root.cpu-value;
+                note: root.cpu-note;
+                horizontal-stretch: 1;
+            }
+            Card {
+                label: "Память";
+                value: root.memory-value;
+                note: root.memory-note;
+                horizontal-stretch: 1;
+            }
+        }
+
+        // Спарклайн памяти за последнее время
+        Rectangle {
+            height: 52px;
+            background: #1e2a24;
+            border-radius: 8px;
+
+            HorizontalLayout {
+                padding: 6px;
+                spacing: 1px;
+                alignment: end;
+
+                for value in root.spark: Rectangle {
+                    width: 4px;
+                    background: transparent;
+
+                    VerticalLayout {
+                        alignment: end;
+                        Rectangle {
+                            height: max(2px, 40px * value);
+                            background: #3f8f66;
+                            border-radius: 1px;
+                        }
+                    }
+                }
+            }
+        }
+
+        Text {
+            text: "Больше всего потребляют";
+            font-size: 11px;
+            color: #7d8f86;
+        }
+
+        // Топ потребителей
+        VerticalLayout {
+            spacing: 4px;
+            vertical-stretch: 1;
+
+            for process in root.processes: Rectangle {
+                height: 34px;
+                background: #1a231f;
+                border-radius: 6px;
+
+                HorizontalLayout {
+                    padding-left: 8px;
+                    padding-right: 8px;
+                    spacing: 6px;
+
+                    VerticalLayout {
+                        alignment: center;
+                        horizontal-stretch: 1;
+
+                        Text {
+                            text: process.name;
+                            font-size: 12px;
+                            color: #e8f0ec;
+                            overflow: elide;
+                        }
+                        Text {
+                            text: process.badge;
+                            font-size: 9px;
+                            color: #7d8f86;
+                        }
+                    }
+
+                    Text {
+                        text: process.cpu;
+                        font-size: 12px;
+                        color: #b6c6bd;
+                        vertical-alignment: center;
+                        width: 48px;
+                        horizontal-alignment: right;
+                    }
+                    Text {
+                        text: process.memory;
+                        font-size: 12px;
+                        color: #b6c6bd;
+                        vertical-alignment: center;
+                        width: 66px;
+                        horizontal-alignment: right;
+                    }
+                }
+            }
+        }
+
+        Text {
+            text: root.own-cost;
+            font-size: 10px;
+            color: #62736a;
+        }
+
+        Text {
+            text: "Bamboo пока только наблюдает. Действия появятся на этапе 0.4.";
+            font-size: 10px;
+            color: #62736a;
+            wrap: word-wrap;
+        }
+    }
+}

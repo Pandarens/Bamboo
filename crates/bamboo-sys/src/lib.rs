@@ -20,6 +20,7 @@ pub mod process;
 pub mod storage;
 pub mod user;
 pub mod wake;
+pub mod window;
 
 pub use boot::{boot_culprits, boot_history, BootCulprit, BootRecord};
 pub use budget::{apply_self_limits, own_memory, OwnMemory};
