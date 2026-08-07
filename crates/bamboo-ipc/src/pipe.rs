@@ -21,8 +21,20 @@ pub const ALLOWED: &[&str] = &[
     "интерактивные пользователи сессии",
 ];
 
-/// Кому доступ запрещён явно.
+/// Кому доступ не достаётся.
+///
+/// Важная тонкость реализации: `Everyone` сюда входит по смыслу, но
+/// запрещающей записи в дескрипторе для него быть **не должно**.
+/// Запрещающие записи проверяются раньше разрешающих, а в `Everyone`
+/// входит каждый пользователь, включая интерактивного — такой запрет
+/// закрывает канал вообще для всех. Отказ достигается тем, что `Everyone`
+/// просто отсутствует в списке разрешённых: что не разрешено, то запрещено.
 pub const DENIED: &[&str] = &["Everyone", "ANONYMOUS LOGON", "NETWORK"];
+
+/// Кому запрет прописывается явной записью в дескрипторе.
+///
+/// Только те, кто не является надмножеством легитимных пользователей.
+pub const EXPLICITLY_DENIED: &[&str] = &["ANONYMOUS LOGON", "NETWORK"];
 
 /// Обязательные флаги канала.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -98,6 +110,16 @@ mod tests {
         assert!(DENIED.contains(&"Everyone"));
         assert!(DENIED.contains(&"ANONYMOUS LOGON"));
         assert!(DENIED.contains(&"NETWORK"));
+    }
+
+    #[test]
+    fn everyone_is_denied_by_omission_not_by_an_explicit_rule() {
+        // Явный запрет для Everyone закрыл бы канал для всех, включая
+        // интерактивного пользователя: запрещающие записи проверяются
+        // раньше разрешающих, а в Everyone входит каждый.
+        assert!(!EXPLICITLY_DENIED.contains(&"Everyone"));
+        assert!(EXPLICITLY_DENIED.contains(&"ANONYMOUS LOGON"));
+        assert!(EXPLICITLY_DENIED.contains(&"NETWORK"));
     }
 
     #[test]

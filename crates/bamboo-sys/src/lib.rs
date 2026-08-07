@@ -17,6 +17,7 @@ pub mod etw;
 pub mod eventlog;
 pub mod memory;
 pub mod nt;
+pub mod pipe;
 pub mod power;
 pub mod process;
 pub mod storage;
