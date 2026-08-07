@@ -19,7 +19,10 @@ pub struct RingBuffer<T> {
 
 impl<T: Copy> RingBuffer<T> {
     pub fn with_capacity(capacity: usize) -> Self {
-        assert!(capacity > 0, "ёмкость кольцевого буфера должна быть больше нуля");
+        assert!(
+            capacity > 0,
+            "ёмкость кольцевого буфера должна быть больше нуля"
+        );
         RingBuffer {
             items: Vec::new(),
             capacity,
@@ -135,7 +138,11 @@ mod tests {
     #[test]
     fn memory_is_allocated_lazily() {
         let ring: RingBuffer<u64> = RingBuffer::with_capacity(600);
-        assert_eq!(ring.allocated_bytes(), 0, "пустой буфер не должен занимать память");
+        assert_eq!(
+            ring.allocated_bytes(),
+            0,
+            "пустой буфер не должен занимать память"
+        );
     }
 
     #[test]

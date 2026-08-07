@@ -1,0 +1,20 @@
+[package]
+name = "bamboo-cli"
+description = "Отладочная утилита Bamboo: снимок системы, топ потребителей, контроль собственного бюджета"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[[bin]]
+name = "bamboo"
+path = "src/main.rs"
+
+[dependencies]
+bamboo-core.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+bamboo-collect.workspace = true
+bamboo-sys.workspace = true

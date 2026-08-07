@@ -95,9 +95,8 @@ impl ProcessBuffer {
 
     /// Перебор процессов из последнего успешного снимка.
     pub fn iter(&self) -> ProcessIter<'_> {
-        let bytes = unsafe {
-            core::slice::from_raw_parts(self.storage.as_ptr().cast::<u8>(), self.filled)
-        };
+        let bytes =
+            unsafe { core::slice::from_raw_parts(self.storage.as_ptr().cast::<u8>(), self.filled) };
         ProcessIter {
             bytes,
             offset: 0,

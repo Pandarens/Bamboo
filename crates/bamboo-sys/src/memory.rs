@@ -80,7 +80,10 @@ mod tests {
         assert!(stat.commit_limit >= stat.physical_total);
 
         let pressure = stat.commit_pressure();
-        assert!((0.0..=1.0).contains(&pressure), "давление на память {pressure}");
+        assert!(
+            (0.0..=1.0).contains(&pressure),
+            "давление на память {pressure}"
+        );
     }
 
     #[test]

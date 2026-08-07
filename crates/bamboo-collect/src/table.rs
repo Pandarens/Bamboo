@@ -199,10 +199,8 @@ impl ProcessTable {
         tracked.history.push(MetricPoint {
             cpu_ms: cpu_delta.as_millis().min(u32::MAX as u64) as u32,
             private_kib: sample.private_pages.as_kib().min(u32::MAX as u64) as u32,
-            working_set_private_kib: sample
-                .working_set_private
-                .as_kib()
-                .min(u32::MAX as u64) as u32,
+            working_set_private_kib: sample.working_set_private.as_kib().min(u32::MAX as u64)
+                as u32,
             read_kib: (read_delta / 1024).min(u32::MAX as u64) as u32,
             write_kib: (write_delta / 1024).min(u32::MAX as u64) as u32,
         });
@@ -345,12 +343,18 @@ mod tests {
         table.end_tick();
 
         table.begin_tick();
-        table.observe(sample(100, 1_500, 0), at(1000), 1000, || identity("app.exe"));
+        table.observe(sample(100, 1_500, 0), at(1000), 1000, || {
+            identity("app.exe")
+        });
         table.end_tick();
 
         let tracked = table.get(ProcessId::new(100, 1)).unwrap();
         // 500 мс процессорного времени за интервал в 1000 мс — половина ядра.
-        assert!((tracked.cpu_share - 0.5).abs() < 1e-6, "доля {}", tracked.cpu_share);
+        assert!(
+            (tracked.cpu_share - 0.5).abs() < 1e-6,
+            "доля {}",
+            tracked.cpu_share
+        );
         assert_eq!(tracked.last_point().cpu_ms, 500);
     }
 
@@ -368,7 +372,10 @@ mod tests {
             table.end_tick();
         }
 
-        assert_eq!(calls, 1, "полный путь запрашивался {calls} раз вместо одного");
+        assert_eq!(
+            calls, 1,
+            "полный путь запрашивался {calls} раз вместо одного"
+        );
     }
 
     #[test]
@@ -406,20 +413,31 @@ mod tests {
         let changes = table.end_tick();
 
         assert_eq!(table.len(), 1);
-        assert_eq!(changes.exited.len(), 1, "старый экземпляр должен быть закрыт");
-        assert_eq!(&*table.get(ProcessId::new(100, 222)).unwrap().image_name, "other.exe");
+        assert_eq!(
+            changes.exited.len(),
+            1,
+            "старый экземпляр должен быть закрыт"
+        );
+        assert_eq!(
+            &*table.get(ProcessId::new(100, 222)).unwrap().image_name,
+            "other.exe"
+        );
     }
 
     #[test]
     fn counter_reset_does_not_produce_a_negative_delta() {
         let mut table = table();
         table.begin_tick();
-        table.observe(sample(100, 10_000, 500_000), at(0), 1000, || identity("app.exe"));
+        table.observe(sample(100, 10_000, 500_000), at(0), 1000, || {
+            identity("app.exe")
+        });
         table.end_tick();
 
         // Счётчик уехал назад — такое встречается при переполнении.
         table.begin_tick();
-        table.observe(sample(100, 1_000, 1_000), at(1000), 1000, || identity("app.exe"));
+        table.observe(sample(100, 1_000, 1_000), at(1000), 1000, || {
+            identity("app.exe")
+        });
         table.end_tick();
 
         let tracked = table.get(ProcessId::new(100, 1)).unwrap();

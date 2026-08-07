@@ -3,7 +3,7 @@
 use core::time::Duration;
 
 use bamboo_core::app::PathNormalizer;
-use bamboo_core::{CoreTimes, MemoryStat, Result, SampleTime, SystemSample};
+use bamboo_core::{CoreTimes, Result, SampleTime, SystemSample};
 use bamboo_sys::{
     clock, cpu::CpuTimesBuffer, memory, power, process::full_image_path, user, ProcessBuffer,
 };
@@ -85,23 +85,35 @@ impl Collector {
     /// Снимает один тик.
     pub fn tick(&mut self) -> Result<Tick> {
         let at = clock::now();
-        let interval_ms = self.prev_at.map(|prev| at.elapsed_ms_since(prev)).unwrap_or(0);
+        let interval_ms = self
+            .prev_at
+            .map(|prev| at.elapsed_ms_since(prev))
+            .unwrap_or(0);
 
         self.cpu.refresh()?;
         let cores = core_deltas(&self.prev_cores, self.cpu.cores());
         self.prev_cores = self.cpu.cores().to_vec();
 
-        let memory = memory::memory_stat().unwrap_or(MemoryStat::default());
+        let memory = memory::memory_stat().unwrap_or_default();
 
         self.processes.refresh()?;
         self.table.begin_tick();
         for raw in self.processes.iter() {
             let pid = raw.pid();
+
+            // Idle — не процесс, а способ учёта простоя: его «загрузка» равна
+            // числу свободных ядер и в топе потребителей выглядит как
+            // тысяча процентов. Простой берём из времён ядер.
+            if pid == 0 {
+                continue;
+            }
+
             let name = || raw.image_name();
-            self.table.observe(raw.to_sample(), at, interval_ms, || ProcessIdentity {
-                image_name: name(),
-                image_path: full_image_path(pid).ok(),
-            });
+            self.table
+                .observe(raw.to_sample(), at, interval_ms, || ProcessIdentity {
+                    image_name: name(),
+                    image_path: full_image_path(pid).ok(),
+                });
         }
         let changes = self.table.end_tick();
 
@@ -217,13 +229,25 @@ mod tests {
     }
 
     #[test]
+    fn idle_is_not_tracked_as_a_process() {
+        let mut collector = Collector::new();
+        collector.tick().unwrap();
+        assert!(
+            collector.table().iter().all(|p| p.pid() != 0),
+            "Idle попал в таблицу процессов"
+        );
+    }
+
+    #[test]
     fn per_process_cpu_does_not_exceed_the_machine() {
         let mut collector = Collector::new();
         collector.tick().unwrap();
         std::thread::sleep(Duration::from_millis(300));
         collector.tick().unwrap();
 
-        let cores = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1) as f32;
+        let cores = std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(1) as f32;
         for process in collector.table().iter() {
             assert!(
                 process.cpu_share <= cores + 0.5,

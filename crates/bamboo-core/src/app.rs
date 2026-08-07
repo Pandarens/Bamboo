@@ -37,7 +37,8 @@ impl PathNormalizer {
         self.prefixes.push((prefix, token.to_string()));
         // Длинные префиксы должны срабатывать первыми: %localappdata%
         // вложен в %userprofile%.
-        self.prefixes.sort_by_key(|(p, _)| core::cmp::Reverse(p.len()));
+        self.prefixes
+            .sort_by_key(|(p, _)| core::cmp::Reverse(p.len()));
         self
     }
 
@@ -169,7 +170,10 @@ mod tests {
     #[test]
     fn case_and_slashes_do_not_matter() {
         let n = PathNormalizer::new();
-        assert_eq!(n.normalize("C:/Windows/System32/SVCHOST.EXE"), "c:\\windows\\system32\\svchost.exe");
+        assert_eq!(
+            n.normalize("C:/Windows/System32/SVCHOST.EXE"),
+            "c:\\windows\\system32\\svchost.exe"
+        );
     }
 
     #[test]
@@ -205,21 +209,29 @@ mod tests {
             collapse_versions("c:\\windows\\system32\\vcruntime140.dll"),
             "c:\\windows\\system32\\vcruntime140.dll"
         );
-        assert_eq!(collapse_versions("c:\\python3\\python.exe"), "c:\\python3\\python.exe");
+        assert_eq!(
+            collapse_versions("c:\\python3\\python.exe"),
+            "c:\\python3\\python.exe"
+        );
     }
 
     #[test]
     fn app_key_survives_an_update() {
         let n = normalizer();
-        let before = n.normalize("C:\\Users\\vasya\\AppData\\Local\\Discord\\app-1.0.9034\\Discord.exe");
-        let after = n.normalize("C:\\Users\\vasya\\AppData\\Local\\Discord\\app-1.0.9041\\Discord.exe");
+        let before =
+            n.normalize("C:\\Users\\vasya\\AppData\\Local\\Discord\\app-1.0.9034\\Discord.exe");
+        let after =
+            n.normalize("C:\\Users\\vasya\\AppData\\Local\\Discord\\app-1.0.9041\\Discord.exe");
         assert_eq!(AppKey::from_path(&before), AppKey::from_path(&after));
     }
 
     #[test]
     fn different_publishers_are_different_apps() {
         let signed = AppKey::new("c:\\tools\\updater.exe", &Publisher::Signed("Acme".into()));
-        let unsigned = AppKey::new("c:\\tools\\updater.exe", &Publisher::Hash("deadbeef".into()));
+        let unsigned = AppKey::new(
+            "c:\\tools\\updater.exe",
+            &Publisher::Hash("deadbeef".into()),
+        );
         assert_ne!(signed, unsigned);
     }
 }

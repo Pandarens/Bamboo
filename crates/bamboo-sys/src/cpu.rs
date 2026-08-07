@@ -9,8 +9,8 @@ use core::mem::size_of;
 use bamboo_core::{CoreTimes, Error, Nanos, Result};
 
 use crate::nt::{
-    nt_success, NtQuerySystemInformation, CLASS_PROCESSOR_PERFORMANCE,
-    STATUS_INFO_LENGTH_MISMATCH, SYSTEM_PROCESSOR_PERFORMANCE_INFO,
+    nt_success, NtQuerySystemInformation, CLASS_PROCESSOR_PERFORMANCE, STATUS_INFO_LENGTH_MISMATCH,
+    SYSTEM_PROCESSOR_PERFORMANCE_INFO,
 };
 
 /// Переиспользуемый буфер под времена ядер.
@@ -62,8 +62,10 @@ impl CpuTimesBuffer {
                 });
             }
 
-            self.raw
-                .resize(self.raw.len() * 2, SYSTEM_PROCESSOR_PERFORMANCE_INFO::default());
+            self.raw.resize(
+                self.raw.len() * 2,
+                SYSTEM_PROCESSOR_PERFORMANCE_INFO::default(),
+            );
         }
 
         self.cores.clear();
@@ -106,7 +108,9 @@ mod tests {
         let mut buffer = CpuTimesBuffer::new();
         buffer.refresh().unwrap();
 
-        let expected = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1);
+        let expected = std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(1);
         assert_eq!(buffer.cores().len(), expected);
     }
 

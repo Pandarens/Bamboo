@@ -9,10 +9,10 @@ use core::mem::size_of;
 
 use bamboo_core::{Bytes, Error, Result};
 use windows_sys::Win32::Foundation::GetLastError;
+use windows_sys::Win32::System::Memory::SetProcessWorkingSetSizeEx;
 use windows_sys::Win32::System::ProcessStatus::{
     GetProcessMemoryInfo, PROCESS_MEMORY_COUNTERS, PROCESS_MEMORY_COUNTERS_EX,
 };
-use windows_sys::Win32::System::Memory::SetProcessWorkingSetSizeEx;
 use windows_sys::Win32::System::Threading::{
     GetCurrentProcess, ProcessMemoryPriority, ProcessPowerThrottling, SetProcessInformation,
     MEMORY_PRIORITY_INFORMATION, PROCESS_POWER_THROTTLING_CURRENT_VERSION,
@@ -158,6 +158,10 @@ mod tests {
         assert!(mem.private_bytes > Bytes::ZERO);
         // Верхняя граница нарочно щедрая: тестовый бинарник собран
         // без оптимизаций и тащит отладочную информацию.
-        assert!(mem.working_set < Bytes::from_mib(512), "рабочий набор {}", mem.working_set);
+        assert!(
+            mem.working_set < Bytes::from_mib(512),
+            "рабочий набор {}",
+            mem.working_set
+        );
     }
 }

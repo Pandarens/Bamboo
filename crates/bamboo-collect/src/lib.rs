@@ -14,7 +14,9 @@ pub mod collector;
 
 pub use cadence::{Cadence, CadenceController, Conditions};
 pub use ring::RingBuffer;
-pub use table::{MetricPoint, ProcessIdentity, ProcessTable, TickChanges, TrackedProcess, L0_CAPACITY};
+pub use table::{
+    MetricPoint, ProcessIdentity, ProcessTable, TickChanges, TrackedProcess, L0_CAPACITY,
+};
 
 #[cfg(windows)]
 pub use collector::{Collector, Tick};
