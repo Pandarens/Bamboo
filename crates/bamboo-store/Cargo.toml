@@ -1,0 +1,16 @@
+[package]
+name = "bamboo-store"
+description = "Персистентность Bamboo: агрегация временных рядов и SQLite"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+bamboo-core.workspace = true
+# bundled: SQLite собирается из исходников вместе с проектом.
+# Резидентная утилита не должна зависеть от того, что окажется
+# в системе у пользователя.
+rusqlite = { version = "0.37", features = ["bundled"] }
