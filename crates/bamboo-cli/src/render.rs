@@ -2,9 +2,10 @@
 
 use std::time::Duration;
 
+use bamboo_analyze::WearInput;
 use bamboo_collect::{ProcessTable, Tick};
 use bamboo_core::process::IO_COUNTERS_NOTE;
-use bamboo_core::Bytes;
+use bamboo_core::{Bytes, DriveInfo, Result, SmartHealth};
 use bamboo_sys::OwnMemory;
 
 /// Ширина колонки с именем процесса.
@@ -108,6 +109,80 @@ pub fn changes(tick: &Tick) {
             format!(" ({})", names.join(", "))
         }
     );
+}
+
+pub fn drive(info: &DriveInfo, health: Result<SmartHealth>) {
+    println!(
+        "{} — {}, {}, прошивка {}",
+        info.display_name(),
+        info.bus,
+        info.capacity,
+        info.firmware
+    );
+
+    let health = match health {
+        Ok(health) => health,
+        Err(error) => {
+            // Ни оценок, ни «вероятно всё хорошо»: если данных нет,
+            // говорим почему и на этом останавливаемся.
+            println!("  Здоровье прочитать не удалось: {error}");
+            return;
+        }
+    };
+
+    let mut facts: Vec<String> = Vec::new();
+    if let Some(temperature) = health.temperature_c {
+        facts.push(format!("{temperature} °C"));
+    }
+    if let Some(hours) = health.power_on_hours {
+        facts.push(format!("наработка {hours} ч"));
+    }
+    if let Some(cycles) = health.power_cycles {
+        facts.push(format!("включений {cycles}"));
+    }
+    if let Some(shutdowns) = health.unsafe_shutdowns {
+        facts.push(format!("некорректных выключений {shutdowns}"));
+    }
+    if !facts.is_empty() {
+        println!("  {}", facts.join(", "));
+    }
+
+    if let Some(written) = health.data_written {
+        let read = health
+            .data_read
+            .map(|r| format!(", прочитано {r}"))
+            .unwrap_or_default();
+        println!("  Записано за всё время: {written}{read}");
+    }
+
+    // Истории записи пока нет — уровни L2 и L3 появятся в bamboo-store,
+    // поэтому суточный темп и базовую линию передать нечем. Анализатор
+    // это переживает: он просто не строит проекцию.
+    let verdict = bamboo_analyze::wear::analyze(&WearInput {
+        drive_name: &info.display_name(),
+        capacity: info.capacity,
+        health: &health,
+        daily_write: None,
+        baseline_daily_write: None,
+        media_errors_grew: false,
+        top_writers: &[],
+    });
+
+    println!();
+    wrap(&verdict.observation.summary, 78, "  ");
+    if let Some(detail) = &verdict.observation.detail {
+        wrap(detail, 78, "  ");
+    }
+    println!(
+        "  Паспортный ресурс: {}{}",
+        verdict.rating.total,
+        if verdict.rating.is_estimate {
+            " (оценка)"
+        } else {
+            ""
+        }
+    );
+    println!("  Суточный темп записи станет известен, когда накопится история наблюдений.");
 }
 
 pub fn budget_header(duration: Duration) {

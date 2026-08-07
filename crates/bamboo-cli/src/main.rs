@@ -23,6 +23,7 @@ fn main() {
         "snapshot" => commands::snapshot(),
         "watch" => commands::watch(&args[1..]),
         "budget" => commands::budget(&args[1..]),
+        "disk" => commands::disk(),
         "help" | "--help" | "-h" => {
             usage();
             Ok(())
@@ -48,6 +49,7 @@ Bamboo {} — наблюдатель за системой
 
   bamboo snapshot            снимок: загрузка, память, топ потребителей
   bamboo watch [--every N]   непрерывное наблюдение, выход по Ctrl+C
+  bamboo disk                накопители: здоровье, износ, ресурс
   bamboo budget [--for N]    измерить собственное потребление за N секунд
 
 Ничего в системе не изменяется.",
@@ -102,6 +104,22 @@ mod commands {
             render::changes(&tick);
             println!();
         }
+    }
+
+    pub fn disk() -> Result<()> {
+        let drives = bamboo_sys::enumerate_drives();
+        if drives.is_empty() {
+            println!("Ни одного накопителя не удалось открыть.");
+            return Ok(());
+        }
+
+        for (index, info) in drives.iter().enumerate() {
+            if index > 0 {
+                println!();
+            }
+            render::drive(info, bamboo_sys::read_smart(info));
+        }
+        Ok(())
     }
 
     pub fn budget(args: &[String]) -> Result<()> {

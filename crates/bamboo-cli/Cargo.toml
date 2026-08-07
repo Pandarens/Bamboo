@@ -15,6 +15,9 @@ path = "src/main.rs"
 [dependencies]
 bamboo-core.workspace = true
 
+[dependencies.bamboo-analyze]
+path = "../bamboo-analyze"
+
 [target.'cfg(windows)'.dependencies]
 bamboo-collect.workspace = true
 bamboo-sys.workspace = true
