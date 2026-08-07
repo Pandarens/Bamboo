@@ -1,0 +1,12 @@
+/target
+**/*.rs.bk
+*.pdb
+
+# Локальные данные и трассы, снятые на живой машине
+/data
+*.bamboo-trace
+*.etl
+*.dmp
+
+.vscode/
+.idea/

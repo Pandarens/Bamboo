@@ -1,0 +1,27 @@
+[workspace]
+resolver = "2"
+members = ["crates/*"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.82"
+license = "GPL-3.0-or-later"
+repository = "https://github.com/Pandarens/Bamboo"
+authors = ["Pandarens"]
+
+[workspace.dependencies]
+bamboo-core = { path = "crates/bamboo-core" }
+bamboo-sys = { path = "crates/bamboo-sys" }
+bamboo-collect = { path = "crates/bamboo-collect" }
+
+windows-sys = "0.61"
+
+# Резидентная утилита обязана укладываться в ресурсный бюджет (ТЗ, раздел 4),
+# поэтому оптимизируем по размеру, а не по скорости.
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true
