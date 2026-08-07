@@ -393,6 +393,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "bamboo-actuate"
+version = "0.1.0"
+dependencies = [
+ "bamboo-core",
+ "bamboo-journal",
+ "bamboo-policy",
+ "bamboo-sys",
+]
+
+[[package]]
 name = "bamboo-agent"
 version = "0.1.0"
 dependencies = [
@@ -416,10 +426,13 @@ dependencies = [
 name = "bamboo-cli"
 version = "0.1.0"
 dependencies = [
+ "bamboo-actuate",
  "bamboo-analyze",
  "bamboo-collect",
  "bamboo-core",
  "bamboo-etw",
+ "bamboo-journal",
+ "bamboo-policy",
  "bamboo-sys",
 ]
 
@@ -441,6 +454,22 @@ version = "0.1.0"
 dependencies = [
  "bamboo-core",
  "bamboo-sys",
+]
+
+[[package]]
+name = "bamboo-journal"
+version = "0.1.0"
+dependencies = [
+ "bamboo-core",
+ "bamboo-policy",
+ "rusqlite",
+]
+
+[[package]]
+name = "bamboo-policy"
+version = "0.1.0"
+dependencies = [
+ "bamboo-core",
 ]
 
 [[package]]

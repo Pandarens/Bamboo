@@ -6,6 +6,8 @@
 #![forbid(unsafe_code)]
 
 #[cfg(windows)]
+mod optimize;
+#[cfg(windows)]
 mod render;
 
 #[cfg(not(windows))]
@@ -27,6 +29,9 @@ fn main() {
         "boot" => commands::boot(),
         "power" => commands::power(),
         "trace" => commands::trace(&args[1..]),
+        "optimize" => optimize::plan(args.iter().any(|arg| arg == "--apply")),
+        "journal" => optimize::show_journal(),
+        "revert" => optimize::revert(&args[1..]),
         "help" | "--help" | "-h" => {
             usage();
             Ok(())
@@ -58,7 +63,14 @@ Bamboo {} — наблюдатель за системой
   bamboo trace [--for N]     короткоживущие процессы, невидимые для опроса
   bamboo budget [--for N]    измерить собственное потребление за N секунд
 
-Ничего в системе не изменяется.",
+  bamboo optimize            показать, что было бы сделано (ничего не меняет)
+  bamboo optimize --apply    применить действия, записав их в журнал
+  bamboo journal             журнал действий
+  bamboo revert --id N       откатить одно действие
+  bamboo revert --all        откатить всё
+
+Всё, кроме optimize --apply, только читает систему.
+Любое применённое действие обратимо.",
         env!("CARGO_PKG_VERSION")
     );
 }

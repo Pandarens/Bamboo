@@ -1,0 +1,17 @@
+[package]
+name = "bamboo-actuate"
+description = "Исполнение действий Bamboo и обратных рецептов"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+bamboo-core.workspace = true
+bamboo-journal = { path = "../bamboo-journal" }
+bamboo-policy = { path = "../bamboo-policy" }
+
+[target.'cfg(windows)'.dependencies]
+bamboo-sys.workspace = true

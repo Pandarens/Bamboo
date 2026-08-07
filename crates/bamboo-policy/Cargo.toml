@@ -1,0 +1,12 @@
+[package]
+name = "bamboo-policy"
+description = "Политики Bamboo: уровни риска, белые списки, допустимость действий"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+bamboo-core.workspace = true

@@ -2,11 +2,14 @@
 
 use std::time::Duration;
 
+use bamboo_actuate::Outcome;
 use bamboo_analyze::{BootPoint, WearInput};
 use bamboo_collect::{ProcessTable, Tick};
 use bamboo_core::process::IO_COUNTERS_NOTE;
 use bamboo_core::{Bytes, DriveInfo, Result, SmartHealth};
 use bamboo_etw::{ProcessTracker, Recorder};
+use bamboo_journal::Entry;
+use bamboo_policy::Decision;
 use bamboo_sys::{BootCulprit, BootRecord, OwnMemory, WakeEvent};
 
 /// Ширина колонки с именем процесса.
@@ -361,6 +364,74 @@ pub fn trace(tracker: &ProcessTracker, recorder: &Recorder, total_events: u32, d
             invisible.len()
         );
     }
+}
+
+pub fn proposals(proposals: &[crate::optimize::Proposal], apply: bool) {
+    if proposals.is_empty() {
+        println!("Фоновых процессов, которым есть что предложить, не нашлось.");
+        return;
+    }
+
+    if apply {
+        println!("Применяю действия. Каждое записывается в журнал и обратимо.\n");
+    } else {
+        println!(
+            "Режим симуляции: ничего не меняется. Вот что было бы сделано.\n\
+             Чтобы применить: bamboo optimize --apply\n"
+        );
+    }
+
+    println!(
+        "{:<NAME_WIDTH$} {:>7} {:>6}  Решение",
+        "Процесс", "PID", "CPU"
+    );
+    for proposal in proposals {
+        let verdict = match &proposal.decision {
+            Decision::Apply => proposal.action.to_string(),
+            Decision::Offer => format!("{} (с подтверждением)", proposal.action),
+            Decision::Refuse(reason) => format!("не трогаем — {reason}"),
+        };
+        println!(
+            "{:<NAME_WIDTH$} {:>7} {:>5.1}%  {verdict}",
+            clip(&proposal.image_name),
+            proposal.pid,
+            proposal.cpu_share * 100.0,
+        );
+    }
+}
+
+pub fn outcome(image_name: &str, pid: u32, outcome: &Outcome) {
+    println!("  {image_name} (PID {pid}): {}", outcome.describe());
+}
+
+pub fn journal(entries: &[Entry], path: &str) {
+    println!("Журнал действий: {path}\n");
+
+    if entries.is_empty() {
+        println!("Записей нет — Bamboo пока ничего не менял в системе.");
+        return;
+    }
+
+    println!(
+        "{:>5} {:<18} {:<26} {:<32} Статус",
+        "№", "Когда", "Что", "Над чем"
+    );
+    for entry in entries {
+        println!(
+            "{:>5} {:<18} {:<26} {:<32} {}",
+            entry.id,
+            date(entry.at_unix_ms),
+            entry.action.name(),
+            clip(&entry.target.describe()),
+            entry.status.as_str(),
+        );
+        if let Some(reason) = &entry.revert_reason {
+            println!("      причина отката: {reason}");
+        }
+    }
+
+    let active = entries.iter().filter(|e| e.status.is_active()).count();
+    println!("\nСейчас действует изменений: {active}. Полный откат: bamboo revert --all");
 }
 
 pub fn budget_header(duration: Duration) {

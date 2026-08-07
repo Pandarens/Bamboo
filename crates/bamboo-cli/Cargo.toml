@@ -18,6 +18,15 @@ bamboo-core.workspace = true
 [dependencies.bamboo-analyze]
 path = "../bamboo-analyze"
 
+[dependencies.bamboo-policy]
+path = "../bamboo-policy"
+
+[dependencies.bamboo-journal]
+path = "../bamboo-journal"
+
+[dependencies.bamboo-actuate]
+path = "../bamboo-actuate"
+
 [target.'cfg(windows)'.dependencies]
 bamboo-collect.workspace = true
 bamboo-etw = { path = "../bamboo-etw" }
