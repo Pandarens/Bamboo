@@ -3,6 +3,13 @@
 version = 3
 
 [[package]]
+name = "bamboo-analyze"
+version = "0.1.0"
+dependencies = [
+ "bamboo-core",
+]
+
+[[package]]
 name = "bamboo-cli"
 version = "0.1.0"
 dependencies = [
