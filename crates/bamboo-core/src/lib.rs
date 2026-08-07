@@ -9,6 +9,7 @@
 pub mod app;
 pub mod error;
 pub mod process;
+pub mod storage;
 pub mod system;
 pub mod time;
 pub mod units;
@@ -16,6 +17,7 @@ pub mod units;
 pub use app::AppKey;
 pub use error::{Error, Result};
 pub use process::{Pid, ProcessId, ProcessSample};
+pub use storage::{BusType, CriticalWarning, DriveInfo, SmartHealth, SmartSource};
 pub use system::{CoreTimes, MemoryStat, SystemSample};
 pub use time::SampleTime;
 pub use units::{Bytes, Nanos};

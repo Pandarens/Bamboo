@@ -15,6 +15,7 @@ pub mod memory;
 pub mod nt;
 pub mod power;
 pub mod process;
+pub mod storage;
 pub mod user;
 
 pub use budget::{apply_self_limits, own_memory, OwnMemory};
@@ -23,4 +24,5 @@ pub use cpu::CpuTimesBuffer;
 pub use memory::{memory_stat, system_counts, SystemCounts};
 pub use power::{power_status, PowerSource, PowerStatus};
 pub use process::{ProcessBuffer, ProcessIter, RawProcess};
+pub use storage::{enumerate as enumerate_drives, read_smart, Drive};
 pub use user::{idle_ms, notification_state, NotificationState};
