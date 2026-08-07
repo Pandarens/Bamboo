@@ -1,0 +1,15 @@
+[package]
+name = "bamboo-collect"
+description = "Семплирование системы, кольцевые буферы и вычисление дельт"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+bamboo-core.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+bamboo-sys.workspace = true
