@@ -31,6 +31,10 @@ pub enum ObservationKind {
     HandleGrowth,
     /// Рост числа объектов GDI или User.
     GdiGrowth,
+    /// Загрузка системы стала дольше.
+    BootRegression,
+    /// Система просыпается сама.
+    Wakeups,
 }
 
 impl ObservationKind {
@@ -40,6 +44,8 @@ impl ObservationKind {
             ObservationKind::MemoryGrowth => "рост памяти",
             ObservationKind::HandleGrowth => "рост числа дескрипторов",
             ObservationKind::GdiGrowth => "рост числа объектов GDI",
+            ObservationKind::BootRegression => "время загрузки",
+            ObservationKind::Wakeups => "пробуждения",
         }
     }
 }

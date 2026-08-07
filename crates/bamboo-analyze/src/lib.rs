@@ -8,12 +8,14 @@
 
 #![forbid(unsafe_code)]
 
+pub mod boot;
 pub mod growth;
 pub mod observation;
 pub mod regression;
 pub mod tbw;
 pub mod wear;
 
+pub use boot::{BootPoint, BootVerdict};
 pub use growth::{GrowthInput, Point};
 pub use observation::{Observation, ObservationKind, Severity};
 pub use regression::{fit, Trend};

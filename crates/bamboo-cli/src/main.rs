@@ -24,6 +24,8 @@ fn main() {
         "watch" => commands::watch(&args[1..]),
         "budget" => commands::budget(&args[1..]),
         "disk" => commands::disk(),
+        "boot" => commands::boot(),
+        "power" => commands::power(),
         "help" | "--help" | "-h" => {
             usage();
             Ok(())
@@ -50,6 +52,8 @@ Bamboo {} — наблюдатель за системой
   bamboo snapshot            снимок: загрузка, память, топ потребителей
   bamboo watch [--every N]   непрерывное наблюдение, выход по Ctrl+C
   bamboo disk                накопители: здоровье, износ, ресурс
+  bamboo boot                время загрузки и что его удлиняет
+  bamboo power               пробуждения из сна и их причины
   bamboo budget [--for N]    измерить собственное потребление за N секунд
 
 Ничего в системе не изменяется.",
@@ -119,6 +123,26 @@ mod commands {
             }
             render::drive(info, bamboo_sys::read_smart(info));
         }
+        Ok(())
+    }
+
+    pub fn boot() -> Result<()> {
+        // Канал диагностики закрыт для обычного пользователя. В продукте
+        // его читает брокер под SYSTEM, здесь честно говорим, чего не хватает.
+        let history = match bamboo_sys::boot_history(40) {
+            Ok(history) => history,
+            Err(error) => {
+                println!("Историю загрузок прочитать не удалось: {error}");
+                return Ok(());
+            }
+        };
+        let culprits = bamboo_sys::boot_culprits(40).unwrap_or_default();
+        render::boot(&history, &culprits);
+        Ok(())
+    }
+
+    pub fn power() -> Result<()> {
+        render::wakeups(&bamboo_sys::wake_history(30)?);
         Ok(())
     }
 
