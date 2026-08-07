@@ -8,7 +8,13 @@
 
 #![cfg(windows)]
 
+pub mod clock;
+pub mod cpu;
+pub mod memory;
 pub mod nt;
 pub mod process;
 
+pub use clock::{monotonic_ms, now};
+pub use cpu::CpuTimesBuffer;
+pub use memory::{memory_stat, system_counts, SystemCounts};
 pub use process::{ProcessBuffer, ProcessIter, RawProcess};
