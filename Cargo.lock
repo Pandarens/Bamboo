@@ -457,6 +457,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "bamboo-ipc"
+version = "0.1.0"
+dependencies = [
+ "bamboo-core",
+ "bamboo-policy",
+]
+
+[[package]]
 name = "bamboo-journal"
 version = "0.1.0"
 dependencies = [
