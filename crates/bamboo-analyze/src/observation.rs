@@ -39,6 +39,8 @@ pub enum ObservationKind {
     BackgroundCpu,
     /// Нагрузка на уровне драйверов.
     DriverLoad,
+    /// Приложение простаивает, но тратит ресурсы.
+    IdleApp,
 }
 
 impl ObservationKind {
@@ -52,6 +54,7 @@ impl ObservationKind {
             ObservationKind::Wakeups => "пробуждения",
             ObservationKind::BackgroundCpu => "фоновая нагрузка",
             ObservationKind::DriverLoad => "нагрузка драйверов",
+            ObservationKind::IdleApp => "простаивающее приложение",
         }
     }
 }
