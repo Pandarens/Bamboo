@@ -26,6 +26,7 @@ fn main() {
         "disk" => commands::disk(),
         "boot" => commands::boot(),
         "power" => commands::power(),
+        "trace" => commands::trace(&args[1..]),
         "help" | "--help" | "-h" => {
             usage();
             Ok(())
@@ -54,6 +55,7 @@ Bamboo {} — наблюдатель за системой
   bamboo disk                накопители: здоровье, износ, ресурс
   bamboo boot                время загрузки и что его удлиняет
   bamboo power               пробуждения из сна и их причины
+  bamboo trace [--for N]     короткоживущие процессы, невидимые для опроса
   bamboo budget [--for N]    измерить собственное потребление за N секунд
 
 Ничего в системе не изменяется.",
@@ -143,6 +145,50 @@ mod commands {
 
     pub fn power() -> Result<()> {
         render::wakeups(&bamboo_sys::wake_history(30)?);
+        Ok(())
+    }
+
+    pub fn trace(args: &[String]) -> Result<()> {
+        use bamboo_etw::{ProcessTracker, Recorder};
+
+        let duration = flag_secs(args, "--for").unwrap_or(Duration::from_secs(30));
+
+        // Держим сессию живой всё время чтения: её Drop останавливает
+        // трассировку, а сессия ETW переживает процесс и без остановки
+        // осталась бы висеть в системе.
+        let _session = match bamboo_etw::ProcessTrace::start() {
+            Ok(session) => session,
+            Err(error) => {
+                println!("Трассировку запустить не удалось: {error}");
+                return Ok(());
+            }
+        };
+
+        println!(
+            "Слушаю запуски и завершения процессов {} с.\n\
+             Опрос такие процессы не видит: они успевают умереть между снимками.\n",
+            duration.as_secs()
+        );
+
+        // Остановка сессии из другого потока — это и есть способ прервать
+        // чтение: consume блокируется до конца сессии.
+        std::thread::spawn(move || {
+            std::thread::sleep(duration);
+            let _ = bamboo_etw::stop_stale();
+        });
+
+        let mut tracker = ProcessTracker::new();
+        let mut recorder = Recorder::new();
+        let mut total = 0u32;
+
+        bamboo_etw::ProcessTrace::consume(&mut |event| {
+            tracker.observe(&event);
+            recorder.record(event);
+            total += 1;
+            true
+        })?;
+
+        render::trace(&tracker, &recorder, total, duration);
         Ok(())
     }
 

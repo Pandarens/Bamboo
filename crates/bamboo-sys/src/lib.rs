@@ -12,6 +12,7 @@ pub mod boot;
 pub mod budget;
 pub mod clock;
 pub mod cpu;
+pub mod etw;
 pub mod eventlog;
 pub mod memory;
 pub mod nt;

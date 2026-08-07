@@ -86,6 +86,22 @@ pub fn parse_iso8601_utc_ms(text: &str) -> Option<i64> {
     Some(((days * 86_400 + hour * 3_600 + minute * 60 + second) * 1000) + fraction_ms)
 }
 
+/// Разница между эпохами Windows и Unix в интервалах по 100 нс.
+/// Windows считает время от 1 января 1601 года.
+const FILETIME_TO_UNIX_OFFSET: i64 = 116_444_736_000_000_000;
+
+/// Переводит `FILETIME` в миллисекунды эпохи Unix.
+///
+/// В этом виде время приходит из ETW и из полей `CreateTime` у процессов.
+pub fn filetime_to_unix_ms(filetime: i64) -> i64 {
+    (filetime - FILETIME_TO_UNIX_OFFSET) / 10_000
+}
+
+/// Обратный перевод.
+pub fn unix_ms_to_filetime(unix_ms: i64) -> i64 {
+    unix_ms * 10_000 + FILETIME_TO_UNIX_OFFSET
+}
+
 /// Число дней от 1970-01-01. Алгоритм Говарда Хиннанта: работает
 /// для любых дат григорианского календаря без таблиц и ветвлений по годам.
 fn days_from_civil(year: i64, month: u32, day: u32) -> i64 {
@@ -156,6 +172,26 @@ mod tests {
         assert_eq!(parse_iso8601_utc_ms("не дата"), None);
         assert_eq!(parse_iso8601_utc_ms("2026-13-01T00:00:00Z"), None);
         assert_eq!(parse_iso8601_utc_ms("2026-08-07 09:12:33"), None);
+    }
+
+    #[test]
+    fn filetime_epoch_matches_unix_epoch() {
+        assert_eq!(filetime_to_unix_ms(FILETIME_TO_UNIX_OFFSET), 0);
+        assert_eq!(unix_ms_to_filetime(0), FILETIME_TO_UNIX_OFFSET);
+    }
+
+    #[test]
+    fn filetime_round_trips() {
+        let unix_ms = parse_iso8601_utc_ms("2026-08-07T09:12:33.123Z").unwrap();
+        assert_eq!(filetime_to_unix_ms(unix_ms_to_filetime(unix_ms)), unix_ms);
+    }
+
+    #[test]
+    fn a_known_filetime_converts_correctly() {
+        // 2000-01-01T00:00:00Z в интервалах по 100 нс от 1601 года.
+        let filetime = 125_911_584_000_000_000;
+        let expected = parse_iso8601_utc_ms("2000-01-01T00:00:00Z").unwrap();
+        assert_eq!(filetime_to_unix_ms(filetime), expected);
     }
 
     #[test]

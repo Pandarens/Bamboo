@@ -419,6 +419,7 @@ dependencies = [
  "bamboo-analyze",
  "bamboo-collect",
  "bamboo-core",
+ "bamboo-etw",
  "bamboo-sys",
 ]
 
@@ -433,6 +434,14 @@ dependencies = [
 [[package]]
 name = "bamboo-core"
 version = "0.1.0"
+
+[[package]]
+name = "bamboo-etw"
+version = "0.1.0"
+dependencies = [
+ "bamboo-core",
+ "bamboo-sys",
+]
 
 [[package]]
 name = "bamboo-store"

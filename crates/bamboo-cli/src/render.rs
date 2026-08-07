@@ -6,6 +6,7 @@ use bamboo_analyze::{BootPoint, WearInput};
 use bamboo_collect::{ProcessTable, Tick};
 use bamboo_core::process::IO_COUNTERS_NOTE;
 use bamboo_core::{Bytes, DriveInfo, Result, SmartHealth};
+use bamboo_etw::{ProcessTracker, Recorder};
 use bamboo_sys::{BootCulprit, BootRecord, OwnMemory, WakeEvent};
 
 /// Ширина колонки с именем процесса.
@@ -312,6 +313,54 @@ fn civil_from_days(days: i64) -> (i64, u32, u32) {
     let day = (day_of_year - (153 * month_prime + 2) / 5 + 1) as u32;
     let month = (month_prime + if month_prime < 10 { 3 } else { -9 }) as u32;
     (year + if month <= 2 { 1 } else { 0 }, month, day)
+}
+
+pub fn trace(tracker: &ProcessTracker, recorder: &Recorder, total_events: u32, duration: Duration) {
+    println!(
+        "Событий за {} с: {total_events}. Завершившихся процессов: {}.",
+        duration.as_secs(),
+        tracker.completed().len()
+    );
+    println!(
+        "В буфере видеорегистратора: {} событий, {}.",
+        recorder.buffered_events(),
+        Bytes(recorder.buffered_bytes() as u64)
+    );
+
+    let summary = tracker.summary();
+    if summary.is_empty() {
+        println!("\nЗа это время не завершился ни один процесс из запущенных при нас.");
+        return;
+    }
+
+    println!("\nКто запускался чаще всего:");
+    println!(
+        "{:<NAME_WIDTH$} {:>8} {:>10} {:>10}",
+        "Образ", "запусков", "самый", "суммарно"
+    );
+    for image in summary.iter().take(10) {
+        println!(
+            "{:<NAME_WIDTH$} {:>8} {:>9.1} с {:>9.1} с",
+            clip(&image.image_name),
+            image.launches,
+            image.shortest_ms as f64 / 1000.0,
+            image.total_lifetime_ms as f64 / 1000.0,
+        );
+    }
+
+    // Ровно то, ради чего нужен ETW: процессы, которых обычный монитор
+    // с пятисекундным опросом просто не увидит.
+    let invisible = tracker.invisible_to_polling(5_000);
+    println!();
+    if invisible.is_empty() {
+        println!("  Все процессы прожили дольше пяти секунд — опрос увидел бы их сам.");
+    } else {
+        println!(
+            "  {} из них прожили меньше пяти секунд: обычный монитор\n\
+             \x20 с таким интервалом опроса их бы не заметил.",
+            invisible.len()
+        );
+    }
 }
 
 pub fn budget_header(duration: Duration) {

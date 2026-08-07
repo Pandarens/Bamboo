@@ -20,4 +20,5 @@ path = "../bamboo-analyze"
 
 [target.'cfg(windows)'.dependencies]
 bamboo-collect.workspace = true
+bamboo-etw = { path = "../bamboo-etw" }
 bamboo-sys.workspace = true
