@@ -231,9 +231,67 @@ impl<'a> RawProcess<'a> {
     }
 }
 
+/// Полный путь образа процесса.
+///
+/// Вызывается по требованию — один раз на впервые увиденный процесс,
+/// а не в цикле опроса. Здесь всё-таки открывается дескриптор чужого процесса,
+/// поэтому запрашиваем минимально возможные права
+/// (`PROCESS_QUERY_LIMITED_INFORMATION`) и сразу закрываем.
+///
+/// Для процессов ядра и защищённых процессов вернётся ошибка доступа —
+/// это нормально, вызывающий откатывается на имя образа из снимка.
+pub fn full_image_path(pid: u32) -> Result<String> {
+    use windows_sys::Win32::Foundation::CloseHandle;
+    use windows_sys::Win32::System::Threading::{
+        OpenProcess, QueryFullProcessImageNameW, PROCESS_QUERY_LIMITED_INFORMATION,
+    };
+
+    if pid == 0 {
+        return Err(Error::Unsupported("процесс Idle не имеет образа"));
+    }
+
+    let handle = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) };
+    if handle.is_null() {
+        return Err(Error::Win32 {
+            call: "OpenProcess",
+            code: unsafe { windows_sys::Win32::Foundation::GetLastError() },
+        });
+    }
+
+    let mut buffer = [0u16; 32768 / 4];
+    let mut size = buffer.len() as u32;
+    let ok = unsafe { QueryFullProcessImageNameW(handle, 0, buffer.as_mut_ptr(), &mut size) };
+    let error = unsafe { windows_sys::Win32::Foundation::GetLastError() };
+    unsafe { CloseHandle(handle) };
+
+    if ok == 0 {
+        return Err(Error::Win32 {
+            call: "QueryFullProcessImageNameW",
+            code: error,
+        });
+    }
+
+    Ok(String::from_utf16_lossy(&buffer[..size as usize]))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn own_image_path_is_resolvable() {
+        let path = full_image_path(std::process::id()).unwrap();
+        assert!(path.to_lowercase().ends_with(".exe"), "путь: {path}");
+        assert!(path.contains('\\'));
+    }
+
+    #[test]
+    fn kernel_processes_report_an_error_not_a_guess() {
+        // System (PID 4) недоступен даже администратору. По ТЗ при
+        // невозможности прочитать данные полагается сказать «не могу»,
+        // а не подставить правдоподобное значение.
+        assert!(full_image_path(4).is_err());
+    }
 
     #[test]
     fn snapshot_sees_the_current_process() {
