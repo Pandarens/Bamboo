@@ -1,0 +1,78 @@
+# Непрерывная интеграция (ТЗ, разделы 15.3 и 16).
+#
+# Собирает, проверяет и прогоняет тесты на матрице окружений. Ресурсный
+# бюджет из раздела 4 здесь не измеряется — для этого нужен суточный прогон
+# на выделенной машине (отдельный workflow), а не CI на каждый коммит.
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+env:
+  CARGO_TERM_COLOR: always
+  # Тесты трогают живую систему (снимок процессов, память). В CI это ок,
+  # но без гонок: один поток.
+  RUST_BACKTRACE: 1
+
+jobs:
+  check:
+    name: Проверка и тесты
+    strategy:
+      fail-fast: false
+      matrix:
+        # Матрица окружений из раздела 16.2. Основная платформа — Windows;
+        # ubuntu держим, чтобы ловить нарушения инварианта «bamboo-analyze
+        # и bamboo-core не знают о Windows».
+        include:
+          - os: windows-latest
+            name: Windows x64
+          - os: ubuntu-latest
+            name: Linux (только платформенно-независимые крейты)
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Кэш
+        uses: Swatinem/rust-cache@v2
+
+      - name: Формат
+        run: cargo fmt --all --check
+
+      # На Windows собираем и тестируем весь воркспейс. На Linux —
+      # только крейты без зависимости от Windows: они обязаны собираться
+      # где угодно, это инвариант проекта.
+      - name: Clippy (Windows)
+        if: runner.os == 'Windows'
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: Тесты (Windows)
+        if: runner.os == 'Windows'
+        run: cargo test --workspace
+
+      - name: Clippy платформенно-независимых (Linux)
+        if: runner.os == 'Linux'
+        run: cargo clippy -p bamboo-core -p bamboo-analyze -p bamboo-store -p bamboo-policy -p bamboo-journal --all-targets -- -D warnings
+
+      - name: Тесты платформенно-независимых (Linux)
+        if: runner.os == 'Linux'
+        run: cargo test -p bamboo-core -p bamboo-analyze -p bamboo-store -p bamboo-policy -p bamboo-journal
+
+  deny:
+    name: Лицензии, уязвимости, дубликаты
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: cargo-deny
+        uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check

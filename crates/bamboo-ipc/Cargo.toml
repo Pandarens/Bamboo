@@ -10,6 +10,6 @@ authors.workspace = true
 
 [dependencies]
 bamboo-core.workspace = true
-bamboo-policy = { path = "../bamboo-policy" }
+bamboo-policy.workspace = true
 serde = { version = "1", features = ["derive"] }
 bincode = "1.3"

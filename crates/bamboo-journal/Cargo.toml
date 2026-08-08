@@ -10,5 +10,5 @@ authors.workspace = true
 
 [dependencies]
 bamboo-core.workspace = true
-bamboo-policy = { path = "../bamboo-policy" }
+bamboo-policy.workspace = true
 rusqlite = { version = "0.37", features = ["bundled"] }

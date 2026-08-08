@@ -14,20 +14,12 @@ path = "src/main.rs"
 
 [dependencies]
 bamboo-core.workspace = true
-
-[dependencies.bamboo-analyze]
-path = "../bamboo-analyze"
-
-[dependencies.bamboo-policy]
-path = "../bamboo-policy"
-
-[dependencies.bamboo-journal]
-path = "../bamboo-journal"
-
-[dependencies.bamboo-actuate]
-path = "../bamboo-actuate"
+bamboo-analyze.workspace = true
+bamboo-policy.workspace = true
+bamboo-journal.workspace = true
+bamboo-actuate.workspace = true
 
 [target.'cfg(windows)'.dependencies]
 bamboo-collect.workspace = true
-bamboo-etw = { path = "../bamboo-etw" }
+bamboo-etw.workspace = true
 bamboo-sys.workspace = true

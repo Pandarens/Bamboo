@@ -10,8 +10,8 @@ authors.workspace = true
 
 [dependencies]
 bamboo-core.workspace = true
-bamboo-journal = { path = "../bamboo-journal" }
-bamboo-policy = { path = "../bamboo-policy" }
+bamboo-journal.workspace = true
+bamboo-policy.workspace = true
 
 [target.'cfg(windows)'.dependencies]
 bamboo-sys.workspace = true
