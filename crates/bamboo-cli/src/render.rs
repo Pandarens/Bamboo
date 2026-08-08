@@ -444,6 +444,29 @@ pub fn system_diff(observation: &bamboo_analyze::Observation) {
     }
 }
 
+pub fn watchdog_sweep(sweep: &bamboo_actuate::WatchdogSweep) {
+    if sweep.reverted.is_empty() && sweep.expired.is_empty() {
+        println!(
+            "Сторож прошёл по журналу: откатывать нечего, окна наблюдения\n\
+             ещё открыты. Это обычный исход — деградации нет."
+        );
+        return;
+    }
+
+    if !sweep.reverted.is_empty() {
+        println!("Откачено из-за деградации:");
+        for (id, reason) in &sweep.reverted {
+            println!("  запись №{id}: {reason}");
+        }
+    }
+    if !sweep.expired.is_empty() {
+        println!(
+            "Прижилось без проблем и снято с наблюдения: {} записей.",
+            sweep.expired.len()
+        );
+    }
+}
+
 pub fn leaks(observations: &[bamboo_analyze::Observation], watched: Duration) {
     if observations.is_empty() {
         println!(

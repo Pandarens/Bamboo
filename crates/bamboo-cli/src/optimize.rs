@@ -141,6 +141,32 @@ fn context<'a>(process: &'a TrackedProcess, whitelist: &'a UserWhitelist) -> Con
     }
 }
 
+/// Прогоняет сторожевой таймер один раз по действующим записям журнала.
+///
+/// Что делает проход: закрывает окна наблюдения у прижившихся изменений
+/// и откатывает те, после которых система деградировала. Живую пробу
+/// здоровья строит на месте — она читает ошибки в журналах за сутки
+/// и время загрузки.
+///
+/// Оговорка по устройству: базовую линию здоровья проба снимает в момент
+/// применения и держит в памяти процесса. Одноразовый запуск CLI её не
+/// застаёт, поэтому здесь отрабатывает в первую очередь закрытие окон;
+/// автооткат по здоровью работает в резидентном брокере, где применение
+/// и наблюдение идут в одном процессе.
+#[cfg(windows)]
+pub fn watchdog() -> Result<()> {
+    use bamboo_actuate::LiveHealthProbe;
+
+    let journal = open_journal()?;
+    let executor = Executor::new(&journal, SystemBackend);
+    let probe = LiveHealthProbe::new();
+    let now = bamboo_core::SampleTime::wall_clock_now();
+
+    let sweep = bamboo_actuate::sweep(&executor, &journal, &probe, now);
+    crate::render::watchdog_sweep(&sweep);
+    Ok(())
+}
+
 /// Печатает журнал действий.
 pub fn show_journal() -> Result<()> {
     let journal = open_journal()?;

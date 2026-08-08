@@ -34,6 +34,7 @@ fn main() {
         "diff" => commands::diff(),
         "optimize" => optimize::plan(args.iter().any(|arg| arg == "--apply")),
         "journal" => optimize::show_journal(),
+        "watchdog" => optimize::watchdog(),
         "revert" => optimize::revert(&args[1..]),
         "help" | "--help" | "-h" => {
             usage();
@@ -72,6 +73,7 @@ Bamboo {} — наблюдатель за системой
   bamboo optimize            показать, что было бы сделано (ничего не меняет)
   bamboo optimize --apply    применить действия, записав их в журнал
   bamboo journal             журнал действий
+  bamboo watchdog            прогон сторожа: закрыть окна, откатить деградации
   bamboo revert --id N       откатить одно действие
   bamboo revert --all        откатить всё
 
