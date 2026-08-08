@@ -151,6 +151,13 @@ unsafe fn utf16_ptr(ptr: *const u16) -> String {
     String::from_utf16_lossy(core::slice::from_raw_parts(ptr, len))
 }
 
+// Перечисление драйверов ядра (ТЗ, раздел 9.9) осознанно отложено.
+// EnumDeviceDrivers отдаёт 213 базовых адресов, но GetDeviceDriverBaseNameW
+// под обычным пользователем не резолвит ни один из них (проверено вживую:
+// resolved=0 без кода ошибки). Имена драйверов надёжно доступны либо
+// от администратора, либо через реестр DriverDatabase — это отдельный кусок.
+// Пока системный дифф работает по службам и автозагрузке.
+
 #[cfg(test)]
 mod tests {
     use super::*;
