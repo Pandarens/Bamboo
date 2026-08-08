@@ -138,6 +138,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let weak = widget.as_weak();
     let main_weak = main_window.as_weak();
     let timer = slint::Timer::default();
+    // Состояние автоскрытия в полноэкранном режиме (ТЗ 14.2). Реагируем на
+    // переходы, а не на само состояние: иначе, если пользователь вручную
+    // вернёт виджет поверх игры, мы бы прятали его снова каждый тик.
+    let mut was_fullscreen = false;
+    let mut hidden_for_fullscreen = false;
     timer.start(
         slint::TimerMode::Repeated,
         // Опрашиваем канал чаще, чем приходят данные: так виджет реагирует
@@ -147,6 +152,30 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let Some(widget) = weak.upgrade() else {
                 return;
             };
+
+            // Полноэкранное приложение (игра, презентация, видео) не должно
+            // перекрываться виджетом. Прячем на входе в полный экран и
+            // возвращаем на выходе — но только если прятали сами.
+            let fullscreen = bamboo_sys::notification_state().is_fullscreen();
+            match fullscreen_action(
+                fullscreen,
+                was_fullscreen,
+                widget.window().is_visible(),
+                hidden_for_fullscreen,
+            ) {
+                FullscreenAction::Hide => {
+                    widget.window().hide().ok();
+                    visible.store(false, Ordering::Relaxed);
+                    hidden_for_fullscreen = true;
+                }
+                FullscreenAction::Restore => {
+                    widget.window().show().ok();
+                    visible.store(true, Ordering::Relaxed);
+                    hidden_for_fullscreen = false;
+                }
+                FullscreenAction::None => {}
+            }
+            was_fullscreen = fullscreen;
 
             if let Some(tray) = &tray {
                 for action in tray.poll() {
@@ -240,6 +269,40 @@ fn to_journal_row(row: mainwin::JournalRow) -> JournalRow {
         action: SharedString::from(row.action),
         target: SharedString::from(row.target),
         status: SharedString::from(row.status),
+    }
+}
+
+/// Что сделать с виджетом на переходе полноэкранного режима (ТЗ 14.2).
+#[cfg(windows)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum FullscreenAction {
+    /// Спрятать: вошли в полный экран, а виджет на экране.
+    Hide,
+    /// Вернуть: вышли из полного экрана, и прятали его мы.
+    Restore,
+    /// Ничего не делать.
+    None,
+}
+
+/// Решение об автоскрытии по фронту полноэкранного режима.
+///
+/// Реагируем именно на переход, а не на само состояние: если пользователь
+/// вручную вернул виджет поверх полноэкранного приложения, дёргать его
+/// каждый тик нельзя. И возвращаем окно только если прятали сами —
+/// самостоятельно скрытый пользователем виджет всплывать не должен.
+#[cfg(windows)]
+fn fullscreen_action(
+    fullscreen: bool,
+    was_fullscreen: bool,
+    widget_visible: bool,
+    hidden_by_us: bool,
+) -> FullscreenAction {
+    if fullscreen && !was_fullscreen && widget_visible {
+        FullscreenAction::Hide
+    } else if !fullscreen && was_fullscreen && hidden_by_us {
+        FullscreenAction::Restore
+    } else {
+        FullscreenAction::None
     }
 }
 
@@ -346,4 +409,59 @@ fn apply_window_look(widget: &Widget) {
     // окно просто останется обычным.
     let _ = bamboo_sys::window::apply_widget_styles(hwnd);
     let _ = bamboo_sys::window::apply_windows11_look(hwnd);
+}
+
+#[cfg(all(windows, test))]
+mod tests {
+    use super::{fullscreen_action, FullscreenAction};
+
+    #[test]
+    fn entering_fullscreen_hides_a_visible_widget() {
+        // Вошли в полный экран (переход false→true), виджет на экране.
+        assert_eq!(
+            fullscreen_action(true, false, true, false),
+            FullscreenAction::Hide
+        );
+    }
+
+    #[test]
+    fn a_hidden_widget_is_not_touched_on_entry() {
+        // Виджет и так скрыт — прятать нечего.
+        assert_eq!(
+            fullscreen_action(true, false, false, false),
+            FullscreenAction::None
+        );
+    }
+
+    #[test]
+    fn leaving_fullscreen_restores_only_what_we_hid() {
+        // Выход из полного экрана, прятали сами — возвращаем.
+        assert_eq!(
+            fullscreen_action(false, true, false, true),
+            FullscreenAction::Restore
+        );
+        // Выход, но прятали не мы (пользователь сам закрыл) — не всплываем.
+        assert_eq!(
+            fullscreen_action(false, true, false, false),
+            FullscreenAction::None
+        );
+    }
+
+    #[test]
+    fn staying_fullscreen_does_nothing_even_if_user_reopens() {
+        // Полный экран продолжается (true→true). Пользователь вернул виджет
+        // вручную — трогать его на каждом тике нельзя, реагируем на переход.
+        assert_eq!(
+            fullscreen_action(true, true, true, true),
+            FullscreenAction::None
+        );
+    }
+
+    #[test]
+    fn staying_windowed_does_nothing() {
+        assert_eq!(
+            fullscreen_action(false, false, true, false),
+            FullscreenAction::None
+        );
+    }
 }
