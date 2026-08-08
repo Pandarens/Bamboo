@@ -34,17 +34,52 @@ fn main() {
                 std::process::exit(1);
             }
         }
-        "help" | "--help" => {
-            println!(
-                "Брокер Bamboo\n\n\
-                 bamboo-service console   запустить в консоли (для отладки)\n\n\
-                 Требует прав администратора: под обычным пользователем\n\
-                 привилегированные операции недоступны."
-            );
+        // Запуск диспетчером служб. Этим аргументом брокер прописан
+        // в команде запуска службы.
+        "service" => {
+            if let Err(error) = bamboo_sys::service::run_as_service(broker::run_as_service) {
+                eprintln!("не удалось запуститься как служба: {error}");
+                std::process::exit(1);
+            }
         }
+        "install" => match install() {
+            Ok(()) => println!("Служба Bamboo установлена и запустится при следующей загрузке."),
+            Err(error) => {
+                eprintln!("установка не удалась: {error}");
+                eprintln!("Установка требует прав администратора.");
+                std::process::exit(1);
+            }
+        },
+        "uninstall" => match bamboo_sys::uninstall_service() {
+            Ok(()) => println!("Служба Bamboo удалена."),
+            Err(error) => {
+                eprintln!("удаление не удалось: {error}");
+                std::process::exit(1);
+            }
+        },
+        "help" | "--help" => usage(),
         other => {
-            eprintln!("неизвестный режим: {other}");
+            eprintln!("неизвестный режим: {other}\n");
+            usage();
             std::process::exit(2);
         }
     }
+}
+
+#[cfg(windows)]
+fn install() -> Result<(), bamboo_core::Error> {
+    let exe = std::env::current_exe()
+        .map_err(|_| bamboo_core::Error::Unsupported("не удалось определить путь к себе"))?;
+    bamboo_sys::install_service(&exe.to_string_lossy())
+}
+
+#[cfg(windows)]
+fn usage() {
+    println!(
+        "Брокер Bamboo\n\n\
+         bamboo-service console     запустить в консоли (для отладки)\n\
+         bamboo-service install     установить как службу (нужны права администратора)\n\
+         bamboo-service uninstall   удалить службу\n\n\
+         В роли службы брокер запускается диспетчером служб сам."
+    );
 }

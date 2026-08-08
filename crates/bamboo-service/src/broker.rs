@@ -13,6 +13,24 @@ use crate::validate::{validate, BrokerPolicy, ClientFacts, Verdict};
 /// Сколько времени ждать между попытками пересоздать канал после сбоя.
 const RETRY_PAUSE: std::time::Duration = std::time::Duration::from_secs(1);
 
+/// Тело службы. Крутит тот же цикл, что и консольный режим, но остановку
+/// получает от диспетчера служб, а не с клавиатуры.
+///
+/// Обязано завершиться при `stop.stop_requested()`, иначе служба зависнет
+/// в состоянии остановки.
+pub fn run_as_service(stop: bamboo_sys::StopSignal) {
+    let _ = bamboo_sys::apply_self_limits();
+    let name = pipe_name(current_session_id());
+    let policy = BrokerPolicy::default();
+
+    while !stop.stop_requested() {
+        // Один клиент за раз; при сбое канала пересоздаём после паузы.
+        if serve_one_client(&name, &policy).is_err() {
+            std::thread::sleep(RETRY_PAUSE);
+        }
+    }
+}
+
 /// Запускает брокер в консольном режиме.
 pub fn run_console() -> Result<()> {
     println!("Брокер Bamboo запускается.");
