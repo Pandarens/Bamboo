@@ -18,6 +18,8 @@ bamboo-core.workspace = true
 [target.'cfg(windows)'.dependencies]
 bamboo-collect.workspace = true
 bamboo-sys.workspace = true
+bamboo-analyze.workspace = true
+bamboo-journal.workspace = true
 
 # renderer-software и backend-winit без остального: GPU-контекст
 # не создаётся вообще (ТЗ, раздел 4.1). Виджету он не нужен, а его создание

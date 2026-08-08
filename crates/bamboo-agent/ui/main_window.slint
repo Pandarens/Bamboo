@@ -1,0 +1,287 @@
+// Главное окно Bamboo (ТЗ, раздел 14.3).
+//
+// Слева навигация по разделам, справа содержимое. Разделы, для которых
+// данные уже есть, наполнены живьём; остальные честно помечены как
+// готовящиеся, а не показывают пустоту под видом готовности.
+
+struct MainProcessRow {
+    name: string,
+    pid: string,
+    cpu: string,
+    memory: string,
+    threads: string,
+    badge: string,
+}
+
+struct DriveRow {
+    title: string,
+    facts: string,
+    verdict: string,
+}
+
+struct WakeRow {
+    when: string,
+    source: string,
+}
+
+struct JournalRow {
+    when: string,
+    action: string,
+    target: string,
+    status: string,
+}
+
+component NavButton inherits Rectangle {
+    in property <string> label;
+    in property <bool> active;
+    callback chosen();
+
+    height: 34px;
+    border-radius: 6px;
+    background: active ? #2f6f4f : (touch.has-hover ? #1e2a24 : transparent);
+
+    touch := TouchArea {
+        clicked => { root.chosen(); }
+    }
+    Text {
+        x: 12px;
+        vertical-alignment: center;
+        text: root.label;
+        color: active ? #ffffff : #b6c6bd;
+        font-size: 13px;
+    }
+}
+
+export component MainWindow inherits Window {
+    title: "Bamboo";
+    preferred-width: 900px;
+    preferred-height: 600px;
+    min-width: 720px;
+    min-height: 480px;
+    background: #141b18;
+
+    // 0 обзор, 1 процессы, 2 диск, 3 питание, 4 журнал, 5 прочее
+    in-out property <int> section: 0;
+
+    in property <string> cpu-summary: "—";
+    in property <string> memory-summary: "—";
+    in property <string> process-summary: "—";
+    in property <string> learning: "";
+    in property <[MainProcessRow]> processes: [];
+    in property <[DriveRow]> drives: [];
+    in property <[WakeRow]> wakes: [];
+    in property <[JournalRow]> journal: [];
+    in property <string> disk-note: "";
+    in property <string> power-note: "";
+    in property <string> journal-note: "";
+
+    callback refresh();
+
+    HorizontalLayout {
+        // Навигация
+        Rectangle {
+            width: 180px;
+            background: #0e1512;
+
+            VerticalLayout {
+                padding: 12px;
+                spacing: 4px;
+
+                Text {
+                    text: "Bamboo";
+                    font-size: 18px;
+                    color: #e8f0ec;
+                    horizontal-alignment: left;
+                }
+                Rectangle { height: 12px; }
+
+                NavButton {
+                    label: "Обзор";
+                    active: root.section == 0;
+                    chosen => { root.section = 0; }
+                }
+                NavButton {
+                    label: "Процессы";
+                    active: root.section == 1;
+                    chosen => { root.section = 1; }
+                }
+                NavButton {
+                    label: "Диск";
+                    active: root.section == 2;
+                    chosen => { root.section = 2; root.refresh(); }
+                }
+                NavButton {
+                    label: "Питание";
+                    active: root.section == 3;
+                    chosen => { root.section = 3; root.refresh(); }
+                }
+                NavButton {
+                    label: "Журнал";
+                    active: root.section == 4;
+                    chosen => { root.section = 4; root.refresh(); }
+                }
+                NavButton {
+                    label: "Ещё";
+                    active: root.section == 5;
+                    chosen => { root.section = 5; }
+                }
+
+                Rectangle { vertical-stretch: 1; }
+
+                Text {
+                    text: root.learning;
+                    font-size: 10px;
+                    color: #62736a;
+                    wrap: word-wrap;
+                }
+            }
+        }
+
+        // Содержимое
+        Rectangle {
+            background: #141b18;
+
+            VerticalLayout {
+                padding: 16px;
+                spacing: 12px;
+
+                // --- Обзор ---
+                if root.section == 0: VerticalLayout {
+                    spacing: 10px;
+                    Text { text: "Обзор"; font-size: 20px; color: #e8f0ec; }
+
+                    HorizontalLayout {
+                        spacing: 10px;
+                        Rectangle {
+                            background: #1e2a24; border-radius: 8px; height: 78px;
+                            VerticalLayout {
+                                padding: 12px;
+                                Text { text: "Процессор"; font-size: 11px; color: #7d8f86; }
+                                Text { text: root.cpu-summary; font-size: 22px; color: #e8f0ec; }
+                            }
+                        }
+                        Rectangle {
+                            background: #1e2a24; border-radius: 8px; height: 78px;
+                            VerticalLayout {
+                                padding: 12px;
+                                Text { text: "Память"; font-size: 11px; color: #7d8f86; }
+                                Text { text: root.memory-summary; font-size: 22px; color: #e8f0ec; }
+                            }
+                        }
+                        Rectangle {
+                            background: #1e2a24; border-radius: 8px; height: 78px;
+                            VerticalLayout {
+                                padding: 12px;
+                                Text { text: "Процессов"; font-size: 11px; color: #7d8f86; }
+                                Text { text: root.process-summary; font-size: 22px; color: #e8f0ec; }
+                            }
+                        }
+                    }
+
+                    Text {
+                        text: "Bamboo наблюдает за системой и объясняет причины деградации. "
+                            + "Действия применяются только по вашему решению и всегда обратимы.";
+                        font-size: 12px; color: #7d8f86; wrap: word-wrap;
+                    }
+                    Rectangle { vertical-stretch: 1; }
+                }
+
+                // --- Процессы ---
+                if root.section == 1: VerticalLayout {
+                    spacing: 8px;
+                    Text { text: "Процессы"; font-size: 20px; color: #e8f0ec; }
+                    HorizontalLayout {
+                        padding-left: 4px; padding-right: 4px;
+                        Text { text: "Процесс"; font-size: 11px; color: #7d8f86; horizontal-stretch: 1; }
+                        Text { text: "PID"; font-size: 11px; color: #7d8f86; width: 64px; }
+                        Text { text: "CPU"; font-size: 11px; color: #7d8f86; width: 64px; }
+                        Text { text: "Память"; font-size: 11px; color: #7d8f86; width: 90px; }
+                        Text { text: "Потоки"; font-size: 11px; color: #7d8f86; width: 60px; }
+                    }
+                    Flickable {
+                        VerticalLayout {
+                            spacing: 2px;
+                            for process in root.processes: Rectangle {
+                                height: 30px;
+                                background: #1a231f;
+                                border-radius: 5px;
+                                HorizontalLayout {
+                                    padding-left: 8px; padding-right: 8px; spacing: 4px;
+                                    Text { text: process.name; color: #e8f0ec; font-size: 12px; vertical-alignment: center; horizontal-stretch: 1; overflow: elide; }
+                                    Text { text: process.pid; color: #b6c6bd; font-size: 12px; vertical-alignment: center; width: 64px; }
+                                    Text { text: process.cpu; color: #b6c6bd; font-size: 12px; vertical-alignment: center; width: 64px; }
+                                    Text { text: process.memory; color: #b6c6bd; font-size: 12px; vertical-alignment: center; width: 90px; }
+                                    Text { text: process.threads; color: #b6c6bd; font-size: 12px; vertical-alignment: center; width: 60px; }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // --- Диск ---
+                if root.section == 2: VerticalLayout {
+                    spacing: 8px;
+                    Text { text: "Диск"; font-size: 20px; color: #e8f0ec; }
+                    for drive in root.drives: Rectangle {
+                        background: #1e2a24; border-radius: 8px;
+                        VerticalLayout {
+                            padding: 12px; spacing: 4px;
+                            Text { text: drive.title; font-size: 14px; color: #e8f0ec; }
+                            Text { text: drive.facts; font-size: 11px; color: #7d8f86; }
+                            Text { text: drive.verdict; font-size: 12px; color: #b6c6bd; wrap: word-wrap; }
+                        }
+                    }
+                    Text { text: root.disk-note; font-size: 11px; color: #62736a; wrap: word-wrap; }
+                    Rectangle { vertical-stretch: 1; }
+                }
+
+                // --- Питание ---
+                if root.section == 3: VerticalLayout {
+                    spacing: 8px;
+                    Text { text: "Питание"; font-size: 20px; color: #e8f0ec; }
+                    for wake in root.wakes: Rectangle {
+                        height: 30px; background: #1a231f; border-radius: 5px;
+                        HorizontalLayout {
+                            padding-left: 8px; padding-right: 8px; spacing: 8px;
+                            Text { text: wake.when; color: #7d8f86; font-size: 12px; vertical-alignment: center; width: 190px; }
+                            Text { text: wake.source; color: #e8f0ec; font-size: 12px; vertical-alignment: center; horizontal-stretch: 1; }
+                        }
+                    }
+                    Text { text: root.power-note; font-size: 11px; color: #62736a; wrap: word-wrap; }
+                    Rectangle { vertical-stretch: 1; }
+                }
+
+                // --- Журнал ---
+                if root.section == 4: VerticalLayout {
+                    spacing: 8px;
+                    Text { text: "Журнал действий"; font-size: 20px; color: #e8f0ec; }
+                    for entry in root.journal: Rectangle {
+                        height: 30px; background: #1a231f; border-radius: 5px;
+                        HorizontalLayout {
+                            padding-left: 8px; padding-right: 8px; spacing: 6px;
+                            Text { text: entry.when; color: #7d8f86; font-size: 11px; vertical-alignment: center; width: 150px; }
+                            Text { text: entry.action; color: #e8f0ec; font-size: 12px; vertical-alignment: center; horizontal-stretch: 1; overflow: elide; }
+                            Text { text: entry.target; color: #b6c6bd; font-size: 12px; vertical-alignment: center; width: 180px; overflow: elide; }
+                            Text { text: entry.status; color: #7d8f86; font-size: 11px; vertical-alignment: center; width: 100px; }
+                        }
+                    }
+                    Text { text: root.journal-note; font-size: 11px; color: #62736a; wrap: word-wrap; }
+                    Rectangle { vertical-stretch: 1; }
+                }
+
+                // --- Ещё ---
+                if root.section == 5: VerticalLayout {
+                    spacing: 8px;
+                    Text { text: "Ещё"; font-size: 20px; color: #e8f0ec; }
+                    Text {
+                        text: "Разделы «Загрузка», «Автозапуск», «Отчёты» и «Настройки» "
+                            + "готовятся. Данные для них уже собираются — их можно посмотреть "
+                            + "через отладочную утилиту: bamboo boot, bamboo power, bamboo disk.";
+                        font-size: 12px; color: #7d8f86; wrap: word-wrap;
+                    }
+                    Rectangle { vertical-stretch: 1; }
+                }
+            }
+        }
+    }
+}

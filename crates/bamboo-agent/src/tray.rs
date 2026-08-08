@@ -9,6 +9,7 @@ use tray_icon::{Icon, TrayIcon, TrayIconBuilder, TrayIconEvent};
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TrayAction {
     ToggleWidget,
+    OpenWindow,
     Quit,
 }
 
@@ -16,6 +17,7 @@ pub struct Tray {
     /// Дескриптор надо держать: при его удалении иконка исчезает из трея.
     _icon: TrayIcon,
     show_id: MenuId,
+    window_id: MenuId,
     quit_id: MenuId,
 }
 
@@ -23,8 +25,10 @@ impl Tray {
     pub fn new() -> Result<Tray, Box<dyn std::error::Error>> {
         let menu = Menu::new();
         let show = MenuItem::new("Показать виджет", true, None);
+        let window = MenuItem::new("Открыть окно", true, None);
         let quit = MenuItem::new("Выход", true, None);
         menu.append(&show)?;
+        menu.append(&window)?;
         menu.append(&PredefinedMenuItem::separator())?;
         menu.append(&quit)?;
 
@@ -37,6 +41,7 @@ impl Tray {
         Ok(Tray {
             _icon: icon,
             show_id: show.id().clone(),
+            window_id: window.id().clone(),
             quit_id: quit.id().clone(),
         })
     }
@@ -49,6 +54,8 @@ impl Tray {
         while let Ok(event) = MenuEvent::receiver().try_recv() {
             if event.id == self.show_id {
                 actions.push(TrayAction::ToggleWidget);
+            } else if event.id == self.window_id {
+                actions.push(TrayAction::OpenWindow);
             } else if event.id == self.quit_id {
                 actions.push(TrayAction::Quit);
             }

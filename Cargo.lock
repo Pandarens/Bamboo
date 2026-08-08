@@ -406,8 +406,10 @@ dependencies = [
 name = "bamboo-agent"
 version = "0.1.0"
 dependencies = [
+ "bamboo-analyze",
  "bamboo-collect",
  "bamboo-core",
+ "bamboo-journal",
  "bamboo-sys",
  "raw-window-handle",
  "slint",

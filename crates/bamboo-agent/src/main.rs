@@ -18,6 +18,8 @@
 #[cfg(windows)]
 mod collector;
 #[cfg(windows)]
+mod mainwin;
+#[cfg(windows)]
 mod tray;
 
 #[cfg(not(windows))]
@@ -79,7 +81,62 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     widget.set_processes(processes.clone());
     widget.set_spark(spark.clone());
 
+    // Главное окно создаётся заранее и держится скрытым: открытие из трея
+    // должно быть мгновенным. Его секции наполняются по требованию.
+    let main_window = MainWindow::new()?;
+    let main_processes: ModelRc<MainProcessRow> = ModelRc::new(VecModel::from(Vec::new()));
+    let drives_model: ModelRc<DriveRow> = ModelRc::new(VecModel::from(Vec::new()));
+    let wakes_model: ModelRc<WakeRow> = ModelRc::new(VecModel::from(Vec::new()));
+    let journal_model: ModelRc<JournalRow> = ModelRc::new(VecModel::from(Vec::new()));
+    main_window.set_processes(main_processes.clone());
+    main_window.set_drives(drives_model.clone());
+    main_window.set_wakes(wakes_model.clone());
+    main_window.set_journal(journal_model.clone());
+
+    // Загрузка разделов по требованию: диск, питание и журнал — разовые
+    // запросы, держать их в фоне незачем.
+    {
+        let weak = main_window.as_weak();
+        let drives = drives_model.clone();
+        let wakes = wakes_model.clone();
+        let journal = journal_model.clone();
+        main_window.on_refresh(move || {
+            let Some(win) = weak.upgrade() else {
+                return;
+            };
+            match win.get_section() {
+                2 => {
+                    let (rows, note) = mainwin::drive_rows();
+                    replace(&drives, rows.into_iter().map(to_drive_row).collect());
+                    win.set_disk_note(SharedString::from(note));
+                }
+                3 => {
+                    let (rows, note) = mainwin::wake_rows();
+                    replace(&wakes, rows.into_iter().map(to_wake_row).collect());
+                    win.set_power_note(SharedString::from(note));
+                }
+                4 => {
+                    let (rows, note) = mainwin::journal_rows();
+                    replace(&journal, rows.into_iter().map(to_journal_row).collect());
+                    win.set_journal_note(SharedString::from(note));
+                }
+                _ => {}
+            }
+        });
+    }
+
+    // Отладочный ход: открыть главное окно сразу, чтобы проверить отрисовку
+    // без иконки в трее.
+    if let Ok(section) = std::env::var("BAMBOO_OPEN_WINDOW") {
+        if let Ok(index) = section.parse::<i32>() {
+            main_window.set_section(index);
+        }
+        main_window.show().ok();
+        main_window.invoke_refresh();
+    }
+
     let weak = widget.as_weak();
+    let main_weak = main_window.as_weak();
     let timer = slint::Timer::default();
     timer.start(
         slint::TimerMode::Repeated,
@@ -95,6 +152,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 for action in tray.poll() {
                     match action {
                         tray::TrayAction::ToggleWidget => toggle(&widget, &visible),
+                        tray::TrayAction::OpenWindow => {
+                            if let Some(main) = main_weak.upgrade() {
+                                main.show().ok();
+                                main.invoke_refresh();
+                            }
+                        }
                         tray::TrayAction::Quit => {
                             let _ = slint::quit_event_loop();
                             return;
@@ -113,12 +176,71 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
             if let Some(snapshot) = latest {
                 apply_snapshot(&widget, &snapshot, &processes, &spark);
+                // Обновляем главное окно, только если оно на экране.
+                if let Some(main) = main_weak.upgrade() {
+                    if main.window().is_visible() {
+                        apply_overview(&main, &snapshot, &main_processes);
+                    }
+                }
             }
         },
     );
 
     widget.run()?;
     Ok(())
+}
+
+/// Наполняет разделы «Обзор» и «Процессы» из снимка.
+#[cfg(windows)]
+fn apply_overview(
+    main: &MainWindow,
+    snapshot: &collector::Snapshot,
+    processes: &ModelRc<MainProcessRow>,
+) {
+    let overview = mainwin::overview(snapshot);
+    main.set_cpu_summary(SharedString::from(overview.cpu));
+    main.set_memory_summary(SharedString::from(overview.memory));
+    main.set_process_summary(SharedString::from(overview.processes));
+
+    let rows: Vec<MainProcessRow> = mainwin::process_rows(snapshot)
+        .into_iter()
+        .map(|row| MainProcessRow {
+            name: SharedString::from(row.name),
+            pid: SharedString::from(row.pid),
+            cpu: SharedString::from(row.cpu),
+            memory: SharedString::from(row.memory),
+            threads: SharedString::from(row.threads),
+            badge: SharedString::from(row.badge),
+        })
+        .collect();
+    replace(processes, rows);
+}
+
+#[cfg(windows)]
+fn to_drive_row(row: mainwin::DriveRow) -> DriveRow {
+    DriveRow {
+        title: SharedString::from(row.title),
+        facts: SharedString::from(row.facts),
+        verdict: SharedString::from(row.verdict),
+    }
+}
+
+#[cfg(windows)]
+fn to_wake_row(row: mainwin::WakeRow) -> WakeRow {
+    WakeRow {
+        when: SharedString::from(row.when),
+        source: SharedString::from(row.source),
+    }
+}
+
+#[cfg(windows)]
+fn to_journal_row(row: mainwin::JournalRow) -> JournalRow {
+    JournalRow {
+        when: SharedString::from(row.when),
+        action: SharedString::from(row.action),
+        target: SharedString::from(row.target),
+        status: SharedString::from(row.status),
+    }
 }
 
 /// Показывает или прячет виджет.

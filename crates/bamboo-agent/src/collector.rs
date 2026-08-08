@@ -19,6 +19,8 @@ pub const SPARK_POINTS: usize = 48;
 #[derive(Clone, Debug)]
 pub struct ProcessLine {
     pub name: String,
+    pub pid: u32,
+    pub threads: u32,
     pub cpu_percent: f32,
     pub memory: Bytes,
     /// Пояснение под именем: чем этот процесс примечателен.
@@ -82,12 +84,16 @@ fn run(sender: Sender<Snapshot>, visible: WidgetVisible) {
             memory_history.remove(0);
         }
 
+        // Тридцати процессов хватает и виджету (берёт первые), и главному
+        // окну (показывает все).
         let top = collector
             .table()
-            .top_by_cpu(4)
+            .top_by_cpu(30)
             .into_iter()
             .map(|process| ProcessLine {
                 name: process.image_name.to_string(),
+                pid: process.pid(),
+                threads: process.threads,
                 cpu_percent: process.cpu_share * 100.0,
                 memory: Bytes::from_kib(process.last_point().private_kib as u64),
                 badge: badge_for(process),
