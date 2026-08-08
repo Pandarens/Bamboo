@@ -21,3 +21,4 @@ bamboo-journal.workspace = true
 [target.'cfg(windows)'.dependencies]
 bamboo-sys.workspace = true
 bamboo-actuate.workspace = true
+bamboo-collect.workspace = true

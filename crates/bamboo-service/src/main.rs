@@ -16,6 +16,8 @@ mod validate;
 mod broker;
 #[cfg(windows)]
 mod execute;
+#[cfg(windows)]
+mod snapshot;
 
 #[cfg(not(windows))]
 fn main() {

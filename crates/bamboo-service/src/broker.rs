@@ -11,8 +11,8 @@ use bamboo_journal::Journal;
 use bamboo_policy::UserWhitelist;
 use bamboo_sys::pipe::{client_is_same_image, PipeServer};
 
-use crate::execute;
 use crate::validate::{validate, BrokerPolicy, ClientFacts, Verdict};
+use crate::{execute, snapshot};
 
 /// Сколько времени ждать между попытками пересоздать канал после сбоя.
 const RETRY_PAUSE: std::time::Duration = std::time::Duration::from_secs(1);
@@ -147,10 +147,16 @@ fn handle_frame(
     match validate(client, &request, policy) {
         Verdict::Allow => {
             println!("запрос {request:?} — разрешён, исполняю");
-            // Валидация пройдена — запрос идёт через того же исполнителя,
-            // что и CLI: политика, журнал, действие, подтверждение.
-            let now = bamboo_core::SampleTime::wall_clock_now();
-            execute::run(&request, executor, whitelist, now)
+            match &request {
+                // Читающий снимок брокер обслуживает сам через коллектор.
+                Request::QuerySnapshot { scope } => snapshot::query_snapshot(*scope),
+                // Всё изменяющее идёт через того же исполнителя, что и CLI:
+                // политика, журнал, действие, подтверждение.
+                _ => {
+                    let now = bamboo_core::SampleTime::wall_clock_now();
+                    execute::run(&request, executor, whitelist, now)
+                }
+            }
         }
         Verdict::Deny(code, detail) => {
             println!("запрос {request:?} — отказ: {detail}");

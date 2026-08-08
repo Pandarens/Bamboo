@@ -492,6 +492,7 @@ name = "bamboo-service"
 version = "0.1.0"
 dependencies = [
  "bamboo-actuate",
+ "bamboo-collect",
  "bamboo-core",
  "bamboo-ipc",
  "bamboo-journal",
