@@ -29,7 +29,7 @@ pub use idle::IdleInput;
 pub use observation::{Observation, ObservationKind, Severity};
 pub use origin::{attribute, Origin, ProcessDescriptor};
 pub use regression::{fit, Trend};
-pub use report::{ActionEffect, WeeklyData};
+pub use report::{weekly_html, weekly_json, weekly_markdown, ActionEffect, WeeklyData};
 pub use spike::SpikeInput;
 pub use tbw::{rating_for, TbwRating};
 pub use wear::{WearInput, WearVerdict};
