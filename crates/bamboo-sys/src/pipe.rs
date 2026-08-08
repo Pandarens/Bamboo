@@ -299,6 +299,36 @@ pub fn client_is_same_image(client_pid: u32) -> Result<bool> {
     Ok(ours.eq_ignore_ascii_case(&theirs))
 }
 
+/// Сессия, которой принадлежит процесс.
+///
+/// Отдельная проверка подлинности рядом с совпадением образа (ТЗ, раздел
+/// 3.2). Брокер под SYSTEM обслуживает конкретную интерактивную сессию;
+/// сравнивать SID клиента с SID брокера бессмысленно — брокер это SYSTEM,
+/// а агент работает под пользователем, и они заведомо разные. Осмысленно
+/// другое: из какой сессии пришёл клиент. Пайп именован по сессии, но
+/// полагаться на одно имя — значит доверять; `ProcessIdToSessionId`
+/// проверяет это независимо, и работает одинаково под SYSTEM и в консоли.
+pub fn process_session_id(pid: u32) -> Result<u32> {
+    use windows_sys::Win32::System::RemoteDesktop::ProcessIdToSessionId;
+
+    let mut session: u32 = 0;
+    if unsafe { ProcessIdToSessionId(pid, &mut session) } == 0 {
+        return Err(Error::Win32 {
+            call: "ProcessIdToSessionId",
+            code: unsafe { GetLastError() },
+        });
+    }
+    Ok(session)
+}
+
+/// Проверяет, что клиент пришёл из ожидаемой сессии.
+///
+/// Ошибку определения сессии считаем непрохождением проверки: не смогли
+/// подтвердить — значит не подтвердили, отказ безопаснее допуска.
+pub fn client_in_session(client_pid: u32, expected_session: u32) -> bool {
+    process_session_id(client_pid).is_ok_and(|session| session == expected_session)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -406,6 +436,29 @@ mod tests {
     #[test]
     fn the_client_image_check_recognises_our_own_process() {
         assert!(client_is_same_image(std::process::id()).unwrap());
+    }
+
+    #[test]
+    fn our_own_session_is_readable_and_matches() {
+        // Собственная сессия обязана определяться и совпадать сама с собой.
+        let ours = process_session_id(std::process::id()).unwrap();
+        assert!(client_in_session(std::process::id(), ours));
+    }
+
+    #[test]
+    fn a_wrong_expected_session_fails_the_check() {
+        let ours = process_session_id(std::process::id()).unwrap();
+        // Сессии с таким номером у нас заведомо нет.
+        assert!(!client_in_session(
+            std::process::id(),
+            ours.wrapping_add(999)
+        ));
+    }
+
+    #[test]
+    fn a_dead_process_has_no_session() {
+        // PID, которого нет: определить сессию нельзя, проверка не проходит.
+        assert!(!client_in_session(0xFFFF_FFF0, 1));
     }
 
     #[test]

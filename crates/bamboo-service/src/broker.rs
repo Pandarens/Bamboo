@@ -85,14 +85,16 @@ fn serve_one_client(
     let server = PipeServer::create(name)?;
     let client_pid = server.accept()?;
 
-    // Проверка образа клиента — первый рубеж (ТЗ, раздел 3.2).
+    // Два независимых рубежа проверки клиента (ТЗ, раздел 3.2): совпадает ли
+    // образ и из той ли он сессии. Имя канала уже привязано к сессии, но
+    // полагаться на одно имя — значит доверять; сессию клиента проверяем
+    // отдельным вызовом. REJECT_REMOTE_CLIENTS отсекает удалённых на уровне
+    // системы, поэтому remote здесь заведомо ложь.
     let image_matches = client_is_same_image(client_pid).unwrap_or(false);
+    let same_session = bamboo_sys::pipe::client_in_session(client_pid, current_session_id());
     let client = ClientFacts {
         image_matches,
-        // Канал уже на сессию, и REJECT_REMOTE_CLIENTS отсекает удалённых,
-        // поэтому оба факта здесь истинны. Валидатор проверяет их повторно —
-        // защита в глубину.
-        same_session: true,
+        same_session,
         remote: false,
     };
 
@@ -165,12 +167,14 @@ fn handle_frame(
     }
 }
 
-/// Идентификатор текущей сессии. В консольном режиме — сессия пользователя,
-/// запустившего брокер.
+/// Идентификатор сессии, которую обслуживает брокер.
+///
+/// В консольном режиме это собственная сессия брокера — та же, где работает
+/// агент пользователя, поэтому берём её напрямую. Реальная служба под SYSTEM
+/// живёт в сессии 0 и должна определять активную сессию пользователя через
+/// `WTSGetActiveConsoleSessionId` — это отдельный шаг для служебного пути.
 fn current_session_id() -> u32 {
-    // Упрощение для консольного режима: реальная служба под SYSTEM
-    // определяет активную сессию через WTSGetActiveConsoleSessionId.
-    1
+    bamboo_sys::pipe::process_session_id(std::process::id()).unwrap_or(1)
 }
 
 fn journal_path() -> PathBuf {
