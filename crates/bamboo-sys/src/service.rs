@@ -10,11 +10,13 @@
 use bamboo_core::{Error, Result};
 use windows_sys::Win32::Foundation::{GetLastError, ERROR_SERVICE_EXISTS};
 use windows_sys::Win32::System::Services::{
-    ChangeServiceConfig2W, CloseServiceHandle, CreateServiceW, DeleteService, OpenSCManagerW,
-    OpenServiceW, SC_HANDLE, SC_MANAGER_CREATE_SERVICE, SERVICE_ALL_ACCESS, SERVICE_AUTO_START,
-    SERVICE_CONFIG_DELAYED_AUTO_START_INFO, SERVICE_CONFIG_DESCRIPTION,
-    SERVICE_DELAYED_AUTO_START_INFO, SERVICE_DESCRIPTIONW, SERVICE_ERROR_NORMAL,
-    SERVICE_WIN32_OWN_PROCESS,
+    ChangeServiceConfig2W, ChangeServiceConfigW, CloseServiceHandle, CreateServiceW, DeleteService,
+    OpenSCManagerW, OpenServiceW, QueryServiceConfig2W, QueryServiceConfigW, QUERY_SERVICE_CONFIGW,
+    SC_HANDLE, SC_MANAGER_CONNECT, SC_MANAGER_CREATE_SERVICE, SERVICE_ALL_ACCESS,
+    SERVICE_AUTO_START, SERVICE_CHANGE_CONFIG, SERVICE_CONFIG_DELAYED_AUTO_START_INFO,
+    SERVICE_CONFIG_DESCRIPTION, SERVICE_DELAYED_AUTO_START_INFO, SERVICE_DEMAND_START,
+    SERVICE_DESCRIPTIONW, SERVICE_DISABLED, SERVICE_ERROR_NORMAL, SERVICE_NO_CHANGE,
+    SERVICE_QUERY_CONFIG, SERVICE_WIN32_OWN_PROCESS,
 };
 
 /// Стандартное право доступа DELETE. В `windows-sys` живёт под именами
@@ -147,7 +149,6 @@ fn set_delayed_start(service: &ScHandle) -> Result<()> {
 /// Удаляет службу. Идемпотентна по смыслу: отсутствие службы — не ошибка
 /// установки, но об этом сообщается вызывающему.
 pub fn uninstall() -> Result<()> {
-    const SC_MANAGER_CONNECT: u32 = 0x0001;
     let manager = open_manager(SC_MANAGER_CONNECT)?;
 
     let name = wide(SERVICE_NAME);
@@ -299,7 +300,6 @@ fn report_status(state: u32, accepted: u32) {
 
 /// Установлена ли служба.
 pub fn is_installed() -> bool {
-    const SC_MANAGER_CONNECT: u32 = 0x0001;
     const SERVICE_QUERY_STATUS: u32 = 0x0004;
 
     let Ok(manager) = open_manager(SC_MANAGER_CONNECT) else {
@@ -312,6 +312,176 @@ pub fn is_installed() -> bool {
     }
     unsafe { CloseServiceHandle(service) };
     true
+}
+
+/// Как запускается служба: тип старта и флаг отложенного автозапуска.
+///
+/// Это ровно то, что нужно действию «перевести службу на отложенный старт»
+/// (ТЗ 11.1, уровень 2): снять текущее состояние, чтобы потом вернуть, и
+/// выставить своё. Числовой `start_type` — константы вида `SERVICE_AUTO_START`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ServiceStart {
+    pub start_type: u32,
+    pub delayed: bool,
+}
+
+impl ServiceStart {
+    /// Автозапуск с отложенным стартом — целевое состояние действия.
+    pub fn delayed_auto() -> ServiceStart {
+        ServiceStart {
+            start_type: SERVICE_AUTO_START,
+            delayed: true,
+        }
+    }
+
+    /// Стартует ли служба по триггеру (`SERVICE_DEMAND_START`).
+    ///
+    /// В Windows 11 многие службы демонд-старт и поднимаются по триггеру,
+    /// в простое ничего не потребляя. Переводить такие на отложенный старт
+    /// бессмысленно, а иногда вредно — вызывающий проверяет это до действия.
+    pub fn is_demand_start(self) -> bool {
+        self.start_type == SERVICE_DEMAND_START
+    }
+
+    /// Отключена ли служба полностью.
+    pub fn is_disabled(self) -> bool {
+        self.start_type == SERVICE_DISABLED
+    }
+}
+
+fn open_service(manager: &ScHandle, name: &str, access: u32) -> Result<ScHandle> {
+    let wname = wide(name);
+    let handle = unsafe { OpenServiceW(manager.0, wname.as_ptr(), access) };
+    if handle.is_null() {
+        return Err(Error::Win32 {
+            call: "OpenServiceW",
+            code: unsafe { GetLastError() },
+        });
+    }
+    Ok(ScHandle(handle))
+}
+
+/// Читает, как запускается служба. Запрос конфигурации доступен обычному
+/// пользователю для большинства служб — прав администратора не требует.
+pub fn service_start(name: &str) -> Result<ServiceStart> {
+    let manager = open_manager(SC_MANAGER_CONNECT)?;
+    let service = open_service(&manager, name, SERVICE_QUERY_CONFIG)?;
+    Ok(ServiceStart {
+        start_type: query_start_type(&service)?,
+        delayed: query_delayed(&service)?,
+    })
+}
+
+/// Меняет тип запуска службы и флаг отложенного старта. Изменение
+/// конфигурации требует прав администратора (`SERVICE_CHANGE_CONFIG`).
+pub fn set_service_start(name: &str, config: ServiceStart) -> Result<()> {
+    let manager = open_manager(SC_MANAGER_CONNECT)?;
+    let service = open_service(&manager, name, SERVICE_CHANGE_CONFIG)?;
+
+    // Меняем только тип запуска; тип службы и контроль ошибок оставляем
+    // как есть через SERVICE_NO_CHANGE, строки — нулями.
+    let ok = unsafe {
+        ChangeServiceConfigW(
+            service.0,
+            SERVICE_NO_CHANGE,
+            config.start_type,
+            SERVICE_NO_CHANGE,
+            core::ptr::null(),
+            core::ptr::null(),
+            core::ptr::null_mut(),
+            core::ptr::null(),
+            core::ptr::null(),
+            core::ptr::null(),
+            core::ptr::null(),
+        )
+    };
+    if ok == 0 {
+        return Err(Error::Win32 {
+            call: "ChangeServiceConfigW",
+            code: unsafe { GetLastError() },
+        });
+    }
+
+    // Флаг отложенного старта значим только при автозапуске; для прочих типов
+    // система его игнорирует, поэтому выставляем безусловно.
+    let info = SERVICE_DELAYED_AUTO_START_INFO {
+        fDelayedAutostart: config.delayed as i32,
+    };
+    let ok = unsafe {
+        ChangeServiceConfig2W(
+            service.0,
+            SERVICE_CONFIG_DELAYED_AUTO_START_INFO,
+            (&info as *const SERVICE_DELAYED_AUTO_START_INFO).cast(),
+        )
+    };
+    if ok == 0 {
+        return Err(Error::Win32 {
+            call: "ChangeServiceConfig2W(отложенный старт)",
+            code: unsafe { GetLastError() },
+        });
+    }
+    Ok(())
+}
+
+/// Тип запуска из `QueryServiceConfigW`. Структура переменной длины —
+/// первый вызов узнаёт нужный размер.
+fn query_start_type(service: &ScHandle) -> Result<u32> {
+    let mut needed: u32 = 0;
+    unsafe { QueryServiceConfigW(service.0, core::ptr::null_mut(), 0, &mut needed) };
+    if needed == 0 {
+        return Err(Error::Win32 {
+            call: "QueryServiceConfigW(размер)",
+            code: unsafe { GetLastError() },
+        });
+    }
+
+    let mut buffer = vec![0u8; needed as usize];
+    let ok = unsafe {
+        QueryServiceConfigW(
+            service.0,
+            buffer.as_mut_ptr().cast(),
+            buffer.len() as u32,
+            &mut needed,
+        )
+    };
+    if ok == 0 {
+        return Err(Error::Win32 {
+            call: "QueryServiceConfigW",
+            code: unsafe { GetLastError() },
+        });
+    }
+
+    // SAFETY: буфер заполнен как QUERY_SERVICE_CONFIGW; читаем невыровненно
+    // на случай, если аллокатор дал не по границе структуры.
+    let config =
+        unsafe { core::ptr::read_unaligned(buffer.as_ptr() as *const QUERY_SERVICE_CONFIGW) };
+    Ok(config.dwStartType)
+}
+
+/// Флаг отложенного автозапуска из `QueryServiceConfig2W`.
+fn query_delayed(service: &ScHandle) -> Result<bool> {
+    // Структура — единственный BOOL, но берём буфер с запасом.
+    let mut buffer = [0u8; 16];
+    let mut needed: u32 = 0;
+    let ok = unsafe {
+        QueryServiceConfig2W(
+            service.0,
+            SERVICE_CONFIG_DELAYED_AUTO_START_INFO,
+            buffer.as_mut_ptr(),
+            buffer.len() as u32,
+            &mut needed,
+        )
+    };
+    if ok == 0 {
+        return Err(Error::Win32 {
+            call: "QueryServiceConfig2W(отложенный старт)",
+            code: unsafe { GetLastError() },
+        });
+    }
+    let info = unsafe {
+        core::ptr::read_unaligned(buffer.as_ptr() as *const SERVICE_DELAYED_AUTO_START_INFO)
+    };
+    Ok(info.fDelayedAutostart != 0)
 }
 
 #[cfg(test)]
@@ -332,5 +502,43 @@ mod tests {
     fn querying_installation_status_does_not_panic() {
         // Просто не должно падать независимо от прав.
         let _ = is_installed();
+    }
+
+    #[test]
+    fn the_scheduler_service_start_config_is_readable_without_admin() {
+        // Планировщик есть на любой Windows, и его конфигурацию читать
+        // обычному пользователю разрешено. Тип запуска — осмысленное
+        // значение, а не мусор.
+        let config = service_start("Schedule").expect("конфиг планировщика не прочитался");
+        assert!(
+            config.start_type <= SERVICE_DISABLED,
+            "неправдоподобный тип запуска: {}",
+            config.start_type
+        );
+    }
+
+    #[test]
+    fn a_missing_service_reports_an_error() {
+        assert!(service_start("НетТакойСлужбыBamboo").is_err());
+    }
+
+    #[test]
+    fn changing_a_service_without_admin_is_refused_cleanly() {
+        // Без прав администратора смена конфигурации обязана вернуть ошибку,
+        // а не молча «получиться». Систему тест не меняет.
+        let result = set_service_start("Schedule", ServiceStart::delayed_auto());
+        assert!(
+            result.is_err(),
+            "смена конфигурации без прав не должна проходить"
+        );
+    }
+
+    #[test]
+    fn the_target_state_is_delayed_autostart() {
+        let target = ServiceStart::delayed_auto();
+        assert_eq!(target.start_type, SERVICE_AUTO_START);
+        assert!(target.delayed);
+        assert!(!target.is_demand_start());
+        assert!(!target.is_disabled());
     }
 }

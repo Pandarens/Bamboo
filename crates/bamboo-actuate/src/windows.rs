@@ -37,6 +37,13 @@ impl Backend for SystemBackend {
                 let current = control::memory_priority(pid).map_err(|error| error.to_string())?;
                 Ok(PriorState::new().with("memory_priority", current.0))
             }
+            Action::DelayServiceStart => {
+                let current = bamboo_sys::service_start(&target.app_key)
+                    .map_err(|error| error.to_string())?;
+                Ok(PriorState::new()
+                    .with("service_start_type", current.start_type)
+                    .with("service_delayed", yes_no(current.delayed)))
+            }
             other => Err(format!("{} ещё не реализовано", other.name())),
         }
     }
@@ -50,15 +57,33 @@ impl Backend for SystemBackend {
                 control::set_memory_priority(Self::pid(target)?, BACKGROUND_PRIORITY)
                     .map_err(|error| error.to_string())
             }
+            Action::DelayServiceStart => {
+                let current = bamboo_sys::service_start(&target.app_key)
+                    .map_err(|error| error.to_string())?;
+                // Триггерные и отключённые службы не трогаем: перевод на
+                // отложенный старт для них бессмыслен или вреден (ТЗ 5.5).
+                if current.is_demand_start() {
+                    return Err(
+                        "служба стартует по триггеру, отложенный старт ей не нужен".to_string()
+                    );
+                }
+                if current.is_disabled() {
+                    return Err("служба отключена, менять тип запуска не нужно".to_string());
+                }
+                bamboo_sys::set_service_start(
+                    &target.app_key,
+                    bamboo_sys::ServiceStart::delayed_auto(),
+                )
+                .map_err(|error| error.to_string())
+            }
             other => Err(format!("{} ещё не реализовано", other.name())),
         }
     }
 
     fn revert(&self, action: Action, target: &Target, prior: &PriorState) -> Result<(), String> {
-        let pid = Self::pid(target)?;
-
         match action {
             Action::EnableEcoQos => {
+                let pid = Self::pid(target)?;
                 match prior.get_bool("eco_qos") {
                     // До нас режим был включён — оставляем как было.
                     Some(true) => control::set_eco_qos(pid, true),
@@ -71,6 +96,7 @@ impl Backend for SystemBackend {
             }
 
             Action::LowerMemoryPriority => {
+                let pid = Self::pid(target)?;
                 let previous = prior
                     .get_u32("memory_priority")
                     .map(MemoryPriority)
@@ -81,6 +107,24 @@ impl Backend for SystemBackend {
                 control::set_memory_priority(pid, previous).map_err(|error| error.to_string())
             }
 
+            Action::DelayServiceStart => {
+                // Здесь угадывать нельзя: выставить не тот тип запуска значит
+                // либо оставить службу отложенной, либо, того хуже, включить
+                // отключённую. Нет записи о прошлом — отказываемся от отката.
+                let start_type = prior.get_u32("service_start_type").ok_or_else(|| {
+                    "в журнале нет прежнего типа запуска службы, откат невозможен".to_string()
+                })?;
+                let delayed = prior.get_bool("service_delayed").unwrap_or(false);
+                bamboo_sys::set_service_start(
+                    &target.app_key,
+                    bamboo_sys::ServiceStart {
+                        start_type,
+                        delayed,
+                    },
+                )
+                .map_err(|error| error.to_string())
+            }
+
             other => Err(format!("{} ещё не реализовано", other.name())),
         }
     }
@@ -89,6 +133,12 @@ impl Backend for SystemBackend {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
+
+    /// Тесты приоритета памяти меняют его у своего же процесса. Параллельный
+    /// запуск нескольких таких тестов гонялся бы за одно значение, поэтому
+    /// сериализуем их между собой.
+    static MEMORY_PRIORITY_LOCK: Mutex<()> = Mutex::new(());
 
     fn me() -> Target {
         Target {
@@ -96,6 +146,38 @@ mod tests {
             pid: Some(std::process::id()),
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn capturing_a_service_start_state_works_without_admin() {
+        // Снять состояние «до» для действия над службой можно и без прав:
+        // это запрос конфигурации. Планировщик есть на любой Windows.
+        let backend = SystemBackend;
+        let target = Target {
+            app_key: "Schedule".into(),
+            pid: None,
+            ..Default::default()
+        };
+        let prior = backend
+            .capture(Action::DelayServiceStart, &target)
+            .expect("состояние службы не снялось");
+        assert!(
+            prior.get_u32("service_start_type").is_some(),
+            "в состоянии нет типа запуска службы"
+        );
+    }
+
+    #[test]
+    fn changing_a_service_start_without_admin_fails_cleanly() {
+        // Само действие требует прав администратора: без них — понятная
+        // ошибка, а не тихий успех. Систему тест не меняет.
+        let backend = SystemBackend;
+        let target = Target {
+            app_key: "Schedule".into(),
+            pid: None,
+            ..Default::default()
+        };
+        assert!(backend.apply(Action::DelayServiceStart, &target).is_err());
     }
 
     #[test]
@@ -116,6 +198,7 @@ mod tests {
 
     #[test]
     fn memory_priority_applies_and_reverts_on_a_live_process() {
+        let _guard = MEMORY_PRIORITY_LOCK.lock().unwrap();
         let backend = SystemBackend;
         let before = control::memory_priority(std::process::id()).unwrap();
 
@@ -152,6 +235,7 @@ mod tests {
 
     #[test]
     fn a_corrupted_prior_state_falls_back_to_something_safe() {
+        let _guard = MEMORY_PRIORITY_LOCK.lock().unwrap();
         let backend = SystemBackend;
         let before = control::memory_priority(std::process::id()).unwrap();
 

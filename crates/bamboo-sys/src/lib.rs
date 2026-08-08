@@ -39,7 +39,10 @@ pub use eventlog::daily_error_count;
 pub use memory::{memory_stat, system_counts, SystemCounts};
 pub use power::{power_status, PowerSource, PowerStatus};
 pub use process::{ProcessBuffer, ProcessIter, RawProcess};
-pub use service::{install as install_service, uninstall as uninstall_service, StopSignal};
+pub use service::{
+    install as install_service, service_start, set_service_start, uninstall as uninstall_service,
+    ServiceStart, StopSignal,
+};
 pub use services::service_names;
 pub use startup::{set_startup_enabled, user_startup_items, StartupItem};
 pub use storage::{enumerate as enumerate_drives, read_smart, Drive};
