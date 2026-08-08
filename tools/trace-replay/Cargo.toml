@@ -1,0 +1,18 @@
+[package]
+name = "trace-replay"
+description = "Прогон анализаторов Bamboo на записанных трассах (ТЗ, раздел 16.1)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[[bin]]
+name = "trace-replay"
+path = "src/main.rs"
+
+[dependencies]
+bamboo-core.workspace = true
+bamboo-store.workspace = true
+bamboo-analyze.workspace = true

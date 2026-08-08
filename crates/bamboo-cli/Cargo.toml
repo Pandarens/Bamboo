@@ -18,6 +18,7 @@ bamboo-analyze.workspace = true
 bamboo-policy.workspace = true
 bamboo-journal.workspace = true
 bamboo-actuate.workspace = true
+bamboo-store.workspace = true
 
 [target.'cfg(windows)'.dependencies]
 bamboo-collect.workspace = true

@@ -29,6 +29,7 @@ fn main() {
         "boot" => commands::boot(),
         "power" => commands::power(),
         "trace" => commands::trace(&args[1..]),
+        "record" => commands::record(&args[1..]),
         "optimize" => optimize::plan(args.iter().any(|arg| arg == "--apply")),
         "journal" => optimize::show_journal(),
         "revert" => optimize::revert(&args[1..]),
@@ -61,6 +62,7 @@ Bamboo {} — наблюдатель за системой
   bamboo boot                время загрузки и что его удлиняет
   bamboo power               пробуждения из сна и их причины
   bamboo trace [--for N]     короткоживущие процессы, невидимые для опроса
+  bamboo record --out F [--for N]  записать трассу в файл для анализа
   bamboo budget [--for N]    измерить собственное потребление за N секунд
 
   bamboo optimize            показать, что было бы сделано (ничего не меняет)
@@ -202,6 +204,63 @@ mod commands {
 
         render::trace(&tracker, &recorder, total, duration);
         Ok(())
+    }
+
+    pub fn record(args: &[String]) -> Result<()> {
+        use bamboo_store::{Trace, TraceFrame, TraceProcess};
+
+        let out = flag_value(args, "--out").unwrap_or_else(|| "bamboo.trace".to_string());
+        let duration = flag_secs(args, "--for").unwrap_or(Duration::from_secs(60));
+
+        let mut collector = Collector::new();
+        collector.tick()?; // первый тик задаёт базу для дельт
+        let mut trace = Trace::new(5000);
+
+        let started = std::time::Instant::now();
+        println!("Записываю трассу {} с в {out}...", duration.as_secs());
+
+        while started.elapsed() < duration {
+            std::thread::sleep(Duration::from_secs(5));
+            let tick = collector.tick()?;
+
+            let processes: Vec<TraceProcess> = collector
+                .table()
+                .iter()
+                .map(|process| TraceProcess {
+                    app_key: process.app_key.to_string(),
+                    image_name: process.image_name.to_string(),
+                    cpu_ms: process.last_point().cpu_ms,
+                    private_kib: process.last_point().private_kib,
+                    working_set_kib: process.last_point().working_set_private_kib,
+                    read_kib: process.last_point().read_kib,
+                    write_kib: process.last_point().write_kib,
+                    handles: process.handles,
+                    threads: process.threads,
+                })
+                .collect();
+
+            trace.push(TraceFrame {
+                at_unix_ms: tick.at.unix_ms,
+                processes,
+            });
+        }
+
+        let file = std::fs::File::create(&out)
+            .map_err(|_| bamboo_core::Error::Unsupported("не удалось создать файл трассы"))?;
+        trace
+            .write_to(std::io::BufWriter::new(file))
+            .map_err(|_| bamboo_core::Error::Unsupported("не удалось записать трассу"))?;
+
+        println!(
+            "Готово: {} кадров. Прогнать анализаторы: trace-replay {out}",
+            trace.frame_count()
+        );
+        Ok(())
+    }
+
+    fn flag_value(args: &[String], name: &str) -> Option<String> {
+        let index = args.iter().position(|a| a == name)?;
+        args.get(index + 1).cloned()
     }
 
     pub fn budget(args: &[String]) -> Result<()> {
