@@ -31,16 +31,25 @@ pub fn run<B: Backend>(
             app_key,
             pid,
             dry_run,
-        } => apply(executor, whitelist, *action, app_key, *pid, *dry_run, now_unix_ms),
+        } => apply(
+            executor,
+            whitelist,
+            *action,
+            app_key,
+            *pid,
+            *dry_run,
+            now_unix_ms,
+        ),
 
-        Request::Revert { journal_id } => match executor.revert(*journal_id, "откат по запросу агента")
-        {
-            Ok(()) => Response::ActionResult {
-                journal_id: *journal_id,
-                status: "откачено".into(),
-            },
-            Err(error) => internal(error),
-        },
+        Request::Revert { journal_id } => {
+            match executor.revert(*journal_id, "откат по запросу агента") {
+                Ok(()) => Response::ActionResult {
+                    journal_id: *journal_id,
+                    status: "откачено".into(),
+                },
+                Err(error) => internal(error),
+            }
+        }
 
         Request::RevertAll { since_unix_ms } => {
             let (reverted, failed) =
@@ -170,11 +179,7 @@ mod tests {
     }
 
     impl Backend for &FakeBackend {
-        fn capture(
-            &self,
-            _a: Action,
-            _t: &Target,
-        ) -> Result<bamboo_actuate::PriorState, String> {
+        fn capture(&self, _a: Action, _t: &Target) -> Result<bamboo_actuate::PriorState, String> {
             Ok(bamboo_actuate::PriorState::new().with("eco_qos", "нет"))
         }
         fn apply(&self, a: Action, _t: &Target) -> Result<(), String> {
@@ -311,9 +316,16 @@ mod tests {
         let whitelist = UserWhitelist::new();
 
         run(&eco_qos_apply(), &executor, &whitelist, 1000);
-        let response = run(&Request::RevertAll { since_unix_ms: 0 }, &executor, &whitelist, 2000);
+        let response = run(
+            &Request::RevertAll { since_unix_ms: 0 },
+            &executor,
+            &whitelist,
+            2000,
+        );
         match response {
-            Response::ActionResult { status, .. } => assert!(status.contains("откачено записей: 1")),
+            Response::ActionResult { status, .. } => {
+                assert!(status.contains("откачено записей: 1"))
+            }
             other => panic!("ожидался ActionResult, получили {other:?}"),
         }
     }
