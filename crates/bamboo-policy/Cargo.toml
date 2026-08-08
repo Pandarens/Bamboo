@@ -10,3 +10,5 @@ authors.workspace = true
 
 [dependencies]
 bamboo-core.workspace = true
+# Только для типов, пересекающих канал агент-брокер (Action).
+serde = { version = "1", features = ["derive"] }

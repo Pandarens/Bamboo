@@ -1,9 +1,10 @@
 //! Сообщения протокола (ТЗ, раздел 13.2).
 
 use bamboo_policy::Action;
+use serde::{Deserialize, Serialize};
 
 /// Что агент просит у брокера.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum Request {
     /// Подписка на поток метрик.
     Subscribe {
@@ -63,14 +64,14 @@ pub enum Request {
 }
 
 /// Поток данных для подписки.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Stream {
     Metrics,
     Observations,
 }
 
 /// Область снимка.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Scope {
     Processes,
     System,
@@ -78,7 +79,7 @@ pub enum Scope {
 }
 
 /// Что брокер отвечает агенту.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum Response {
     Metrics {
         at_unix_ms: i64,
@@ -113,7 +114,7 @@ pub enum Response {
 }
 
 /// Код отказа.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ErrorCode {
     /// Клиент не прошёл проверку подлинности.
     NotAuthorised,

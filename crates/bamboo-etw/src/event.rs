@@ -12,11 +12,7 @@
 /// показывались device-пути вместо имён.
 pub fn friendly_image_name(raw: &str) -> String {
     // Разделителем может быть и обратный, и прямой слэш.
-    let name = raw
-        .rsplit(['\\', '/'])
-        .next()
-        .unwrap_or(raw)
-        .trim();
+    let name = raw.rsplit(['\\', '/']).next().unwrap_or(raw).trim();
 
     if name.is_empty() {
         // Путь оканчивался слэшем — вернём исходное, чтобы не потерять всё.

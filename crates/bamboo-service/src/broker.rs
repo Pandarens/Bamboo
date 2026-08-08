@@ -5,7 +5,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use bamboo_core::Result;
-use bamboo_ipc::{encode, pipe_name, Request};
+use bamboo_ipc::{pipe_name, ErrorCode, Request, Response};
 use bamboo_sys::pipe::{client_is_same_image, PipeServer};
 
 use crate::validate::{validate, BrokerPolicy, ClientFacts, Verdict};
@@ -64,49 +64,60 @@ fn serve_one_client(name: &str, policy: &BrokerPolicy) -> Result<()> {
     let mut buffer = vec![0u8; bamboo_ipc::MAX_FRAME_BYTES];
     let read = server.read(&mut buffer)?;
 
-    match bamboo_ipc::decode(&buffer[..read]) {
-        Ok(Some((body, _))) => {
-            let response = handle_request(body, &client, policy);
-            let frame = encode(&response)?;
-            server.write(&frame)?;
-        }
+    let response = match bamboo_ipc::decode(&buffer[..read]) {
+        Ok(Some((body, _))) => handle_frame(body, &client, policy),
         Ok(None) => {
             eprintln!("клиент прислал неполный кадр");
+            Response::Error {
+                code: ErrorCode::Malformed,
+                detail: "кадр пришёл не целиком".into(),
+            }
         }
         Err(error) => {
             eprintln!("кадр не разобрался: {error}");
+            Response::Error {
+                code: ErrorCode::Malformed,
+                detail: error.to_string(),
+            }
         }
-    }
+    };
+
+    let frame = bamboo_ipc::encode_message(&response)?;
+    server.write(&frame)?;
 
     server.disconnect()?;
     Ok(())
 }
 
-/// Разбирает и обрабатывает запрос. Возвращает уже сериализованный ответ.
-///
-/// Пока брокер понимает запросы на уровне валидации: полная десериализация
-/// bincode подключится вместе с общим форматом сообщений. Здесь показан
-/// путь, которым проходит команда, и что все проверки на месте.
-fn handle_request(body: &[u8], client: &ClientFacts, policy: &BrokerPolicy) -> Vec<u8> {
-    // Заглушка разбора: тело трактуется как запрос наблюдений. Реальный
-    // разбор bincode встанет сюда без изменения остальной логики.
-    let request = Request::QueryObservations { since_unix_ms: 0 };
-    let _ = body;
+/// Разбирает тело кадра в запрос, валидирует и формирует ответ.
+fn handle_frame(body: &[u8], client: &ClientFacts, policy: &BrokerPolicy) -> Response {
+    let request: Request = match bamboo_ipc::decode_message(body) {
+        Ok(request) => request,
+        Err(error) => {
+            // Клиент прислал что-то, что не разбирается в запрос. Молча
+            // не проглатываем — отвечаем понятным кодом.
+            return Response::Error {
+                code: ErrorCode::Malformed,
+                detail: error.to_string(),
+            };
+        }
+    };
 
     match validate(client, &request, policy) {
         Verdict::Allow => {
-            log_request(&request, "разрешено");
-            b"ok".to_vec()
+            println!("запрос {request:?} — разрешён");
+            // Полное исполнение подключается здесь: сейчас брокер
+            // подтверждает, что запрос прошёл все проверки.
+            Response::ActionResult {
+                journal_id: 0,
+                status: "проверки пройдены".into(),
+            }
         }
         Verdict::Deny(code, detail) => {
-            log_request(&request, &format!("отказ: {detail}"));
-            format!("error {}: {detail}", code.describe()).into_bytes()
+            println!("запрос {request:?} — отказ: {detail}");
+            Response::Error { code, detail }
         }
     }
-}
-
-fn log_request(request: &Request, verdict: &str) {
-    println!("запрос {request:?} — {verdict}");
 }
 
 /// Идентификатор текущей сессии. В консольном режиме — сессия пользователя,

@@ -15,6 +15,6 @@ pub mod frame;
 pub mod message;
 pub mod pipe;
 
-pub use frame::{decode, encode, MAX_FRAME_BYTES};
+pub use frame::{decode, decode_message, encode, encode_message, MAX_FRAME_BYTES};
 pub use message::{ErrorCode, Request, Response, Scope, Stream};
 pub use pipe::{pipe_name, PipeGuard};

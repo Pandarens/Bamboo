@@ -17,7 +17,12 @@ pub enum Autonomy {
 ///
 /// Каждое действие имеет обратный рецепт — иначе его не существует.
 /// Порядок вариантов соответствует возрастанию риска.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+///
+/// `Serialize`/`Deserialize` нужны, потому что действие пересекает канал
+/// агент-брокер в составе запроса `Apply`.
+#[derive(
+    Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize,
+)]
 pub enum Action {
     /// EcoQoS: планировщик уводит потоки на энергоэффективные ядра.
     EnableEcoQos,

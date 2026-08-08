@@ -6,9 +6,26 @@
 //! под SYSTEM, и такой подарок ему делать нельзя.
 
 use bamboo_core::{Error, Result};
+use serde::{de::DeserializeOwned, Serialize};
 
 /// Максимальный размер кадра.
 pub const MAX_FRAME_BYTES: usize = 4 * 1024 * 1024;
+
+/// Сериализует сообщение в готовый к отправке кадр.
+///
+/// Тело — bincode, снаружи — кадрирование с префиксом длины. Ограничение
+/// размера защищает брокер: он под SYSTEM, и заставить его выделить кадр
+/// произвольного размера нельзя.
+pub fn encode_message<T: Serialize>(message: &T) -> Result<Vec<u8>> {
+    let body =
+        bincode::serialize(message).map_err(|_| Error::Malformed("сообщение не сериализуется"))?;
+    encode(&body)
+}
+
+/// Разбирает сообщение из тела кадра.
+pub fn decode_message<T: DeserializeOwned>(body: &[u8]) -> Result<T> {
+    bincode::deserialize(body).map_err(|_| Error::Malformed("сообщение не разбирается"))
+}
 
 /// Длина заголовка.
 pub const HEADER_BYTES: usize = 4;
@@ -117,5 +134,49 @@ mod tests {
         let frame = encode(&body).unwrap();
         let (decoded, _) = decode(&frame).unwrap().unwrap();
         assert_eq!(decoded.len(), MAX_FRAME_BYTES);
+    }
+
+    #[test]
+    fn a_request_survives_a_full_round_trip() {
+        use crate::message::Request;
+        use bamboo_policy::Action;
+
+        let request = Request::Apply {
+            action: Action::FreezeProcess,
+            app_key: "slack.exe".into(),
+            pid: Some(4242),
+            dry_run: false,
+        };
+
+        // Кодируем как на отправку, читаем как на приёме.
+        let frame = encode_message(&request).unwrap();
+        let (body, _) = decode(&frame).unwrap().unwrap();
+        let back: Request = decode_message(body).unwrap();
+
+        assert_eq!(back, request);
+    }
+
+    #[test]
+    fn a_response_survives_a_full_round_trip() {
+        use crate::message::{ErrorCode, Response};
+
+        let response = Response::Error {
+            code: ErrorCode::RefusedByPolicy,
+            detail: "приложение в белом списке".into(),
+        };
+        let frame = encode_message(&response).unwrap();
+        let (body, _) = decode(&frame).unwrap().unwrap();
+        let back: Response = decode_message(body).unwrap();
+
+        assert_eq!(back, response);
+    }
+
+    #[test]
+    fn garbage_body_is_a_clean_error_not_a_panic() {
+        use crate::message::Request;
+        // Случайные байты не должны разбираться в запрос и не должны
+        // ронять процесс.
+        let result: Result<Request> = decode_message(&[0xFF, 0x00, 0x13, 0x37]);
+        assert!(result.is_err());
     }
 }
