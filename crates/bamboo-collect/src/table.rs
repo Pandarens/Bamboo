@@ -290,6 +290,33 @@ impl ProcessTable {
         all
     }
 
+    /// Наблюдения о росте памяти по минутному ряду L1 каждого процесса.
+    ///
+    /// Снаружи, без инструментирования, виден только рост приватной памяти —
+    /// дескрипторы и объекты GDI во времени L1 не хранит, поэтому их ряды
+    /// пусты. Анализатору нужно не меньше шести часов жизни процесса, так
+    /// что пустой результат — обычный и самый частый исход: он появится
+    /// только у давно живущих приложений вроде Teams или браузера.
+    pub fn memory_growth(&self) -> Vec<bamboo_analyze::observation::Observation> {
+        use bamboo_analyze::growth::{analyze, GrowthInput};
+
+        let mut observations = Vec::new();
+        for process in self.processes.values() {
+            let series = process.level1.private_series();
+            if series.is_empty() {
+                continue;
+            }
+            observations.extend(analyze(&GrowthInput {
+                process_name: &process.image_name,
+                lifetime_ms: process.observed_ms(),
+                private_bytes: &series,
+                handles: &[],
+                gdi_objects: &[],
+            }));
+        }
+        observations
+    }
+
     /// Оценка занятой под историю памяти. Бюджет из раздела 4 ТЗ должен
     /// измеряться, а не декларироваться.
     pub fn estimated_memory_bytes(&self) -> usize {
@@ -474,6 +501,44 @@ mod tests {
         }
         let tracked = table.get(ProcessId::new(100, 1)).unwrap();
         assert_eq!(tracked.history.len(), L0_CAPACITY);
+    }
+
+    #[test]
+    fn memory_growth_surfaces_a_long_lived_leak() {
+        let mut table = table();
+        // Семь часов по тику в минуту, приватная память растёт линейно
+        // на 40 МБ в час — выше порога и без единого возврата.
+        let minutes = 7 * 60u64;
+        for minute in 0..=minutes {
+            let mib = 300 + (minute * 40) / 60;
+            let mut s = sample(100, minute * 10, 0);
+            s.private_pages = Bytes::from_mib(mib);
+            table.begin_tick();
+            table.observe(s, at(minute * 60_000), 60_000, || identity("teams.exe"));
+            table.end_tick();
+        }
+
+        let observations = table.memory_growth();
+        assert!(
+            observations.iter().any(|o| o.summary.contains("teams.exe")),
+            "рост памяти давно живущего процесса не замечен: {observations:?}"
+        );
+    }
+
+    #[test]
+    fn memory_growth_stays_quiet_for_a_flat_process() {
+        let mut table = table();
+        for minute in 0..=(7 * 60u64) {
+            let mut s = sample(100, minute * 10, 0);
+            s.private_pages = Bytes::from_mib(300); // ровная память
+            table.begin_tick();
+            table.observe(s, at(minute * 60_000), 60_000, || identity("idle.exe"));
+            table.end_tick();
+        }
+        assert!(
+            table.memory_growth().is_empty(),
+            "у ровного процесса не должно быть подозрений на утечку"
+        );
     }
 
     #[test]

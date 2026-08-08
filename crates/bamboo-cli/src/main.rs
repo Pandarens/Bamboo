@@ -29,6 +29,7 @@ fn main() {
         "boot" => commands::boot(),
         "power" => commands::power(),
         "trace" => commands::trace(&args[1..]),
+        "leaks" => commands::leaks(&args[1..]),
         "record" => commands::record(&args[1..]),
         "diff" => commands::diff(),
         "optimize" => optimize::plan(args.iter().any(|arg| arg == "--apply")),
@@ -63,6 +64,7 @@ Bamboo {} — наблюдатель за системой
   bamboo boot                время загрузки и что его удлиняет
   bamboo power               пробуждения из сна и их причины
   bamboo trace [--for N]     короткоживущие процессы, невидимые для опроса
+  bamboo leaks [--for N]     наблюдать и оценить рост памяти по ряду L1
   bamboo record --out F [--for N]  записать трассу в файл для анализа
   bamboo diff                что появилось в системе с прошлого снимка
   bamboo budget [--for N]    измерить собственное потребление за N секунд
@@ -205,6 +207,32 @@ mod commands {
         })?;
 
         render::trace(&tracker, &recorder, total, duration);
+        Ok(())
+    }
+
+    pub fn leaks(args: &[String]) -> Result<()> {
+        // Наблюдаем таблицу процессов и кормим её минутный ряд L1
+        // анализатору роста памяти. На живой машине из короткого прогона
+        // выводов не будет — анализатору нужно шесть часов жизни процесса,
+        // — но труба целиком настоящая: те же данные использует агент.
+        let watch_for = flag_secs(args, "--for").unwrap_or(Duration::from_secs(30));
+
+        let mut collector = Collector::new();
+        collector.tick()?; // первый тик — база для дельт
+
+        println!(
+            "Наблюдаю рост памяти {} с. Оценка появляется только у давно\n\
+             живущих процессов; в агенте она идёт по суточному ряду.\n",
+            watch_for.as_secs()
+        );
+
+        let started = std::time::Instant::now();
+        while started.elapsed() < watch_for {
+            std::thread::sleep(collector.next_interval());
+            collector.tick()?;
+        }
+
+        render::leaks(&collector.table().memory_growth(), started.elapsed());
         Ok(())
     }
 

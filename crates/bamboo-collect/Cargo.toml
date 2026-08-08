@@ -10,6 +10,7 @@ authors.workspace = true
 
 [dependencies]
 bamboo-core.workspace = true
+bamboo-analyze.workspace = true
 
 [target.'cfg(windows)'.dependencies]
 bamboo-sys.workspace = true

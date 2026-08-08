@@ -444,6 +444,30 @@ pub fn system_diff(observation: &bamboo_analyze::Observation) {
     }
 }
 
+pub fn leaks(observations: &[bamboo_analyze::Observation], watched: Duration) {
+    if observations.is_empty() {
+        println!(
+            "Признаков роста памяти нет.\n\
+             Наблюдение шло {} с, а рост оценивается только у процессов,\n\
+             живущих не меньше шести часов: у свежезапущенных растёт всё.\n\
+             В работающем агенте эта проверка идёт по суточному ряду L1.",
+            watched.as_secs()
+        );
+        return;
+    }
+
+    println!("Похоже на рост памяти у {} процессов:\n", observations.len());
+    for observation in observations {
+        wrap(&observation.summary, 78, "");
+        if let Some(detail) = &observation.detail {
+            for line in detail.lines() {
+                println!("  {line}");
+            }
+        }
+        println!();
+    }
+}
+
 pub fn budget_header(duration: Duration) {
     println!(
         "Измеряю собственное потребление {} с. Бюджет из раздела 4 ТЗ:\n\

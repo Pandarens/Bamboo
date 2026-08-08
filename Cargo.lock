@@ -443,6 +443,7 @@ dependencies = [
 name = "bamboo-collect"
 version = "0.1.0"
 dependencies = [
+ "bamboo-analyze",
  "bamboo-core",
  "bamboo-sys",
 ]
