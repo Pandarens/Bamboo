@@ -6,6 +6,7 @@
 #![forbid(unsafe_code)]
 
 pub mod cadence;
+pub mod level1;
 pub mod ring;
 pub mod table;
 
@@ -13,6 +14,7 @@ pub mod table;
 pub mod collector;
 
 pub use cadence::{Cadence, CadenceController, Conditions};
+pub use level1::{Level1Series, MinutePoint, L1_CAPACITY};
 pub use ring::RingBuffer;
 pub use table::{
     MetricPoint, ProcessIdentity, ProcessTable, TickChanges, TrackedProcess, L0_CAPACITY,

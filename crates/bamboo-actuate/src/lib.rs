@@ -8,12 +8,14 @@
 
 pub mod executor;
 pub mod state;
+pub mod watchdog;
 
 #[cfg(windows)]
 mod windows;
 
 pub use executor::{Backend, Executor, Outcome};
 pub use state::{yes_no, PriorState};
+pub use watchdog::{remember_reverted, sweep, HealthProbe, WatchdogSweep};
 
 #[cfg(windows)]
 pub use windows::SystemBackend;
