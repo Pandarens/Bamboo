@@ -4,10 +4,14 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
+use bamboo_actuate::{Executor, SystemBackend};
 use bamboo_core::Result;
 use bamboo_ipc::{pipe_name, ErrorCode, Request, Response};
+use bamboo_journal::Journal;
+use bamboo_policy::UserWhitelist;
 use bamboo_sys::pipe::{client_is_same_image, PipeServer};
 
+use crate::execute;
 use crate::validate::{validate, BrokerPolicy, ClientFacts, Verdict};
 
 /// Сколько времени ждать между попытками пересоздать канал после сбоя.
@@ -23,9 +27,13 @@ pub fn run_as_service(stop: bamboo_sys::StopSignal) {
     let name = pipe_name(current_session_id());
     let policy = BrokerPolicy::default();
 
+    let journal = open_broker_journal();
+    let executor = Executor::new(&journal, SystemBackend);
+    let whitelist = UserWhitelist::new();
+
     while !stop.stop_requested() {
         // Один клиент за раз; при сбое канала пересоздаём после паузы.
-        if serve_one_client(&name, &policy).is_err() {
+        if serve_one_client(&name, &policy, &executor, &whitelist).is_err() {
             std::thread::sleep(RETRY_PAUSE);
         }
     }
@@ -49,8 +57,12 @@ pub fn run_console() -> Result<()> {
 
     let policy = BrokerPolicy::default();
 
+    let journal = open_broker_journal();
+    let executor = Executor::new(&journal, SystemBackend);
+    let whitelist = UserWhitelist::new();
+
     while !stop.load(Ordering::Relaxed) {
-        match serve_one_client(&name, &policy) {
+        match serve_one_client(&name, &policy, &executor, &whitelist) {
             Ok(()) => {}
             Err(error) => {
                 eprintln!("канал сорвался: {error}. Пересоздаю через секунду.");
@@ -64,7 +76,12 @@ pub fn run_console() -> Result<()> {
 }
 
 /// Обслуживает одно подключение от начала до конца.
-fn serve_one_client(name: &str, policy: &BrokerPolicy) -> Result<()> {
+fn serve_one_client(
+    name: &str,
+    policy: &BrokerPolicy,
+    executor: &Executor<'_, SystemBackend>,
+    whitelist: &UserWhitelist,
+) -> Result<()> {
     let server = PipeServer::create(name)?;
     let client_pid = server.accept()?;
 
@@ -83,7 +100,7 @@ fn serve_one_client(name: &str, policy: &BrokerPolicy) -> Result<()> {
     let read = server.read(&mut buffer)?;
 
     let response = match bamboo_ipc::decode(&buffer[..read]) {
-        Ok(Some((body, _))) => handle_frame(body, &client, policy),
+        Ok(Some((body, _))) => handle_frame(body, &client, policy, executor, whitelist),
         Ok(None) => {
             eprintln!("клиент прислал неполный кадр");
             Response::Error {
@@ -107,8 +124,14 @@ fn serve_one_client(name: &str, policy: &BrokerPolicy) -> Result<()> {
     Ok(())
 }
 
-/// Разбирает тело кадра в запрос, валидирует и формирует ответ.
-fn handle_frame(body: &[u8], client: &ClientFacts, policy: &BrokerPolicy) -> Response {
+/// Разбирает тело кадра в запрос, валидирует и исполняет.
+fn handle_frame(
+    body: &[u8],
+    client: &ClientFacts,
+    policy: &BrokerPolicy,
+    executor: &Executor<'_, SystemBackend>,
+    whitelist: &UserWhitelist,
+) -> Response {
     let request: Request = match bamboo_ipc::decode_message(body) {
         Ok(request) => request,
         Err(error) => {
@@ -123,13 +146,11 @@ fn handle_frame(body: &[u8], client: &ClientFacts, policy: &BrokerPolicy) -> Res
 
     match validate(client, &request, policy) {
         Verdict::Allow => {
-            println!("запрос {request:?} — разрешён");
-            // Полное исполнение подключается здесь: сейчас брокер
-            // подтверждает, что запрос прошёл все проверки.
-            Response::ActionResult {
-                journal_id: 0,
-                status: "проверки пройдены".into(),
-            }
+            println!("запрос {request:?} — разрешён, исполняю");
+            // Валидация пройдена — запрос идёт через того же исполнителя,
+            // что и CLI: политика, журнал, действие, подтверждение.
+            let now = bamboo_core::SampleTime::wall_clock_now();
+            execute::run(&request, executor, whitelist, now)
         }
         Verdict::Deny(code, detail) => {
             println!("запрос {request:?} — отказ: {detail}");
@@ -149,6 +170,27 @@ fn current_session_id() -> u32 {
 fn journal_path() -> PathBuf {
     let base = std::env::var("ProgramData").unwrap_or_else(|_| ".".to_string());
     PathBuf::from(base).join("Bamboo").join("journal.db")
+}
+
+/// Открывает журнал брокера. Под SYSTEM путь в ProgramData доступен всегда;
+/// в консольном режиме без прав он может не открыться — тогда падаем на
+/// журнал в памяти, чтобы отладка не требовала администратора. Действия при
+/// этом применяются и откатываются, но между запусками не сохраняются.
+fn open_broker_journal() -> Journal {
+    let path = journal_path();
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    match Journal::open(&path) {
+        Ok(journal) => journal,
+        Err(error) => {
+            eprintln!(
+                "журнал {} не открылся ({error}); работаю с журналом в памяти",
+                path.display()
+            );
+            Journal::in_memory().expect("журнал в памяти обязан открыться")
+        }
+    }
 }
 
 /// Ставит обработчик Ctrl+C, который просит цикл остановиться.

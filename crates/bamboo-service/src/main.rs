@@ -14,6 +14,8 @@ mod validate;
 
 #[cfg(windows)]
 mod broker;
+#[cfg(windows)]
+mod execute;
 
 #[cfg(not(windows))]
 fn main() {

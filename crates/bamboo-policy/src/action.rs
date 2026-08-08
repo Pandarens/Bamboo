@@ -110,6 +110,18 @@ impl Action {
             Action::DisableService => "отключить службу",
         }
     }
+
+    /// Применяется ли действие к конкретному процессу (нужен PID).
+    ///
+    /// Остальные действия адресуются по имени: служба, задача планировщика
+    /// или элемент автозагрузки живут дольше любого своего процесса, и PID
+    /// им не только не нужен, но и вреден — сегодня один, завтра другой.
+    pub fn targets_process(self) -> bool {
+        matches!(
+            self,
+            Action::EnableEcoQos | Action::LowerMemoryPriority | Action::FreezeProcess
+        )
+    }
 }
 
 impl fmt::Display for Action {
@@ -167,6 +179,20 @@ mod tests {
         assert_eq!(Action::FreezeProcess.risk(), 4);
         assert_eq!(Action::StopService.risk(), 5);
         assert_eq!(Action::DisableService.risk(), 6);
+    }
+
+    #[test]
+    fn process_actions_need_a_pid_and_service_actions_do_not() {
+        assert!(Action::EnableEcoQos.targets_process());
+        assert!(Action::LowerMemoryPriority.targets_process());
+        assert!(Action::FreezeProcess.targets_process());
+        // Службы, задачи и автозагрузка адресуются по имени, не по PID.
+        assert!(!Action::StopService.targets_process());
+        assert!(!Action::DisableService.targets_process());
+        assert!(!Action::DisableScheduledTask.targets_process());
+        assert!(!Action::DisableStartupItem.targets_process());
+        assert!(!Action::DisableWakeTimer.targets_process());
+        assert!(!Action::DelayServiceStart.targets_process());
     }
 
     #[test]
