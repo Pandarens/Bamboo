@@ -43,10 +43,25 @@ pub struct Attribute {
 pub fn read_smart_data(drive: &Drive, vendor: &str, model: &str) -> Result<SmartHealth> {
     if !drive.is_writable() {
         return Err(Error::Unsupported(
-            "для ATA pass-through устройство должно быть открыто на запись",
+            "для чтения SMART устройство должно быть открыто на запись",
         ));
     }
 
+    // Сначала пробуем прямой ATA pass-through. Часть контроллеров, включая
+    // бюджетные Apacer, отвергают его с ошибкой 1306 — тогда переходим
+    // на старый SMART_RCV_DRIVE_DATA, который драйвер транслирует сам
+    // и который принимает почти любой SATA-контроллер.
+    match read_via_pass_through(drive) {
+        Ok(data) => Ok(build_health(&parse_attributes(&data), vendor, model)),
+        Err(_) => {
+            let data = read_via_smart_ioctl(drive)?;
+            Ok(build_health(&parse_attributes(&data), vendor, model))
+        }
+    }
+}
+
+/// Читает 512 байт SMART через `IOCTL_ATA_PASS_THROUGH`.
+fn read_via_pass_through(drive: &Drive) -> Result<Vec<u8>> {
     let header_size = size_of::<ATA_PASS_THROUGH_EX>();
     let total = header_size + SMART_DATA_BYTES;
 
@@ -82,9 +97,45 @@ pub fn read_smart_data(drive: &Drive, vendor: &str, model: &str) -> Result<Smart
     if (returned as usize) < total {
         return Err(Error::Malformed("ответ SMART READ DATA короче ожидаемого"));
     }
+    Ok(buffer[header_size..header_size + SMART_DATA_BYTES].to_vec())
+}
 
-    let attributes = parse_attributes(&buffer[header_size..header_size + SMART_DATA_BYTES]);
-    Ok(build_health(&attributes, vendor, model))
+/// Читает 512 байт SMART через старый `SMART_RCV_DRIVE_DATA`.
+///
+/// Формат древний, времён IDE, но именно поэтому его поддерживают почти
+/// все контроллеры: драйвер сам превращает его в нужную ATA-команду.
+fn read_via_smart_ioctl(drive: &Drive) -> Result<Vec<u8>> {
+    let mut params = SENDCMDINPARAMS {
+        buffer_size: SMART_DATA_BYTES as u32,
+        drive_number: drive.index() as u8,
+        ..Default::default()
+    };
+    params.registers.features = SMART_READ_DATA;
+    params.registers.sector_count = 1;
+    params.registers.sector_number = 1;
+    params.registers.cyl_low = ATA_SMART_LBA_MID;
+    params.registers.cyl_high = ATA_SMART_LBA_HIGH;
+    params.registers.drive_head = SMART_DRIVE_HEAD;
+    params.registers.command = ATA_COMMAND_SMART;
+
+    let input_size = SENDCMD_IN_HEADER_BYTES + SMART_DATA_BYTES;
+    let mut input = vec![0u8; input_size];
+    // SAFETY: заголовок укладывается в начало буфера нужного размера.
+    unsafe {
+        core::ptr::write_unaligned(input.as_mut_ptr().cast::<SENDCMDINPARAMS>(), params);
+    }
+
+    let output_size = SENDCMD_OUT_HEADER_BYTES + SMART_DATA_BYTES;
+    let mut output = vec![0u8; output_size];
+
+    let returned = drive.control(SMART_RCV_DRIVE_DATA, &input, &mut output)?;
+    if (returned as usize) < output_size {
+        return Err(Error::Malformed(
+            "ответ SMART_RCV_DRIVE_DATA короче ожидаемого",
+        ));
+    }
+
+    Ok(output[SENDCMD_OUT_HEADER_BYTES..SENDCMD_OUT_HEADER_BYTES + SMART_DATA_BYTES].to_vec())
 }
 
 /// Разбирает таблицу атрибутов.

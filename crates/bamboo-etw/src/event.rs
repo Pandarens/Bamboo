@@ -1,5 +1,31 @@
 //! События жизненного цикла процессов.
 
+/// Приводит имя образа из провайдера Kernel-Process к читаемому виду.
+///
+/// Провайдер отдаёт NT-путь устройства вида
+/// `\Device\HarddiskVolume3\Windows\System32\svchost.exe`, а не привычный
+/// `C:\...`. Букву диска без обращения к таблице томов не восстановить,
+/// но для отчёта важно само имя файла, а не полный путь: пользователю
+/// нужно «svchost.exe», а не «\Device\HarddiskVolume3\...».
+///
+/// Обнаружено на живой ETW-трассировке: без нормализации в отчёте
+/// показывались device-пути вместо имён.
+pub fn friendly_image_name(raw: &str) -> String {
+    // Разделителем может быть и обратный, и прямой слэш.
+    let name = raw
+        .rsplit(['\\', '/'])
+        .next()
+        .unwrap_or(raw)
+        .trim();
+
+    if name.is_empty() {
+        // Путь оканчивался слэшем — вернём исходное, чтобы не потерять всё.
+        raw.trim().to_string()
+    } else {
+        name.to_string()
+    }
+}
+
 /// Что произошло с процессом.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ProcessEvent {
@@ -80,6 +106,42 @@ mod tests {
         };
         assert!(process.invisible_to_polling(5_000));
         assert!(!process.invisible_to_polling(1_000));
+    }
+
+    #[test]
+    fn an_nt_device_path_becomes_a_plain_file_name() {
+        // Ровно то, что пришло с живой трассировки.
+        assert_eq!(
+            friendly_image_name("\\Device\\HarddiskVolume3\\Windows\\System32\\svchost.exe"),
+            "svchost.exe"
+        );
+    }
+
+    #[test]
+    fn a_plain_name_is_left_alone() {
+        assert_eq!(
+            friendly_image_name("CompatTelRunner.exe"),
+            "CompatTelRunner.exe"
+        );
+    }
+
+    #[test]
+    fn forward_slashes_are_handled_too() {
+        assert_eq!(
+            friendly_image_name("C:/Program Files/app/foo.exe"),
+            "foo.exe"
+        );
+    }
+
+    #[test]
+    fn a_trailing_slash_does_not_lose_everything() {
+        let path = "\\Device\\HarddiskVolume3\\Windows\\";
+        assert_eq!(friendly_image_name(path), path.trim());
+    }
+
+    #[test]
+    fn empty_input_does_not_panic() {
+        assert_eq!(friendly_image_name(""), "");
     }
 
     #[test]

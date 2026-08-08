@@ -22,7 +22,7 @@ pub mod tracker;
 #[cfg(windows)]
 pub mod session;
 
-pub use event::{CompletedProcess, ProcessEvent};
+pub use event::{friendly_image_name, CompletedProcess, ProcessEvent};
 pub use recorder::{Conditions, Dump, Recorder, TriggerReason};
 pub use tracker::{ImageSummary, ProcessTracker};
 

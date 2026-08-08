@@ -137,6 +137,63 @@ pub struct ATA_PASS_THROUGH_EX {
 pub const ATA_FLAGS_DRDY_REQUIRED: u16 = 0x01;
 pub const ATA_FLAGS_DATA_IN: u16 = 0x02;
 
+/// Старый путь чтения SMART: `SMART_RCV_DRIVE_DATA`.
+///
+/// Драйвер хранилища транслирует его в ATA-команду сам, поэтому его
+/// принимают контроллеры, отвергающие прямой `IOCTL_ATA_PASS_THROUGH`
+/// с ошибкой 1306. Обнаружено на живом Apacer AS350.
+pub const SMART_RCV_DRIVE_DATA: u32 = 0x0007_C088;
+
+/// Регистры устройства IDE. Ровно 8 байт.
+#[allow(clippy::upper_case_acronyms)]
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+pub struct IDEREGS {
+    pub features: u8,
+    pub sector_count: u8,
+    pub sector_number: u8,
+    pub cyl_low: u8,
+    pub cyl_high: u8,
+    pub drive_head: u8,
+    pub command: u8,
+    pub reserved: u8,
+}
+
+/// Вход `SMART_RCV_DRIVE_DATA`. За заголовком идёт область данных.
+#[allow(clippy::upper_case_acronyms)]
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+pub struct SENDCMDINPARAMS {
+    pub buffer_size: u32,
+    pub registers: IDEREGS,
+    pub drive_number: u8,
+    pub reserved: [u8; 3],
+    pub reserved_dwords: [u32; 4],
+    // bBuffer[1] — гибкий хвост, кладём отдельно в общий буфер.
+}
+
+/// Заголовок выхода `SMART_RCV_DRIVE_DATA`. За ним — 512 байт SMART-данных.
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+pub struct SENDCMDOUTPARAMS_HEADER {
+    pub buffer_size: u32,
+    pub driver_error: u8,
+    pub ide_error: u8,
+    pub reserved: [u8; 2],
+    pub reserved_dwords: [u32; 2],
+    // bBuffer[1] — данные начинаются здесь.
+}
+
+/// Подкоманда SMART READ DATA для регистра Features.
+pub const SMART_READ_DATA: u8 = 0xD0;
+/// Значение регистра Device/Head для доступа к SMART.
+pub const SMART_DRIVE_HEAD: u8 = 0xA0;
+
+/// Начало данных в выходном буфере: после заголовка SENDCMDOUTPARAMS.
+pub const SENDCMD_OUT_HEADER_BYTES: usize = 16;
+/// Начало данных во входном буфере: после заголовка SENDCMDINPARAMS.
+pub const SENDCMD_IN_HEADER_BYTES: usize = 32;
+
 /// Команда SMART и её подкоманда чтения данных.
 pub const ATA_COMMAND_SMART: u8 = 0xB0;
 pub const ATA_SMART_READ_DATA: u8 = 0xD0;
@@ -152,6 +209,11 @@ const _: () = {
     assert!(core::mem::size_of::<STORAGE_PROTOCOL_SPECIFIC_DATA>() == 40);
     assert!(core::mem::size_of::<STORAGE_PROTOCOL_DATA_DESCRIPTOR>() == 48);
     assert!(core::mem::size_of::<STORAGE_DEVICE_DESCRIPTOR_HEADER>() == 36);
+    assert!(core::mem::size_of::<IDEREGS>() == 8);
+    // Заголовки должны совпадать со смещениями данных, иначе разбор
+    // ответа уедет.
+    assert!(core::mem::size_of::<SENDCMDINPARAMS>() == SENDCMD_IN_HEADER_BYTES);
+    assert!(core::mem::size_of::<SENDCMDOUTPARAMS_HEADER>() == SENDCMD_OUT_HEADER_BYTES);
 };
 
 #[cfg(test)]

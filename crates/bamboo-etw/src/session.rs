@@ -73,9 +73,10 @@ fn parse(header: &EventHeader, fields: &EventFields) -> Option<ProcessEvent> {
             at_unix_ms: header.at_unix_ms,
             pid: fields.number("ProcessID")? as u32,
             parent_pid: fields.number("ParentProcessID").unwrap_or(0) as u32,
-            // Имя приходит однобайтовой строкой; если его нет,
-            // событие бесполезно.
-            image_name: fields.text("ImageName")?,
+            // Провайдер отдаёт NT-путь устройства
+            // (\Device\HarddiskVolumeN\...\foo.exe); приводим к имени файла.
+            // Если имени нет вовсе — событие бесполезно.
+            image_name: crate::event::friendly_image_name(&fields.text("ImageName")?),
             session_id: fields.number("SessionID").unwrap_or(0) as u32,
         }),
 
