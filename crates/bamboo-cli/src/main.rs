@@ -30,6 +30,7 @@ fn main() {
         "power" => commands::power(),
         "trace" => commands::trace(&args[1..]),
         "record" => commands::record(&args[1..]),
+        "diff" => commands::diff(),
         "optimize" => optimize::plan(args.iter().any(|arg| arg == "--apply")),
         "journal" => optimize::show_journal(),
         "revert" => optimize::revert(&args[1..]),
@@ -63,6 +64,7 @@ Bamboo {} — наблюдатель за системой
   bamboo power               пробуждения из сна и их причины
   bamboo trace [--for N]     короткоживущие процессы, невидимые для опроса
   bamboo record --out F [--for N]  записать трассу в файл для анализа
+  bamboo diff                что появилось в системе с прошлого снимка
   bamboo budget [--for N]    измерить собственное потребление за N секунд
 
   bamboo optimize            показать, что было бы сделано (ничего не меняет)
@@ -206,6 +208,46 @@ mod commands {
         Ok(())
     }
 
+    pub fn diff() -> Result<()> {
+        use bamboo_analyze::sysdiff::{observe, SystemSnapshot};
+
+        // Снимаем текущее состояние: службы и автозагрузка пользователя.
+        // Остальные категории (задачи, драйверы, приложения) подключатся
+        // по мере готовности их перечисления.
+        let mut snapshot = SystemSnapshot::new();
+        snapshot.services = bamboo_sys::service_names()
+            .unwrap_or_default()
+            .into_iter()
+            .collect();
+        snapshot.startup_items = bamboo_sys::user_startup_items()
+            .unwrap_or_default()
+            .into_iter()
+            .map(|item| item.name)
+            .collect();
+
+        let path = snapshot_path();
+        let previous = load_snapshot(&path);
+
+        // Сохраняем текущий снимок для следующего сравнения.
+        save_snapshot(&path, &snapshot);
+
+        match previous {
+            Some(previous) => {
+                let observation = observe(&bamboo_analyze::sysdiff::diff(&previous, &snapshot));
+                render::system_diff(&observation);
+            }
+            None => {
+                println!(
+                    "Снят первый снимок системы: {} служб, {} элементов автозагрузки.\n\
+                     Запустите команду снова позже — покажу, что изменилось.",
+                    snapshot.services.len(),
+                    snapshot.startup_items.len()
+                );
+            }
+        }
+        Ok(())
+    }
+
     pub fn record(args: &[String]) -> Result<()> {
         use bamboo_store::{Trace, TraceFrame, TraceProcess};
 
@@ -291,5 +333,41 @@ mod commands {
         let index = args.iter().position(|a| a == name)?;
         let value: u64 = args.get(index + 1)?.parse().ok()?;
         Some(Duration::from_secs(value.max(1)))
+    }
+
+    fn snapshot_path() -> std::path::PathBuf {
+        let base = std::env::var("LOCALAPPDATA").unwrap_or_else(|_| ".".to_string());
+        std::path::PathBuf::from(base)
+            .join("Bamboo")
+            .join("system-snapshot.txt")
+    }
+
+    /// Читает прошлый снимок. Формат простой и разбираемый глазами:
+    /// по строке на сущность, «категория:имя».
+    fn load_snapshot(path: &std::path::Path) -> Option<bamboo_analyze::sysdiff::SystemSnapshot> {
+        let text = std::fs::read_to_string(path).ok()?;
+        let mut snapshot = bamboo_analyze::sysdiff::SystemSnapshot::new();
+        for line in text.lines() {
+            if let Some(name) = line.strip_prefix("service:") {
+                snapshot.services.insert(name.to_string());
+            } else if let Some(name) = line.strip_prefix("startup:") {
+                snapshot.startup_items.insert(name.to_string());
+            }
+        }
+        Some(snapshot)
+    }
+
+    fn save_snapshot(path: &std::path::Path, snapshot: &bamboo_analyze::sysdiff::SystemSnapshot) {
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        let mut text = String::new();
+        for name in &snapshot.services {
+            text.push_str(&format!("service:{name}\n"));
+        }
+        for name in &snapshot.startup_items {
+            text.push_str(&format!("startup:{name}\n"));
+        }
+        let _ = std::fs::write(path, text);
     }
 }

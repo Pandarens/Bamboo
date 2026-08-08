@@ -18,6 +18,7 @@ pub mod origin;
 pub mod regression;
 pub mod report;
 pub mod spike;
+pub mod sysdiff;
 pub mod tbw;
 pub mod wear;
 
@@ -31,5 +32,6 @@ pub use origin::{attribute, Origin, ProcessDescriptor};
 pub use regression::{fit, Trend};
 pub use report::{weekly_html, weekly_json, weekly_markdown, ActionEffect, WeeklyData};
 pub use spike::SpikeInput;
+pub use sysdiff::{diff as system_diff, SystemDiff, SystemSnapshot};
 pub use tbw::{rating_for, TbwRating};
 pub use wear::{WearInput, WearVerdict};

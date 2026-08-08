@@ -434,6 +434,16 @@ pub fn journal(entries: &[Entry], path: &str) {
     println!("\nСейчас действует изменений: {active}. Полный откат: bamboo revert --all");
 }
 
+pub fn system_diff(observation: &bamboo_analyze::Observation) {
+    wrap(&observation.summary, 78, "");
+    if let Some(detail) = &observation.detail {
+        println!();
+        for line in detail.lines() {
+            println!("  {line}");
+        }
+    }
+}
+
 pub fn budget_header(duration: Duration) {
     println!(
         "Измеряю собственное потребление {} с. Бюджет из раздела 4 ТЗ:\n\
