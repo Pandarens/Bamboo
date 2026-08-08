@@ -479,7 +479,10 @@ pub fn leaks(observations: &[bamboo_analyze::Observation], watched: Duration) {
         return;
     }
 
-    println!("Похоже на рост памяти у {} процессов:\n", observations.len());
+    println!(
+        "Похоже на рост памяти у {} процессов:\n",
+        observations.len()
+    );
     for observation in observations {
         wrap(&observation.summary, 78, "");
         if let Some(detail) = &observation.detail {

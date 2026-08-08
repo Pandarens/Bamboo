@@ -548,9 +548,12 @@ mod tests {
         // на протяжении трёх с лишним минут.
         for tick in 0..20u64 {
             table.begin_tick();
-            table.observe(sample(100, tick * 500, 0), at(tick * 10_000), 10_000, || {
-                identity("app.exe")
-            });
+            table.observe(
+                sample(100, tick * 500, 0),
+                at(tick * 10_000),
+                10_000,
+                || identity("app.exe"),
+            );
             table.end_tick();
         }
 

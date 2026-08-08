@@ -60,8 +60,15 @@ fn wide(text: &str) -> Vec<u16> {
 fn open(root: HKEY, path: &str, extra_access: u32) -> Option<Key> {
     let wide_path = wide(path);
     let mut handle: HKEY = core::ptr::null_mut();
-    let status =
-        unsafe { RegOpenKeyExW(root, wide_path.as_ptr(), 0, KEY_READ | extra_access, &mut handle) };
+    let status = unsafe {
+        RegOpenKeyExW(
+            root,
+            wide_path.as_ptr(),
+            0,
+            KEY_READ | extra_access,
+            &mut handle,
+        )
+    };
     (status == ERROR_SUCCESS).then_some(Key(handle))
 }
 
