@@ -5,6 +5,7 @@ use std::collections::HashMap;
 use bamboo_core::app::{PathNormalizer, Publisher};
 use bamboo_core::{AppKey, Bytes, Nanos, Pid, ProcessId, ProcessSample, SampleTime};
 
+use crate::level1::Level1Series;
 use crate::ring::RingBuffer;
 
 /// Глубина буфера L0 в точках: 600 сэмплов, то есть 10 минут при опросе
@@ -67,6 +68,12 @@ pub struct TrackedProcess {
     pub written: Bytes,
 
     pub history: RingBuffer<MetricPoint>,
+
+    /// Минутная агрегация L1: сутки истории поверх секундного L0.
+    /// Питается теми же точками, что и `history`, но переживает их: L0
+    /// хранит 10 минут, L1 — сутки, и анализатор роста памяти работает
+    /// именно по нему.
+    pub level1: Level1Series,
 
     /// Предыдущий сырой сэмпл — база для дельт.
     prev: ProcessSample,
@@ -180,6 +187,7 @@ impl ProcessTable {
                     // процесс съел до того, как мы его увидели, нам неизвестно,
                     // и приписывать это одному интервалу нельзя.
                     history: RingBuffer::with_capacity(L0_CAPACITY),
+                    level1: Level1Series::new(),
                     prev: sample,
                     seen_at_generation: generation,
                 },
@@ -196,14 +204,18 @@ impl ProcessTable {
         let read_delta = sample.read_bytes.saturating_sub(tracked.prev.read_bytes);
         let write_delta = sample.write_bytes.saturating_sub(tracked.prev.write_bytes);
 
-        tracked.history.push(MetricPoint {
+        let point = MetricPoint {
             cpu_ms: cpu_delta.as_millis().min(u32::MAX as u64) as u32,
             private_kib: sample.private_pages.as_kib().min(u32::MAX as u64) as u32,
             working_set_private_kib: sample.working_set_private.as_kib().min(u32::MAX as u64)
                 as u32,
             read_kib: (read_delta / 1024).min(u32::MAX as u64) as u32,
             write_kib: (write_delta / 1024).min(u32::MAX as u64) as u32,
-        });
+        };
+        tracked.history.push(point);
+        // Та же точка идёт в минутную агрегацию: L1 сам решит, когда закрыть
+        // минуту, по монотонному времени сэмпла.
+        tracked.level1.push(at.monotonic_ms, &point);
 
         tracked.cpu_share = if interval_ms == 0 {
             0.0
@@ -284,7 +296,12 @@ impl ProcessTable {
         let per_entry = core::mem::size_of::<TrackedProcess>() + core::mem::size_of::<ProcessId>();
         self.processes
             .values()
-            .map(|p| per_entry + p.history.allocated_bytes() + p.image_name.len())
+            .map(|p| {
+                per_entry
+                    + p.history.allocated_bytes()
+                    + p.level1.allocated_bytes()
+                    + p.image_name.len()
+            })
             .sum()
     }
 }
@@ -457,6 +474,32 @@ mod tests {
         }
         let tracked = table.get(ProcessId::new(100, 1)).unwrap();
         assert_eq!(tracked.history.len(), L0_CAPACITY);
+    }
+
+    #[test]
+    fn level1_accumulates_minutes_across_ticks() {
+        let mut table = table();
+        // Первый тик — только база, без точки. Дальше по тику в 10 секунд
+        // на протяжении трёх с лишним минут.
+        for tick in 0..20u64 {
+            table.begin_tick();
+            table.observe(sample(100, tick * 500, 0), at(tick * 10_000), 10_000, || {
+                identity("app.exe")
+            });
+            table.end_tick();
+        }
+
+        let tracked = table.get(ProcessId::new(100, 1)).unwrap();
+        // 20 тиков по 10 с — около 190 секунд, значит закрылось не меньше
+        // двух полных минут.
+        assert!(
+            tracked.level1.len() >= 2,
+            "L1 не набрал минут: {}",
+            tracked.level1.len()
+        );
+        // Ряд для анализатора роста непустой и растёт по времени.
+        let series = tracked.level1.private_series();
+        assert!(!series.is_empty());
     }
 
     #[test]

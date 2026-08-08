@@ -184,6 +184,16 @@ impl Level1Series {
         self.history.is_empty() && self.current.is_none()
     }
 
+    /// Сколько байт занято под минутную историю. Нужно для контроля
+    /// бюджета памяти наравне с L0.
+    pub fn allocated_bytes(&self) -> usize {
+        self.history.allocated_bytes()
+            + self
+                .current
+                .as_ref()
+                .map_or(0, |_| core::mem::size_of::<MinuteAccumulator>())
+    }
+
     /// Временной ряд приватной памяти для анализатора роста: пары
     /// «время, байты». Берётся среднее за минуту.
     pub fn private_series(&self) -> Vec<(u64, f64)> {
