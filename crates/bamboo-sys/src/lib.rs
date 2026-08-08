@@ -34,6 +34,7 @@ pub use apps::installed_applications;
 pub use boot::{boot_culprits, boot_history, BootCulprit, BootRecord};
 pub use budget::{apply_self_limits, own_memory, OwnMemory};
 pub use clock::{monotonic_ms, now};
+pub use eventlog::daily_error_count;
 pub use cpu::CpuTimesBuffer;
 pub use memory::{memory_stat, system_counts, SystemCounts};
 pub use power::{power_status, PowerSource, PowerStatus};

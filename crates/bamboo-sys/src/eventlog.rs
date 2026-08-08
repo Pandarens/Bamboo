@@ -162,6 +162,108 @@ pub fn query(channel: &str, xpath: &str, limit: usize) -> Result<Vec<EventXml>> 
     Ok(events)
 }
 
+/// XPath: ошибки и критические события за последние сутки.
+///
+/// `Level=1` — критические, `Level=2` — ошибки. `timediff(@SystemTime)`
+/// отдаёт миллисекунды от времени события до текущего момента; 86 400 000 —
+/// это ровно сутки. Функцию `timediff` понимает сам движок журнала, считать
+/// время на нашей стороне не нужно.
+const DAILY_ERRORS_XPATH: &str =
+    "*[System[(Level=1 or Level=2) and TimeCreated[timediff(@SystemTime) <= 86400000]]]";
+
+/// Считает события под фильтром, не отрисовывая их в XML.
+///
+/// Для счётчика XML не нужен, а `EvtRender` — самая дорогая часть чтения.
+/// Поэтому здесь берём только дескрипторы и сразу закрываем: на порядок
+/// дешевле, чем `query` с последующим `len()`.
+fn count(channel: &str, xpath: &str, cap: usize) -> Result<usize> {
+    let channel_w: Vec<u16> = channel.encode_utf16().chain(core::iter::once(0)).collect();
+    let query_w: Vec<u16> = xpath.encode_utf16().chain(core::iter::once(0)).collect();
+
+    let handle = unsafe {
+        EvtQuery(
+            0,
+            channel_w.as_ptr(),
+            query_w.as_ptr(),
+            EvtQueryChannelPath | EvtQueryReverseDirection,
+        )
+    };
+    if handle == 0 {
+        let code = unsafe { GetLastError() };
+        if code == ERROR_ACCESS_DENIED {
+            return Err(Error::Unsupported(
+                "этот журнал событий доступен только с правами администратора",
+            ));
+        }
+        return Err(Error::Win32 {
+            call: "EvtQuery(count)",
+            code,
+        });
+    }
+    let handle = QueryHandle(handle);
+
+    let mut total = 0usize;
+    let mut batch = [0isize; 64];
+
+    while total < cap {
+        let want = batch.len().min(cap - total) as u32;
+        let mut returned: u32 = 0;
+        let ok = unsafe { EvtNext(handle.0, want, batch.as_mut_ptr(), 0, 0, &mut returned) };
+        if ok == 0 {
+            let code = unsafe { GetLastError() };
+            if code == ERROR_NO_MORE_ITEMS {
+                break;
+            }
+            return Err(Error::Win32 {
+                call: "EvtNext(count)",
+                code,
+            });
+        }
+        for event in batch.iter().take(returned as usize) {
+            unsafe { EvtClose(*event) };
+        }
+        if returned == 0 {
+            break;
+        }
+        total += returned as usize;
+    }
+
+    Ok(total)
+}
+
+/// Число ошибок и критических событий за последние сутки в журналах
+/// System и Application вместе.
+///
+/// Это база сигнала автоотката: сторожевой таймер сравнивает счётчик до
+/// и после изменения и откатывает, если ошибок стало кратно больше.
+/// Оба канала читаются без прав администратора. Если ни один не открылся,
+/// возвращаем ошибку, а не молчаливый ноль: ноль означал бы «стало лучше».
+pub fn daily_error_count() -> Result<u32> {
+    // Потолок на случай сбоящей машины с потоком ошибок: считать их все
+    // смысла нет, для порога хватит и этого.
+    const CAP: usize = 50_000;
+
+    let mut total = 0usize;
+    let mut any_channel_read = false;
+
+    for channel in ["System", "Application"] {
+        match count(channel, DAILY_ERRORS_XPATH, CAP) {
+            Ok(found) => {
+                any_channel_read = true;
+                total += found;
+            }
+            Err(_) => continue,
+        }
+    }
+
+    if !any_channel_read {
+        return Err(Error::Unsupported(
+            "ни System, ни Application не удалось прочитать",
+        ));
+    }
+    Ok(total.min(u32::MAX as usize) as u32)
+}
+
 /// Отрисовывает событие в XML.
 fn render(event: EVT_HANDLE) -> Result<String> {
     let mut needed: u32 = 0;
@@ -289,5 +391,25 @@ mod tests {
     #[test]
     fn a_missing_channel_reports_an_error() {
         assert!(query("Такого-Канала-Нет", "", 1).is_err());
+    }
+
+    #[test]
+    fn counting_matches_query_length() {
+        // Счётчик без отрисовки обязан давать то же число, что и полный
+        // разбор той же выборки. Берём стабильный фильтр по Kernel-Power.
+        let xpath = "*[System[Provider[@Name='Microsoft-Windows-Kernel-Power']]]";
+        let counted = count("System", xpath, 20).unwrap();
+        let listed = query("System", xpath, 20).unwrap().len();
+        assert_eq!(counted, listed);
+    }
+
+    #[test]
+    fn daily_errors_are_counted_without_elevation() {
+        // System и Application читаются обычным пользователем, значит функция
+        // обязана вернуть число, а не ошибку доступа. Сколько именно ошибок —
+        // зависит от машины, проверяем лишь, что счёт получился.
+        let count = daily_error_count().expect("счётчик ошибок за сутки не сработал");
+        // u32 по построению; тавтологичную проверку не пишем — важно, что Ok.
+        let _ = count;
     }
 }
