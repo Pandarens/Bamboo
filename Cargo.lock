@@ -481,6 +481,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "bamboo-service"
+version = "0.1.0"
+dependencies = [
+ "bamboo-actuate",
+ "bamboo-core",
+ "bamboo-ipc",
+ "bamboo-journal",
+ "bamboo-policy",
+ "bamboo-sys",
+]
+
+[[package]]
 name = "bamboo-store"
 version = "0.1.0"
 dependencies = [
