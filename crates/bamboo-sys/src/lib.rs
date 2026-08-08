@@ -8,6 +8,7 @@
 
 #![cfg(windows)]
 
+pub mod apps;
 pub mod boot;
 pub mod budget;
 pub mod clock;
@@ -29,6 +30,7 @@ pub mod user;
 pub mod wake;
 pub mod window;
 
+pub use apps::installed_applications;
 pub use boot::{boot_culprits, boot_history, BootCulprit, BootRecord};
 pub use budget::{apply_self_limits, own_memory, OwnMemory};
 pub use clock::{monotonic_ms, now};

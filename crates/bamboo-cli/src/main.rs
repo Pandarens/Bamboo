@@ -211,9 +211,9 @@ mod commands {
     pub fn diff() -> Result<()> {
         use bamboo_analyze::sysdiff::{observe, SystemSnapshot};
 
-        // Снимаем текущее состояние: службы и автозагрузка пользователя.
-        // Остальные категории (задачи, драйверы, приложения) подключатся
-        // по мере готовности их перечисления.
+        // Снимаем текущее состояние: службы, автозагрузка пользователя и
+        // установленные приложения. Задачи и драйверы подключатся по мере
+        // готовности их перечисления.
         let mut snapshot = SystemSnapshot::new();
         snapshot.services = bamboo_sys::service_names()
             .unwrap_or_default()
@@ -223,6 +223,10 @@ mod commands {
             .unwrap_or_default()
             .into_iter()
             .map(|item| item.name)
+            .collect();
+        snapshot.applications = bamboo_sys::installed_applications()
+            .unwrap_or_default()
+            .into_iter()
             .collect();
 
         let path = snapshot_path();
@@ -238,10 +242,12 @@ mod commands {
             }
             None => {
                 println!(
-                    "Снят первый снимок системы: {} служб, {} элементов автозагрузки.\n\
+                    "Снят первый снимок системы: {} служб, {} элементов автозагрузки, \
+                     {} приложений.\n\
                      Запустите команду снова позже — покажу, что изменилось.",
                     snapshot.services.len(),
-                    snapshot.startup_items.len()
+                    snapshot.startup_items.len(),
+                    snapshot.applications.len()
                 );
             }
         }
@@ -352,6 +358,8 @@ mod commands {
                 snapshot.services.insert(name.to_string());
             } else if let Some(name) = line.strip_prefix("startup:") {
                 snapshot.startup_items.insert(name.to_string());
+            } else if let Some(name) = line.strip_prefix("app:") {
+                snapshot.applications.insert(name.to_string());
             }
         }
         Some(snapshot)
@@ -367,6 +375,9 @@ mod commands {
         }
         for name in &snapshot.startup_items {
             text.push_str(&format!("startup:{name}\n"));
+        }
+        for name in &snapshot.applications {
+            text.push_str(&format!("app:{name}\n"));
         }
         let _ = std::fs::write(path, text);
     }
