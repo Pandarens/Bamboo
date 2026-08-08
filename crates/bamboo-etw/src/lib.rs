@@ -15,6 +15,7 @@
 
 #![forbid(unsafe_code)]
 
+pub mod dump;
 pub mod event;
 pub mod recorder;
 pub mod tracker;
@@ -22,6 +23,7 @@ pub mod tracker;
 #[cfg(windows)]
 pub mod session;
 
+pub use dump::{render as render_dump, write_dump};
 pub use event::{friendly_image_name, CompletedProcess, ProcessEvent};
 pub use recorder::{Conditions, Dump, Recorder, TriggerReason};
 pub use tracker::{ImageSummary, ProcessTracker};

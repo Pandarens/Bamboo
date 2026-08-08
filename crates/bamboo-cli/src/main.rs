@@ -64,7 +64,8 @@ Bamboo {} — наблюдатель за системой
   bamboo disk                накопители: здоровье, износ, ресурс
   bamboo boot                время загрузки и что его удлиняет
   bamboo power               пробуждения из сна и их причины
-  bamboo trace [--for N]     короткоживущие процессы, невидимые для опроса
+  bamboo trace [--for N] [--dump]  короткоживущие процессы; --dump пишет
+                             ретроспективу буфера на диск
   bamboo leaks [--for N]     наблюдать и оценить рост памяти по ряду L1
   bamboo record --out F [--for N]  записать трассу в файл для анализа
   bamboo diff                что появилось в системе с прошлого снимка
@@ -209,7 +210,28 @@ mod commands {
         })?;
 
         render::trace(&tracker, &recorder, total, duration);
+
+        // По флагу --dump сбрасываем накопленный буфер на диск: это тот самый
+        // ретроспективный артефакт, ради которого видеорегистратор и нужен.
+        if args.iter().any(|arg| arg == "--dump") {
+            if recorder.buffered_events() == 0 {
+                println!("\nБуфер пуст — сбрасывать нечего.");
+            } else {
+                let now = bamboo_core::SampleTime::wall_clock_now();
+                let dump = recorder.capture_manually(now);
+                let dir = dumps_dir();
+                match bamboo_etw::write_dump(dump, &dir) {
+                    Ok(path) => println!("\nСброс записан: {}", path.display()),
+                    Err(error) => println!("\nСброс записать не удалось: {error}"),
+                }
+            }
+        }
         Ok(())
+    }
+
+    fn dumps_dir() -> std::path::PathBuf {
+        let base = std::env::var("LOCALAPPDATA").unwrap_or_else(|_| ".".to_string());
+        std::path::PathBuf::from(base).join("Bamboo").join("dumps")
     }
 
     pub fn leaks(args: &[String]) -> Result<()> {
