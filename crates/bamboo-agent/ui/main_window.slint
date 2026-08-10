@@ -22,6 +22,8 @@ struct MainProcessRow {
     disk: string,
     // Диску этого процесса мы придержали скорость.
     throttled: bool,
+    // Что Bamboo уже применил: «эконом, память ↓».
+    applied: string,
 }
 
 // Накопитель в обзоре.
@@ -34,6 +36,15 @@ struct DiskLoadRow {
     saturated: bool,
     // Доля занятости 0..1 для полоски.
     fill: float,
+}
+
+// Раздел диска в обзоре.
+struct VolumeRow {
+    title: string,
+    space: string,
+    fill: float,
+    // Места так мало, что страдает скорость записи.
+    cramped: bool,
 }
 
 // Файл подкачки в обзоре.
@@ -121,7 +132,7 @@ component RowButton inherits Rectangle {
     in property <bool> danger;
     callback pressed();
 
-    width: 78px;
+    width: 72px;
     height: 22px;
     border-radius: 4px;
     background: touch.has-hover ? (root.danger ? #8f3b3b : #2f6f4f) : #24312b;
@@ -189,9 +200,9 @@ export component MainWindow inherits Window {
     no-frame: true;
     // Шире прежнего: в таблице процессов прибавились столбец роста памяти
     // и кнопки действий.
-    preferred-width: 1280px;
+    preferred-width: 1420px;
     preferred-height: 640px;
-    min-width: 1080px;
+    min-width: 1180px;
     min-height: 480px;
     background: #141b18;
 
@@ -208,6 +219,7 @@ export component MainWindow inherits Window {
     in property <[JournalRow]> journal: [];
     in property <[DiskLoadRow]> disk-load: [];
     in property <[PagefileRow]> pagefiles: [];
+    in property <[VolumeRow]> volumes: [];
     in property <string> disk-pressure: "";
     in property <string> disk-note: "";
     in property <string> power-note: "";
@@ -439,6 +451,43 @@ export component MainWindow inherits Window {
                         }
                     }
 
+                    // --- Разделы ---
+                    Text { text: "Свободное место"; font-size: 14px; color: #e8f0ec; }
+                    for volume in root.volumes: Rectangle {
+                        background: #1e2a24; border-radius: 8px;
+                        VerticalLayout {
+                            padding: 10px; spacing: 5px;
+                            HorizontalLayout {
+                                spacing: 8px;
+                                Text {
+                                    text: volume.title; font-size: 12px; color: #e8f0ec;
+                                    vertical-alignment: center; horizontal-stretch: 1;
+                                    overflow: elide;
+                                }
+                                Text {
+                                    text: volume.space; font-size: 12px;
+                                    color: volume.cramped ? #e0724a : #b6c6bd;
+                                    vertical-alignment: center;
+                                }
+                            }
+                            Rectangle {
+                                height: 6px; background: #141b18; border-radius: 3px;
+                                Rectangle {
+                                    x: 0;
+                                    width: parent.width * volume.fill;
+                                    height: parent.height;
+                                    background: volume.cramped ? #c25a3a : #3f8f66;
+                                    border-radius: 3px;
+                                }
+                            }
+                            if volume.cramped: Text {
+                                text: "Свободного места меньше десятой части. У SSD от этого "
+                                    + "падает скорость записи: контроллеру негде раскладывать данные.";
+                                font-size: 11px; color: #e0a44a; wrap: word-wrap;
+                            }
+                        }
+                    }
+
                     // --- Подкачка ---
                     Text { text: "Файл подкачки"; font-size: 14px; color: #e8f0ec; }
                     if root.pagefiles.length == 0: Text {
@@ -518,7 +567,7 @@ export component MainWindow inherits Window {
                     HorizontalLayout {
                         padding-left: 4px; padding-right: 4px; spacing: 4px;
                         ColumnHeader {
-                            label: "Процесс"; horizontal-stretch: 1;
+                            label: "Процесс"; horizontal-stretch: 1; min-width: 150px;
                             active: root.sort-column == 0; descending: root.sort-descending;
                             chosen => { root.sort-by(0); }
                         }
@@ -552,12 +601,16 @@ export component MainWindow inherits Window {
                             active: root.sort-column == 7; descending: root.sort-descending;
                             chosen => { root.sort-by(7); }
                         }
+                        Text {
+                            text: "Изменения"; width: 118px;
+                            font-size: 11px; color: #7d8f86; vertical-alignment: center;
+                        }
                         ColumnHeader {
                             label: "Состояние"; width: 92px;
                             active: root.sort-column == 6; descending: root.sort-descending;
                             chosen => { root.sort-by(6); }
                         }
-                        Rectangle { width: 332px; }
+                        Rectangle { width: 312px; }
                     }
                     Flickable {
                         VerticalLayout {
@@ -571,7 +624,7 @@ export component MainWindow inherits Window {
 
                                 HorizontalLayout {
                                     padding-left: 8px; padding-right: 8px; spacing: 4px;
-                                    Text { text: process.name; color: #e8f0ec; font-size: 12px; vertical-alignment: center; horizontal-stretch: 1; overflow: elide; }
+                                    Text { text: process.name; color: #e8f0ec; font-size: 12px; vertical-alignment: center; horizontal-stretch: 1; min-width: 150px; overflow: elide; }
                                     Text { text: process.pid; color: #b6c6bd; font-size: 12px; vertical-alignment: center; width: 64px; }
                                     Text { text: process.cpu; color: #b6c6bd; font-size: 12px; vertical-alignment: center; width: 64px; }
                                     Text { text: process.memory; color: #b6c6bd; font-size: 12px; vertical-alignment: center; width: 90px; }
@@ -593,6 +646,15 @@ export component MainWindow inherits Window {
                                         color: #7fb0d8;
                                         font-size: 11px; vertical-alignment: center; width: 92px;
                                     }
+                                    // Что уже применено к процессу: чтобы человек
+                                    // видел свои прошлые нажатия, а не применял
+                                    // экономичный режим второй раз.
+                                    Text {
+                                        text: process.applied;
+                                        color: #6fb58a;
+                                        font-size: 11px; vertical-alignment: center; width: 118px;
+                                        overflow: elide;
+                                    }
                                     // Зависшее окно — единственное состояние,
                                     // о котором стоит сообщать; «отвечает»
                                     // у всех подряд было бы шумом.
@@ -602,7 +664,7 @@ export component MainWindow inherits Window {
                                         font-size: 11px; vertical-alignment: center; width: 92px;
                                     }
                                     Rectangle {
-                                        width: 332px;
+                                        width: 312px;
                                         HorizontalLayout {
                                             spacing: 4px;
                                             alignment: end;

@@ -12,9 +12,9 @@ use windows_sys::Win32::Graphics::Dwm::{
 };
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::ReleaseCapture;
 use windows_sys::Win32::UI::WindowsAndMessaging::{
-    GetWindowLongPtrW, PostMessageW, SetWindowLongPtrW, SetWindowPos, ShowWindow, GWL_EXSTYLE,
-    HTCAPTION, HWND_NOTOPMOST, HWND_TOPMOST, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SW_MINIMIZE,
-    WM_LBUTTONUP, WM_NCLBUTTONDOWN, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW,
+    GetWindowLongPtrW, PostMessageW, SendMessageW, SetWindowLongPtrW, SetWindowPos, ShowWindow,
+    GWL_EXSTYLE, HTCAPTION, HWND_NOTOPMOST, HWND_TOPMOST, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE,
+    SW_MINIMIZE, WM_LBUTTONUP, WM_NCLBUTTONDOWN, WM_SETICON, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW,
 };
 
 /// Применяет стили виджета к окну.
@@ -265,5 +265,106 @@ mod resize_tests {
     #[test]
     fn resizing_a_missing_window_is_refused() {
         assert!(begin_resize(0, ResizeEdge::Right).is_err());
+    }
+}
+
+/// Ставит окну иконку из точек RGBA.
+///
+/// Без неё Windows рисует в панели задач пустой квадрат: иконка окна
+/// берётся не из трея, а из самого окна, и по умолчанию её просто нет.
+///
+/// Картинку принимаем той же, что рисует агент для трея, — чтобы логотип
+/// был один и правился в одном месте.
+pub fn set_icon(hwnd: isize, rgba: &[u8], size: u32) -> Result<()> {
+    use windows_sys::Win32::Graphics::Gdi::{CreateBitmap, DeleteObject};
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        CreateIconIndirect, DestroyIcon, ICONINFO, ICON_BIG, ICON_SMALL,
+    };
+
+    if hwnd == 0 {
+        return Err(Error::Unsupported("окно ещё не создано"));
+    }
+    if rgba.len() != (size * size * 4) as usize {
+        return Err(Error::Malformed("размер картинки не совпал с указанным"));
+    }
+
+    // Windows ждёт BGRA, а рисуем мы в RGBA: меняем местами красный
+    // и синий. Заодно это единственное преобразование, которое тут нужно —
+    // альфа-канал GDI понимает как есть.
+    let mut bgra = Vec::with_capacity(rgba.len());
+    for point in rgba.chunks_exact(4) {
+        bgra.extend_from_slice(&[point[2], point[1], point[0], point[3]]);
+    }
+
+    // Цветная картинка и маска. Маска нужна даже при наличии альфы:
+    // структура иконки требует оба изображения.
+    let colour = unsafe { CreateBitmap(size as i32, size as i32, 1, 32, bgra.as_ptr().cast()) };
+    if colour.is_null() {
+        return Err(Error::Win32 {
+            call: "CreateBitmap(цвет)",
+            code: unsafe { windows_sys::Win32::Foundation::GetLastError() },
+        });
+    }
+
+    let mask_bytes = vec![0u8; (size * size / 8).max(1) as usize];
+    let mask = unsafe { CreateBitmap(size as i32, size as i32, 1, 1, mask_bytes.as_ptr().cast()) };
+    if mask.is_null() {
+        unsafe { DeleteObject(colour.cast()) };
+        return Err(Error::Win32 {
+            call: "CreateBitmap(маска)",
+            code: unsafe { windows_sys::Win32::Foundation::GetLastError() },
+        });
+    }
+
+    let info = ICONINFO {
+        fIcon: 1,
+        xHotspot: 0,
+        yHotspot: 0,
+        hbmMask: mask,
+        hbmColor: colour,
+    };
+    let icon = unsafe { CreateIconIndirect(&info) };
+
+    // Битмапы своё дело сделали: иконка держит собственные копии.
+    unsafe {
+        DeleteObject(colour.cast());
+        DeleteObject(mask.cast());
+    }
+
+    if icon.is_null() {
+        return Err(Error::Win32 {
+            call: "CreateIconIndirect",
+            code: unsafe { windows_sys::Win32::Foundation::GetLastError() },
+        });
+    }
+
+    // Большая иконка идёт в панель задач и Alt+Tab, малая — в заголовок.
+    unsafe {
+        SendMessageW(hwnd as HWND, WM_SETICON, ICON_BIG as usize, icon as isize);
+        SendMessageW(hwnd as HWND, WM_SETICON, ICON_SMALL as usize, icon as isize);
+    }
+
+    // Иконку не уничтожаем: окно держит её, пока живёт. Уничтожили бы —
+    // в панели задач снова оказался бы пустой квадрат.
+    let _ = DestroyIcon;
+    Ok(())
+}
+
+#[cfg(test)]
+mod icon_tests {
+    use super::*;
+
+    #[test]
+    fn a_null_window_is_refused() {
+        let rgba = vec![0u8; 32 * 32 * 4];
+        assert!(set_icon(0, &rgba, 32).is_err());
+    }
+
+    #[test]
+    fn a_mismatched_buffer_is_refused() {
+        // Буфер меньше заявленного размера: молча обрезать нельзя,
+        // GDI прочитал бы чужую память.
+        let rgba = vec![0u8; 16 * 16 * 4];
+        assert!(set_icon(1, &rgba, 32).is_err());
     }
 }

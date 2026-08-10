@@ -96,11 +96,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // а не предпочтительный, и таблица процессов оказывается сжатой.
     main_window
         .window()
-        .set_size(slint::PhysicalSize::new(1280, 700));
+        .set_size(slint::PhysicalSize::new(1420, 720));
     // Модели дашборда: без них replace не найдёт VecModel и молча ничего
     // не сделает — список останется пустым.
     main_window.set_disk_load(ModelRc::new(VecModel::from(Vec::<DiskLoadRow>::new())));
     main_window.set_pagefiles(ModelRc::new(VecModel::from(Vec::<PagefileRow>::new())));
+    main_window.set_volumes(ModelRc::new(VecModel::from(Vec::<VolumeRow>::new())));
     main_window.set_processes(main_processes.clone());
     main_window.set_drives(drives_model.clone());
     main_window.set_wakes(wakes_model.clone());
@@ -440,6 +441,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // дескриптора ещё нет: все настройки уходили в пустоту, поэтому виджет
     // так и оставался обычным окном с кнопкой в панели задач.
     let mut styled = false;
+    let mut main_styled = false;
     timer.start(
         slint::TimerMode::Repeated,
         // Опрашиваем канал чаще, чем приходят данные: так виджет реагирует
@@ -453,6 +455,34 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             if !styled {
                 apply_window_look(&widget);
                 styled = window_handle(&widget) != 0;
+
+                // Логотип окнам: без него Windows рисует в панели задач
+                // пустой квадрат, хотя в трее иконка уже есть.
+                if styled {
+                    let logo = tray::logo_rgba();
+                    let _ = bamboo_sys::window::set_icon(
+                        window_handle(&widget),
+                        &logo,
+                        tray::LOGO_SIZE,
+                    );
+                }
+            }
+
+            // Главное окно создаётся позже виджета: его нативное окно
+            // появляется только при первом показе, и до этого момента
+            // ставить иконку некуда.
+            if !main_styled {
+                if let Some(main) = main_weak.upgrade() {
+                    let handle = main_window_handle(&main);
+                    if handle != 0 {
+                        let _ = bamboo_sys::window::set_icon(
+                            handle,
+                            &tray::logo_rgba(),
+                            tray::LOGO_SIZE,
+                        );
+                        main_styled = true;
+                    }
+                }
             }
 
             // Полноэкранное приложение (игра, презентация, видео) не должно
@@ -572,6 +602,18 @@ fn apply_overview(
         })
         .collect();
     replace(&main.get_pagefiles(), pagefiles);
+
+    let volumes: Vec<VolumeRow> = snapshot
+        .volumes
+        .iter()
+        .map(|volume| VolumeRow {
+            title: SharedString::from(volume.title.clone()),
+            space: SharedString::from(format!("свободно {} из {}", volume.free, volume.total)),
+            fill: volume.usage as f32,
+            cramped: volume.cramped,
+        })
+        .collect();
+    replace(&main.get_volumes(), volumes);
     main.set_disk_pressure(SharedString::from(
         snapshot.disk_pressure.clone().unwrap_or_default(),
     ));
@@ -590,6 +632,9 @@ fn fill_processes(
     let sort = mainwin::SortColumn::from_index(main.get_sort_column());
     // Режим групп и режим процессов дают одинаковые строки, поэтому
     // дальше таблица о разнице не знает.
+    // Метки прошлых действий читаем один раз на перестроение таблицы,
+    // а не на каждую строку: это обращение к базе журнала.
+    let applied = actions::AppliedActions::load();
     let prepared = if main.get_grouped() {
         mainwin::grouped_rows(snapshot, sort, main.get_sort_descending())
     } else {
@@ -598,10 +643,11 @@ fn fill_processes(
     let rows: Vec<MainProcessRow> = prepared
         .into_iter()
         .map(|row| {
-            let throttled = row
-                .pid
-                .parse::<u32>()
-                .is_ok_and(|pid| limits.is_limited(pid));
+            let pid = row.pid.parse::<u32>().ok();
+            let throttled = pid.is_some_and(|pid| limits.is_limited(pid));
+            let marks = pid
+                .map(|pid| applied.marks(pid, throttled))
+                .unwrap_or_default();
             MainProcessRow {
                 name: SharedString::from(row.name),
                 cpu: SharedString::from(row.cpu),
@@ -614,6 +660,7 @@ fn fill_processes(
                 hung: row.hung,
                 disk: SharedString::from(row.disk),
                 throttled,
+                applied: SharedString::from(marks),
                 pid: SharedString::from(row.pid),
             }
         })

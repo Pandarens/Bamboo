@@ -68,6 +68,20 @@ pub struct Snapshot {
     /// Объяснение, почему диск загружен, если он загружен. `None` — диск
     /// свободен либо виновник не назван честно.
     pub disk_pressure: Option<String>,
+    /// Разделы: сколько места и сколько осталось.
+    pub volumes: Vec<VolumeLine>,
+}
+
+/// Раздел в снимке.
+#[derive(Clone, Debug)]
+pub struct VolumeLine {
+    /// «C: Система (NTFS)».
+    pub title: String,
+    pub free: Bytes,
+    pub total: Bytes,
+    pub usage: f64,
+    /// Места осталось так мало, что страдает скорость записи.
+    pub cramped: bool,
 }
 
 /// Накопитель в снимке.
@@ -138,6 +152,7 @@ fn run(sender: Sender<Snapshot>, visible: WidgetVisible) {
     let mut disk_before: Vec<bamboo_sys::storage::DiskCounters> = Vec::new();
     let mut pagefiles: Vec<PagefileLine> = Vec::new();
     let mut pagefiles_at: Option<std::time::Instant> = None;
+    let mut volumes: Vec<VolumeLine> = Vec::new();
 
     loop {
         collector.set_widget_open(visible.load(Ordering::Relaxed));
@@ -188,8 +203,10 @@ fn run(sender: Sender<Snapshot>, visible: WidgetVisible) {
         let (disks, disk_now) = read_disks(&disk_before);
         disk_before = disk_now;
 
+        // Разделы и подкачка меняются медленно — читаем их вместе и редко.
         if pagefiles_at.is_none_or(|at| at.elapsed() >= PAGEFILES_EVERY) {
             pagefiles = read_pagefiles();
+            volumes = read_volumes();
             pagefiles_at = Some(std::time::Instant::now());
         }
 
@@ -237,6 +254,7 @@ fn run(sender: Sender<Snapshot>, visible: WidgetVisible) {
             disk_pressure,
             disks,
             pagefiles: pagefiles.clone(),
+            volumes: volumes.clone(),
         };
 
         // Интерфейс закрылся — поток должен закончиться вместе с ним.
@@ -506,4 +524,31 @@ mod pressure_tests {
             explain_disk_pressure(&[quiet, loud], &[process("app.exe", 10 << 20)]).unwrap();
         assert!(explanation.starts_with("Загруженный"), "{explanation}");
     }
+}
+
+/// Читает разделы и готовит их к показу.
+fn read_volumes() -> Vec<VolumeLine> {
+    bamboo_sys::storage::volumes()
+        .unwrap_or_default()
+        .into_iter()
+        .map(|volume| {
+            let label = if volume.label.is_empty() {
+                String::new()
+            } else {
+                format!(" {}", volume.label)
+            };
+            let fs = if volume.file_system.is_empty() {
+                String::new()
+            } else {
+                format!(" ({})", volume.file_system)
+            };
+            VolumeLine {
+                title: format!("{}:{label}{fs}", volume.letter),
+                free: volume.free,
+                total: volume.total,
+                usage: volume.usage(),
+                cramped: volume.is_cramped(),
+            }
+        })
+        .collect()
 }

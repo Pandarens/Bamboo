@@ -10,11 +10,13 @@ mod ata;
 mod device;
 mod ioctl;
 mod nvme;
+pub mod volumes;
 
 pub use activity::{
     activity_between, pagefiles, read_counters, DiskActivity, DiskCounters, Pagefile,
 };
 pub use device::{enumerate, Drive};
+pub use volumes::{volumes, Volume, VolumeKind};
 
 use bamboo_core::storage::{BusType, DriveInfo, SmartHealth};
 use bamboo_core::{Error, Result};

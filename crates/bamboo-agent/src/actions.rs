@@ -103,6 +103,67 @@ pub fn apply(pid: u32, image_name: &str, what: RowAction) -> String {
     }
 }
 
+/// Что Bamboo уже сделал с процессами, по номерам процессов.
+///
+/// Пользователь должен видеть в списке, что он уже нажимал: иначе легко
+/// применить экономичный режим второй раз или забыть, что процесс уже
+/// придержан. Берём это из журнала — того же, по которому идёт откат.
+#[derive(Default)]
+pub struct AppliedActions {
+    by_pid: std::collections::HashMap<u32, Vec<&'static str>>,
+}
+
+impl AppliedActions {
+    /// Читает действующие записи журнала.
+    ///
+    /// Ошибку чтения глотаем молча и намеренно: журнал недоступен —
+    /// значит меток не будет, но список процессов человек всё равно
+    /// увидит. Ронять из-за подписи весь интерфейс незачем.
+    pub fn load() -> Self {
+        let mut by_pid: std::collections::HashMap<u32, Vec<&'static str>> =
+            std::collections::HashMap::new();
+
+        if let Ok(journal) = Journal::open(journal_path()) {
+            if let Ok(entries) = journal.active() {
+                for entry in entries {
+                    let Some(pid) = entry.target.pid else {
+                        continue;
+                    };
+                    let label = match entry.action {
+                        Action::EnableEcoQos => "эконом",
+                        Action::LowerMemoryPriority => "память ↓",
+                        Action::DelayServiceStart => "отложенный старт",
+                        Action::FreezeProcess => "заморожен",
+                        _ => continue,
+                    };
+                    let marks = by_pid.entry(pid).or_default();
+                    if !marks.contains(&label) {
+                        marks.push(label);
+                    }
+                }
+            }
+        }
+
+        AppliedActions { by_pid }
+    }
+
+    /// Метки для процесса: «эконом, память ↓». Пусто — ничего не делали.
+    pub fn marks(&self, pid: u32, throttled: bool) -> String {
+        let mut parts: Vec<&str> = self
+            .by_pid
+            .get(&pid)
+            .map(|marks| marks.to_vec())
+            .unwrap_or_default();
+
+        // Придерживание диска в журнал не пишется: оно живёт в памяти
+        // агента, пока он запущен. Добавляем его отдельно.
+        if throttled {
+            parts.push("диск ↓");
+        }
+        parts.join(", ")
+    }
+}
+
 /// Реестр процессов, которым мы придержали диск.
 ///
 /// Ограничение держится job-объектом и живёт ровно столько, сколько живёт
