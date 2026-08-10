@@ -16,6 +16,10 @@ use bamboo_core::Bytes;
 pub const SPARK_POINTS: usize = 48;
 
 /// Одна строка в топе потребителей.
+///
+/// Числа держим сырыми, а не отформатированными: по ним сортирует главное
+/// окно. Строку «12.3%» пришлось бы разбирать обратно, и сортировка по
+/// памяти сломалась бы на первом же «1.2 ГБ» против «900 МБ».
 #[derive(Clone, Debug)]
 pub struct ProcessLine {
     pub name: String,
@@ -25,6 +29,9 @@ pub struct ProcessLine {
     pub memory: Bytes,
     /// Пояснение под именем: чем этот процесс примечателен.
     pub badge: String,
+    /// Растёт ли память процесса и как быстро. `None` — не растёт или
+    /// наблюдений пока мало; это нормальный и самый частый случай.
+    pub memory_growth: Option<bamboo_analyze::MemoryTrend>,
 }
 
 /// Снимок для интерфейса.
@@ -61,9 +68,21 @@ pub fn spawn() -> (Receiver<Snapshot>, WidgetVisible) {
     (receiver, visible)
 }
 
+/// Как часто пересчитывать тренды роста памяти.
+///
+/// Регрессия по суточному ряду каждого из трёхсот процессов — работа не на
+/// каждый тик: на живой машине это съело почти целое ядро, при бюджете
+/// в 1% из раздела 4 ТЗ. А смысла в такой частоте нет: ряд L1 пополняется
+/// раз в минуту, чаще этого результат просто не меняется.
+const GROWTH_EVERY: std::time::Duration = std::time::Duration::from_secs(60);
+
 fn run(sender: Sender<Snapshot>, visible: WidgetVisible) {
     let mut collector = Collector::new();
     let mut memory_history: Vec<u64> = Vec::with_capacity(SPARK_POINTS);
+    // Кэш трендов по процессам между пересчётами.
+    let mut growth: std::collections::HashMap<u32, bamboo_analyze::MemoryTrend> =
+        std::collections::HashMap::new();
+    let mut growth_at: Option<std::time::Instant> = None;
 
     loop {
         collector.set_widget_open(visible.load(Ordering::Relaxed));
@@ -84,12 +103,28 @@ fn run(sender: Sender<Snapshot>, visible: WidgetVisible) {
             memory_history.remove(0);
         }
 
-        // Тридцати процессов хватает и виджету (берёт первые), и главному
-        // окну (показывает все).
-        let top = collector
+        // Тренды роста пересчитываем редко: это самая дорогая часть тика.
+        let recompute = growth_at.is_none_or(|at| at.elapsed() >= GROWTH_EVERY);
+        if recompute {
+            growth.clear();
+            for process in collector.table().iter() {
+                if let Some(trend) = bamboo_analyze::memory_trend(
+                    &process.level1.private_series(),
+                    process.observed_ms(),
+                ) {
+                    growth.insert(process.pid(), trend);
+                }
+            }
+            growth_at = Some(std::time::Instant::now());
+        }
+
+        // Берём все процессы, а не только топ по процессору: главное окно
+        // сортирует их само, и по памяти в том числе. Обрежь мы список по
+        // CPU, самый прожорливый по памяти процесс мог бы в него не попасть
+        // именно потому, что процессор он не грузит.
+        let mut top: Vec<ProcessLine> = collector
             .table()
-            .top_by_cpu(30)
-            .into_iter()
+            .iter()
             .map(|process| ProcessLine {
                 name: process.image_name.to_string(),
                 pid: process.pid(),
@@ -97,8 +132,13 @@ fn run(sender: Sender<Snapshot>, visible: WidgetVisible) {
                 cpu_percent: process.cpu_share * 100.0,
                 memory: Bytes::from_kib(process.last_point().private_kib as u64),
                 badge: badge_for(process),
+                memory_growth: growth.get(&process.pid()).copied(),
             })
             .collect();
+
+        // Порядок по умолчанию — по процессору: виджет показывает первые
+        // строки и ждёт именно топ потребителей.
+        top.sort_by(|a, b| b.cpu_percent.total_cmp(&a.cpu_percent));
 
         let snapshot = Snapshot {
             cpu_busy: tick.cpu_busy(),

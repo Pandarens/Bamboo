@@ -16,6 +16,8 @@
 #![deny(unsafe_code)]
 
 #[cfg(windows)]
+mod actions;
+#[cfg(windows)]
 mod collector;
 #[cfg(windows)]
 mod mainwin;
@@ -92,6 +94,101 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     main_window.set_drives(drives_model.clone());
     main_window.set_wakes(wakes_model.clone());
     main_window.set_journal(journal_model.clone());
+
+    // Последний снимок держим под рукой: по клику на заголовок столбца
+    // таблицу надо пересортировать сразу, а не ждать следующего тика.
+    let last_snapshot: std::rc::Rc<std::cell::RefCell<Option<collector::Snapshot>>> =
+        std::rc::Rc::new(std::cell::RefCell::new(None));
+
+    // Сортировка по столбцу. Повторный щелчок по тому же столбцу
+    // разворачивает порядок — привычное поведение любой таблицы.
+    {
+        let weak = main_window.as_weak();
+        let rows = main_processes.clone();
+        let snapshot = last_snapshot.clone();
+        main_window.on_sort_by(move |column| {
+            let Some(win) = weak.upgrade() else {
+                return;
+            };
+            if win.get_sort_column() == column {
+                win.set_sort_descending(!win.get_sort_descending());
+            } else {
+                win.set_sort_column(column);
+                // Имя удобнее читать по алфавиту, числа — от большего.
+                win.set_sort_descending(column != 0);
+            }
+            if let Some(snapshot) = snapshot.borrow().as_ref() {
+                fill_processes(&win, snapshot, &rows);
+            }
+        });
+    }
+
+    // Действия над процессом из списка.
+    {
+        let weak = main_window.as_weak();
+        let snapshot = last_snapshot.clone();
+        main_window.on_apply_action(move |pid, code| {
+            let Some(win) = weak.upgrade() else {
+                return;
+            };
+            let Some(what) = actions::RowAction::from_index(code) else {
+                return;
+            };
+            let Ok(pid) = pid.parse::<u32>() else {
+                return;
+            };
+
+            // Имя процесса берём из снимка: политике оно нужно, чтобы узнать
+            // системный процесс, а PID сам по себе ей ничего не говорит.
+            let name = snapshot
+                .borrow()
+                .as_ref()
+                .and_then(|snapshot| {
+                    snapshot
+                        .top
+                        .iter()
+                        .find(|line| line.pid == pid)
+                        .map(|line| line.name.clone())
+                })
+                .unwrap_or_default();
+            if name.is_empty() {
+                win.set_action_note(SharedString::from(
+                    "Процесс уже завершился — действие отменено.",
+                ));
+                return;
+            }
+
+            win.set_action_note(SharedString::from(actions::apply(pid, &name, what)));
+        });
+    }
+
+    // Своя рамка окна: сворачивание, закрытие и перетаскивание за шапку.
+    {
+        let weak = main_window.as_weak();
+        main_window.on_minimize_window(move || {
+            if let Some(win) = weak.upgrade() {
+                let _ = bamboo_sys::window::minimize(main_window_handle(&win));
+            }
+        });
+    }
+    {
+        let weak = main_window.as_weak();
+        main_window.on_close_window(move || {
+            // Закрываем только окно: агент живёт в трее и продолжает
+            // наблюдать. Выход — пункт «Выход» в меню трея.
+            if let Some(win) = weak.upgrade() {
+                win.hide().ok();
+            }
+        });
+    }
+    {
+        let weak = main_window.as_weak();
+        main_window.on_drag_window(move || {
+            if let Some(win) = weak.upgrade() {
+                let _ = bamboo_sys::window::begin_drag(main_window_handle(&win));
+            }
+        });
+    }
 
     // Загрузка разделов по требованию: диск, питание и журнал — разовые
     // запросы, держать их в фоне незачем.
@@ -211,6 +308,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         apply_overview(&main, &snapshot, &main_processes);
                     }
                 }
+                // Держим свежий снимок для пересортировки по клику и для
+                // поиска имени процесса при действиях.
+                *last_snapshot.borrow_mut() = Some(snapshot);
             }
         },
     );
@@ -231,17 +331,31 @@ fn apply_overview(
     main.set_memory_summary(SharedString::from(overview.memory));
     main.set_process_summary(SharedString::from(overview.processes));
 
-    let rows: Vec<MainProcessRow> = mainwin::process_rows(snapshot)
-        .into_iter()
-        .map(|row| MainProcessRow {
-            name: SharedString::from(row.name),
-            pid: SharedString::from(row.pid),
-            cpu: SharedString::from(row.cpu),
-            memory: SharedString::from(row.memory),
-            threads: SharedString::from(row.threads),
-            badge: SharedString::from(row.badge),
-        })
-        .collect();
+    fill_processes(main, snapshot, processes);
+}
+
+/// Перестраивает таблицу процессов по текущей сортировке окна.
+#[cfg(windows)]
+fn fill_processes(
+    main: &MainWindow,
+    snapshot: &collector::Snapshot,
+    processes: &ModelRc<MainProcessRow>,
+) {
+    let sort = mainwin::SortColumn::from_index(main.get_sort_column());
+    let rows: Vec<MainProcessRow> =
+        mainwin::process_rows(snapshot, sort, main.get_sort_descending())
+            .into_iter()
+            .map(|row| MainProcessRow {
+                name: SharedString::from(row.name),
+                pid: SharedString::from(row.pid),
+                cpu: SharedString::from(row.cpu),
+                memory: SharedString::from(row.memory),
+                threads: SharedString::from(row.threads),
+                badge: SharedString::from(row.badge),
+                growth: SharedString::from(row.growth),
+                leak: row.leak,
+            })
+            .collect();
     replace(processes, rows);
 }
 
@@ -392,6 +506,23 @@ fn window_handle(widget: &Widget) -> isize {
 
     widget
         .window()
+        .window_handle()
+        .window_handle()
+        .ok()
+        .and_then(|handle| match handle.as_raw() {
+            RawWindowHandle::Win32(win32) => Some(win32.hwnd.get()),
+            _ => None,
+        })
+        .unwrap_or(0)
+}
+
+/// Дескриптор главного окна. Отдельно от виджета: типы окон разные,
+/// а общий трейт Slint для них не выведен.
+#[cfg(windows)]
+fn main_window_handle(main: &MainWindow) -> isize {
+    use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+
+    main.window()
         .window_handle()
         .window_handle()
         .ok()

@@ -20,6 +20,11 @@ bamboo-collect.workspace = true
 bamboo-sys.workspace = true
 bamboo-analyze.workspace = true
 bamboo-journal.workspace = true
+# Действия уровня 1 (экономичный режим, приоритет памяти) агент применяет
+# сам: прав администратора они не требуют, а путь через журнал и откат
+# у них тот же, что у всех остальных действий.
+bamboo-actuate.workspace = true
+bamboo-policy.workspace = true
 
 # renderer-software и backend-winit без остального: GPU-контекст
 # не создаётся вообще (ТЗ, раздел 4.1). Виджету он не нужен, а его создание

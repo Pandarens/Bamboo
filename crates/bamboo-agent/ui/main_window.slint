@@ -11,6 +11,10 @@ struct MainProcessRow {
     memory: string,
     threads: string,
     badge: string,
+    // Рост памяти: «+40 МБ/ч». Пусто, если память не растёт.
+    growth: string,
+    // Рост дотянул до подозрения на утечку — красим строку.
+    leak: bool,
 }
 
 struct DriveRow {
@@ -52,11 +56,96 @@ component NavButton inherits Rectangle {
     }
 }
 
+// Заголовок столбца: щелчок сортирует, повторный щелчок разворачивает
+// порядок. Стрелка показывает, по какому столбцу идёт сортировка.
+component ColumnHeader inherits Rectangle {
+    in property <string> label;
+    in property <bool> active;
+    in property <bool> descending;
+    callback chosen();
+
+    height: 20px;
+    background: touch.has-hover ? #1e2a24 : transparent;
+    border-radius: 4px;
+
+    touch := TouchArea {
+        clicked => { root.chosen(); }
+    }
+    HorizontalLayout {
+        padding-left: 4px; padding-right: 4px; spacing: 3px;
+        Text {
+            text: root.label;
+            font-size: 11px;
+            color: root.active ? #e8f0ec : #7d8f86;
+            vertical-alignment: center;
+        }
+        Text {
+            text: root.active ? (root.descending ? "▼" : "▲") : "";
+            font-size: 8px;
+            color: #7d8f86;
+            vertical-alignment: center;
+        }
+    }
+}
+
+// Маленькая кнопка действия в строке процесса.
+component RowButton inherits Rectangle {
+    in property <string> label;
+    in property <string> hint;
+    callback pressed();
+
+    width: 78px;
+    height: 22px;
+    border-radius: 4px;
+    background: touch.has-hover ? #2f6f4f : #24312b;
+
+    touch := TouchArea {
+        clicked => { root.pressed(); }
+    }
+    Text {
+        text: root.label;
+        font-size: 10px;
+        color: #e8f0ec;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+        width: 100%;
+    }
+}
+
+// Кнопка в своей шапке окна: свернуть, закрыть.
+component CaptionButton inherits Rectangle {
+    in property <string> label;
+    in property <bool> danger;
+    callback pressed();
+
+    width: 40px;
+    border-radius: 4px;
+    background: touch.has-hover ? (root.danger ? #8f3b3b : #24312b) : transparent;
+
+    touch := TouchArea {
+        clicked => { root.pressed(); }
+    }
+    Text {
+        text: root.label;
+        font-size: 12px;
+        color: #b6c6bd;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+        width: 100%;
+        height: 100%;
+    }
+}
+
 export component MainWindow inherits Window {
     title: "Bamboo";
-    preferred-width: 900px;
-    preferred-height: 600px;
-    min-width: 720px;
+    // Своя рамка вместо системной (ТЗ, раздел 14.3): заголовок и кнопки
+    // рисуем сами, чтобы окно выглядело частью Bamboo, а не диалогом Windows.
+    no-frame: true;
+    // Шире прежнего: в таблице процессов прибавились столбец роста памяти
+    // и кнопки действий.
+    preferred-width: 1080px;
+    preferred-height: 640px;
+    min-width: 900px;
     min-height: 480px;
     background: #141b18;
 
@@ -75,7 +164,65 @@ export component MainWindow inherits Window {
     in property <string> power-note: "";
     in property <string> journal-note: "";
 
+    // Сортировка таблицы процессов: индекс столбца и направление.
+    // 0 имя, 1 PID, 2 CPU, 3 память, 4 потоки, 5 рост памяти.
+    in-out property <int> sort-column: 2;
+    in-out property <bool> sort-descending: true;
+    // Что случилось с последним действием — показываем под таблицей.
+    in property <string> action-note: "";
+
     callback refresh();
+    // Пересортировать по столбцу. Rust перестраивает список и возвращает
+    // его обратно: сортировать надо по числам, а в интерфейсе только текст.
+    callback sort-by(int);
+    // Применить действие к процессу: PID и код действия (0 экономичный
+    // режим, 1 понизить приоритет памяти).
+    callback apply-action(string, int);
+
+    callback minimize-window();
+    callback close-window();
+    // Начать перетаскивание окна за шапку.
+    callback drag-window();
+
+    VerticalLayout {
+
+    // --- Своя шапка окна ---
+    Rectangle {
+        height: 36px;
+        background: #0e1512;
+
+        // Тянем окно за шапку. Перетаскивание делает Windows по нашей
+        // просьбе, поэтому мышь не «убегает» от окна при быстром движении.
+        TouchArea {
+            pointer-event(event) => {
+                if (event.button == PointerEventButton.left && event.kind == PointerEventKind.down) {
+                    root.drag-window();
+                }
+            }
+        }
+
+        HorizontalLayout {
+            padding-left: 12px; spacing: 4px;
+            Text {
+                text: "Bamboo — наблюдатель за системой";
+                font-size: 12px;
+                color: #b6c6bd;
+                vertical-alignment: center;
+                horizontal-stretch: 1;
+            }
+            CaptionButton {
+                label: "—";
+                pressed => { root.minimize-window(); }
+            }
+            CaptionButton {
+                // Знак умножения, а не «✕»: последний есть не во всех
+                // шрифтах и на живой машине отрисовался пустотой.
+                label: "×";
+                danger: true;
+                pressed => { root.close-window(); }
+            }
+        }
+    }
 
     HorizontalLayout {
         // Навигация
@@ -190,21 +337,60 @@ export component MainWindow inherits Window {
                 if root.section == 1: VerticalLayout {
                     spacing: 8px;
                     Text { text: "Процессы"; font-size: 20px; color: #e8f0ec; }
+                    Text {
+                        text: "Столбец «Рост памяти» показывает то, чего нет в диспетчере задач: "
+                            + "не сколько памяти занято сейчас, а растёт ли она и как быстро. "
+                            + "Щёлкните по заголовку столбца, чтобы отсортировать. "
+                            + "«Эконом» уводит процесс на энергоэффективные ядра, «Память ↓» "
+                            + "понижает приоритет его памяти — оба действия записываются в журнал "
+                            + "и обратимы. Показаны первые 80 строк: сортировка идёт по всем "
+                            + "процессам, обрезается уже результат.";
+                        font-size: 11px; color: #62736a; wrap: word-wrap;
+                    }
                     HorizontalLayout {
-                        padding-left: 4px; padding-right: 4px;
-                        Text { text: "Процесс"; font-size: 11px; color: #7d8f86; horizontal-stretch: 1; }
-                        Text { text: "PID"; font-size: 11px; color: #7d8f86; width: 64px; }
-                        Text { text: "CPU"; font-size: 11px; color: #7d8f86; width: 64px; }
-                        Text { text: "Память"; font-size: 11px; color: #7d8f86; width: 90px; }
-                        Text { text: "Потоки"; font-size: 11px; color: #7d8f86; width: 60px; }
+                        padding-left: 4px; padding-right: 4px; spacing: 4px;
+                        ColumnHeader {
+                            label: "Процесс"; horizontal-stretch: 1;
+                            active: root.sort-column == 0; descending: root.sort-descending;
+                            chosen => { root.sort-by(0); }
+                        }
+                        ColumnHeader {
+                            label: "PID"; width: 64px;
+                            active: root.sort-column == 1; descending: root.sort-descending;
+                            chosen => { root.sort-by(1); }
+                        }
+                        ColumnHeader {
+                            label: "CPU"; width: 64px;
+                            active: root.sort-column == 2; descending: root.sort-descending;
+                            chosen => { root.sort-by(2); }
+                        }
+                        ColumnHeader {
+                            label: "Память"; width: 90px;
+                            active: root.sort-column == 3; descending: root.sort-descending;
+                            chosen => { root.sort-by(3); }
+                        }
+                        ColumnHeader {
+                            label: "Потоки"; width: 60px;
+                            active: root.sort-column == 4; descending: root.sort-descending;
+                            chosen => { root.sort-by(4); }
+                        }
+                        ColumnHeader {
+                            label: "Рост памяти"; width: 110px;
+                            active: root.sort-column == 5; descending: root.sort-descending;
+                            chosen => { root.sort-by(5); }
+                        }
+                        Rectangle { width: 164px; }
                     }
                     Flickable {
                         VerticalLayout {
                             spacing: 2px;
                             for process in root.processes: Rectangle {
                                 height: 30px;
-                                background: #1a231f;
+                                background: row-touch.has-hover ? #22302a : #1a231f;
                                 border-radius: 5px;
+
+                                row-touch := TouchArea { }
+
                                 HorizontalLayout {
                                     padding-left: 8px; padding-right: 8px; spacing: 4px;
                                     Text { text: process.name; color: #e8f0ec; font-size: 12px; vertical-alignment: center; horizontal-stretch: 1; overflow: elide; }
@@ -212,9 +398,40 @@ export component MainWindow inherits Window {
                                     Text { text: process.cpu; color: #b6c6bd; font-size: 12px; vertical-alignment: center; width: 64px; }
                                     Text { text: process.memory; color: #b6c6bd; font-size: 12px; vertical-alignment: center; width: 90px; }
                                     Text { text: process.threads; color: #b6c6bd; font-size: 12px; vertical-alignment: center; width: 60px; }
+                                    // Подозрение на утечку выделяем цветом; измеренная
+                                    // скорость без вердикта остаётся нейтральной.
+                                    Text {
+                                        text: process.growth;
+                                        color: process.leak ? #e0a44a : #7d8f86;
+                                        font-size: 11px; vertical-alignment: center; width: 110px;
+                                    }
+                                    // Действия видны всегда, а не по наведению:
+                                    // кнопку, которую надо сперва найти мышью,
+                                    // всё равно что не существует. Оба действия
+                                    // настоящие и обратимые — никакой «очистки
+                                    // памяти», это placebo и его тут не будет.
+                                    Rectangle {
+                                        width: 164px;
+                                        HorizontalLayout {
+                                            spacing: 4px;
+                                            alignment: end;
+                                            RowButton {
+                                                label: "Эконом";
+                                                pressed => { root.apply-action(process.pid, 0); }
+                                            }
+                                            RowButton {
+                                                label: "Память ↓";
+                                                pressed => { root.apply-action(process.pid, 1); }
+                                            }
+                                        }
+                                    }
                                 }
                             }
                         }
+                    }
+                    Text {
+                        text: root.action-note;
+                        font-size: 11px; color: #9fb3a8; wrap: word-wrap;
                     }
                 }
 
@@ -283,5 +500,7 @@ export component MainWindow inherits Window {
                 }
             }
         }
+    }
+
     }
 }

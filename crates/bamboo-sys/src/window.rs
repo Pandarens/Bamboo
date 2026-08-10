@@ -10,9 +10,11 @@ use windows_sys::Win32::Graphics::Dwm::{
     DwmSetWindowAttribute, DWMSBT_TRANSIENTWINDOW, DWMWA_SYSTEMBACKDROP_TYPE,
     DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_ROUND,
 };
+use windows_sys::Win32::UI::Input::KeyboardAndMouse::ReleaseCapture;
 use windows_sys::Win32::UI::WindowsAndMessaging::{
-    GetWindowLongPtrW, SetWindowLongPtrW, SetWindowPos, GWL_EXSTYLE, HWND_NOTOPMOST, HWND_TOPMOST,
-    SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW,
+    GetWindowLongPtrW, SendMessageW, SetWindowLongPtrW, SetWindowPos, ShowWindow, GWL_EXSTYLE,
+    HTCAPTION, HWND_NOTOPMOST, HWND_TOPMOST, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SW_MINIMIZE,
+    WM_NCLBUTTONDOWN, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW,
 };
 
 /// Применяет стили виджета к окну.
@@ -101,6 +103,36 @@ pub fn set_topmost(hwnd: isize, topmost: bool) -> Result<()> {
             call: "SetWindowPos",
             code: unsafe { windows_sys::Win32::Foundation::GetLastError() },
         });
+    }
+    Ok(())
+}
+
+/// Сворачивает окно в панель задач.
+///
+/// Нужно окну без системной рамки: кнопку сворачивания рисуем сами, и она
+/// должна делать ровно то же, что делала системная.
+pub fn minimize(hwnd: isize) -> Result<()> {
+    if hwnd == 0 {
+        return Err(Error::Unsupported("окно ещё не создано"));
+    }
+    unsafe { ShowWindow(hwnd as HWND, SW_MINIMIZE) };
+    Ok(())
+}
+
+/// Начинает перетаскивание окна за шапку.
+///
+/// Тащить окно, пересчитывая координаты на каждое движение мыши, — плохая
+/// идея: при быстром движении курсор обгоняет окно и «срывается» с него.
+/// Вместо этого отпускаем захват мыши и говорим Windows, что нажатие
+/// пришлось на заголовок, — дальше окно тащит сама система, ровно так же,
+/// как обычное окно с рамкой.
+pub fn begin_drag(hwnd: isize) -> Result<()> {
+    if hwnd == 0 {
+        return Err(Error::Unsupported("окно ещё не создано"));
+    }
+    unsafe {
+        ReleaseCapture();
+        SendMessageW(hwnd as HWND, WM_NCLBUTTONDOWN, HTCAPTION as usize, 0);
     }
     Ok(())
 }

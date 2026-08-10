@@ -41,6 +41,77 @@ pub struct GrowthInput<'a> {
     pub gdi_objects: &'a [Point],
 }
 
+/// Минимальное окно, начиная с которого имеет смысл показывать скорость
+/// роста в интерфейсе. Короче — это ещё не тренд, а прогрев приложения.
+pub const TREND_MIN_WINDOW_MS: u64 = 20 * 60 * 1000;
+
+/// Ниже этой скорости рост неотличим от обычного дыхания приложения.
+const TREND_MIN_MB_PER_HOUR: f64 = 5.0;
+
+/// Ниже этого качества подгонки ряд слишком рваный, чтобы называть его
+/// трендом: так выглядит обычная работа, а не утечка.
+const TREND_MIN_R2: f64 = 0.50;
+
+/// Скорость роста памяти для показа в списке процессов.
+///
+/// Отличается от `analyze` по назначению и потому по строгости. `analyze`
+/// выносит суждение «похоже на утечку» и ради этого требует шести часов
+/// жизни процесса — иначе слово «утечка» будет враньём. Здесь же мы просто
+/// показываем измеренную скорость рядом с процессом, и хватает получаса
+/// наблюдения: это факт, а не диагноз, и подаётся он как факт.
+///
+/// Именно этого не видно в диспетчере задач: он показывает память сейчас,
+/// но не показывает, растёт ли она и как быстро.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct MemoryTrend {
+    /// Скорость роста, мегабайты в час. Всегда положительная: падение
+    /// памяти пользователю показывать незачем.
+    pub mb_per_hour: f64,
+    /// Качество подгонки прямой, 0..1.
+    pub r_squared: f64,
+    /// За какой срок посчитано.
+    pub window_ms: u64,
+    /// Прошёл ли ряд полную проверку на «похоже на утечку» из `analyze`.
+    /// Только при этом флаге допустимо употреблять слово «утечка».
+    pub suspected_leak: bool,
+}
+
+/// Считает скорость роста памяти, если она уверенно положительная.
+///
+/// `None` — самый частый и нормальный исход: у здорового процесса память
+/// не растёт монотонно.
+pub fn memory_trend(private_bytes: &[Point], lifetime_ms: u64) -> Option<MemoryTrend> {
+    let window = window_ms(private_bytes);
+    if window < TREND_MIN_WINDOW_MS {
+        return None;
+    }
+
+    let trend = fit(&as_points(private_bytes))?;
+    let mb_per_hour = trend.slope * 3_600_000.0 / (1024.0 * 1024.0);
+
+    if mb_per_hour < TREND_MIN_MB_PER_HOUR || trend.r_squared < TREND_MIN_R2 {
+        return None;
+    }
+
+    // Полный вердикт спрашиваем у того же анализатора, что пишет в отчёт:
+    // двух разных мнений об одном процессе быть не должно.
+    let suspected_leak = memory_growth(&GrowthInput {
+        process_name: "",
+        lifetime_ms,
+        private_bytes,
+        handles: &[],
+        gdi_objects: &[],
+    })
+    .is_some();
+
+    Some(MemoryTrend {
+        mb_per_hour,
+        r_squared: trend.r_squared,
+        window_ms: window,
+        suspected_leak,
+    })
+}
+
 /// Анализирует рост. Возвращает наблюдения только там, где признак сошёлся.
 ///
 /// Пустой результат — нормальный и самый частый исход.
@@ -327,5 +398,60 @@ mod tests {
     fn a_flat_process_produces_nothing() {
         let private = series(6, 300.0 * MB, 0.0, |_| 0.0);
         assert!(analyze(&input("postgres.exe", &private)).is_empty());
+    }
+
+    #[test]
+    fn a_trend_shows_up_long_before_the_leak_verdict() {
+        // Час роста: для слова «утечка» рано (нужно шесть), но скорость
+        // измерена и её незачем скрывать от пользователя.
+        let private = series(1, 300.0 * MB, 30.0 * MB, |_| 0.0);
+        let trend = memory_trend(&private, HOUR).expect("тренд не посчитался");
+
+        assert!((trend.mb_per_hour - 30.0).abs() < 1.0, "{trend:?}");
+        assert!(
+            !trend.suspected_leak,
+            "часовой ряд не даёт права говорить об утечке"
+        );
+    }
+
+    #[test]
+    fn a_long_steady_growth_is_marked_as_a_suspected_leak() {
+        let private = series(7, 300.0 * MB, 40.0 * MB, |_| 0.0);
+        let trend = memory_trend(&private, 12 * HOUR).expect("тренд не посчитался");
+        assert!(
+            trend.suspected_leak,
+            "семь часов ровного роста — это уже подозрение на утечку"
+        );
+    }
+
+    #[test]
+    fn a_short_window_gives_no_trend() {
+        // Десять минут — это ещё прогрев приложения, а не тренд.
+        let private = series(1, 300.0 * MB, 60.0 * MB, |_| 0.0);
+        let ten_minutes: Vec<Point> = private.into_iter().take(10).collect();
+        assert!(memory_trend(&ten_minutes, 12 * HOUR).is_none());
+    }
+
+    #[test]
+    fn a_flat_or_shrinking_process_has_no_trend() {
+        let flat = series(3, 300.0 * MB, 0.0, |_| 0.0);
+        assert!(memory_trend(&flat, 12 * HOUR).is_none());
+
+        // Память убывает — показывать нечего.
+        let shrinking = series(3, 900.0 * MB, -30.0 * MB, |_| 0.0);
+        assert!(memory_trend(&shrinking, 12 * HOUR).is_none());
+    }
+
+    #[test]
+    fn a_noisy_workload_is_not_called_a_trend() {
+        // Сборка проекта: память скачет, направление есть, но ряд рваный.
+        let private = series(3, 500.0 * MB, 20.0 * MB, |minute| {
+            if minute % 5 < 2 {
+                500.0 * MB
+            } else {
+                -400.0 * MB
+            }
+        });
+        assert!(memory_trend(&private, 12 * HOUR).is_none());
     }
 }

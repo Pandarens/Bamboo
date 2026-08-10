@@ -25,7 +25,7 @@ pub mod wear;
 pub use baseline::{Baseline, Learning};
 pub use boot::{BootPoint, BootVerdict};
 pub use driver::DriverInput;
-pub use growth::{GrowthInput, Point};
+pub use growth::{memory_trend, GrowthInput, MemoryTrend, Point};
 pub use idle::IdleInput;
 pub use observation::{Observation, ObservationKind, Severity};
 pub use origin::{attribute, Origin, ProcessDescriptor};
