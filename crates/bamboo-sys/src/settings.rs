@@ -139,6 +139,91 @@ pub fn set_autopilot_enabled(enabled: bool) -> Result<()> {
     write_flag(AUTOPILOT, enabled)
 }
 
+/// Читает строковое значение из реестра.
+///
+/// Общий помощник: им пользуется поиск установленных игр, чтобы спросить
+/// у Steam, куда он себя поставил, вместо того чтобы гадать по
+/// «Program Files (x86)» — его ставят и на другой диск.
+///
+/// `None` — ключа нет либо значение не строковое. Это штатный исход:
+/// программы, о которой спрашиваем, может не быть на машине вовсе.
+pub(crate) fn registry_string(hive: &str, path: &str, value: &str) -> Option<String> {
+    use windows_sys::Win32::System::Registry::{
+        RegOpenKeyExW, RegQueryValueExW, HKEY_LOCAL_MACHINE, KEY_READ, KEY_WOW64_64KEY,
+    };
+
+    let root = match hive {
+        "HKLM" => HKEY_LOCAL_MACHINE,
+        _ => HKEY_CURRENT_USER,
+    };
+
+    let wide_path: Vec<u16> = path.encode_utf16().chain(core::iter::once(0)).collect();
+    let mut handle: HKEY = core::ptr::null_mut();
+    let status = unsafe {
+        RegOpenKeyExW(
+            root,
+            wide_path.as_ptr(),
+            0,
+            KEY_READ | KEY_WOW64_64KEY,
+            &mut handle,
+        )
+    };
+    if status != 0 {
+        return None;
+    }
+    let handle = OwnedKey(handle);
+
+    let wide_value: Vec<u16> = value.encode_utf16().chain(core::iter::once(0)).collect();
+    let mut kind: u32 = 0;
+    let mut size: u32 = 0;
+    let status = unsafe {
+        RegQueryValueExW(
+            handle.0,
+            wide_value.as_ptr(),
+            core::ptr::null(),
+            &mut kind,
+            core::ptr::null_mut(),
+            &mut size,
+        )
+    };
+    // Пути в реестре бывают длинными, но не такими: предел защищает
+    // от попытки выделить нелепый буфер по испорченному значению.
+    if status != 0 || size == 0 || size as usize > 64 * 1024 {
+        return None;
+    }
+
+    let mut buffer = vec![0u8; size as usize];
+    let status = unsafe {
+        RegQueryValueExW(
+            handle.0,
+            wide_value.as_ptr(),
+            core::ptr::null(),
+            &mut kind,
+            buffer.as_mut_ptr(),
+            &mut size,
+        )
+    };
+    if status != 0 {
+        return None;
+    }
+
+    let words: Vec<u16> = buffer
+        .chunks_exact(2)
+        .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
+        .take_while(|word| *word != 0)
+        .collect();
+    Some(String::from_utf16_lossy(&words)).filter(|text| !text.is_empty())
+}
+
+/// Ключ реестра, закрывающийся сам.
+struct OwnedKey(HKEY);
+
+impl Drop for OwnedKey {
+    fn drop(&mut self) {
+        unsafe { RegCloseKey(self.0) };
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

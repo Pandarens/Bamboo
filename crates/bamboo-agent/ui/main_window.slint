@@ -81,6 +81,18 @@ struct ExtensionRow {
     browser: string,
 }
 
+// Что можно выбрать для анализа: установленная игра либо запущенная
+// программа. Одним списком, потому что человеку это одно и то же — то,
+// за чем он хочет понаблюдать.
+struct TargetRow {
+    // Что показать: «BitCraft Online» либо «chrome.exe».
+    label: string,
+    // Что записывать: имя исполняемого файла.
+    exe: string,
+    // Откуда: «Steam», «Epic Games», «запущено сейчас».
+    source: string,
+}
+
 struct DiskUserRow {
     name: string,
     rate: string,
@@ -392,6 +404,9 @@ export component MainWindow inherits Window {
     in property <string> record-scale-memory: "";
     in property <string> record-scale-disk: "";
     callback toggle-recording(string);
+    in property <[TargetRow]> targets: [];
+    in-out property <bool> targets-open: false;
+    in property <string> targets-note: "";
     in property <string> extensions-note: "";
     in property <bool> autopilot: false;
     in property <string> autopilot-status: "";
@@ -1332,29 +1347,113 @@ export component MainWindow inherits Window {
                         height: recbox.preferred-height;
                         recbox := HorizontalLayout {
                             padding: 12px; spacing: 10px;
+                            // Выбор из списка, а не поле для ввода: человек
+                            // знает игру по названию, а не по тому, что её
+                            // файл зовётся BitCraft.exe. Выяснять это за него
+                            // должна программа.
                             Rectangle {
                                 background: #141b18; border-radius: 6px;
                                 horizontal-stretch: 1;
                                 height: 32px;
-                                app-input := TextInput {
-                                    x: 10px; width: parent.width - 20px;
-                                    vertical-alignment: center;
-                                    color: #e8f0ec; font-size: 12px;
-                                    text <=> root.record-app;
-                                    single-line: true;
+                                border-width: 1px;
+                                border-color: pick-touch.has-hover ? #3a4a42 : #232f29;
+
+                                pick-touch := TouchArea {
                                     enabled: !root.recording;
+                                    mouse-cursor: root.recording
+                                        ? MouseCursor.default
+                                        : MouseCursor.pointer;
+                                    clicked => { root.targets-open = !root.targets-open; }
                                 }
-                                if root.record-app == "": Text {
-                                    x: 10px;
-                                    text: "имя программы, например game.exe";
-                                    color: #4d5b53; font-size: 12px;
-                                    vertical-alignment: center;
+                                HorizontalLayout {
+                                    padding-left: 10px; padding-right: 10px; spacing: 6px;
+                                    Text {
+                                        text: root.record-app == ""
+                                            ? "выберите игру или программу"
+                                            : root.record-app;
+                                        color: root.record-app == "" ? #4d5b53 : #e8f0ec;
+                                        font-size: 12px;
+                                        vertical-alignment: center;
+                                        horizontal-stretch: 1;
+                                        overflow: elide;
+                                    }
+                                    Text {
+                                        text: root.targets-open ? "\u{25b2}" : "\u{25bc}";
+                                        color: #7d8f86; font-size: 10px;
+                                        vertical-alignment: center;
+                                    }
                                 }
                             }
                             RowButton {
                                 label: root.recording ? "Остановить" : "Записать";
                                 width: 130px;
                                 pressed => { root.toggle-recording(root.record-app); }
+                            }
+                        }
+                    }
+
+                    // Список — обычным блоком под полем, а не PopupWindow:
+                    // всплывающее окно закрывается от любого щелчка, и
+                    // прокрутить в нём длинный список нельзя.
+                    if root.targets-open: Rectangle {
+                        background: #17201c;
+                        border-radius: 8px;
+                        border-width: 1px;
+                        border-color: #2a3a32;
+                        height: 240px;
+
+                        VerticalLayout {
+                            padding: 8px;
+                            spacing: 4px;
+
+                            if root.targets-note != "": Text {
+                                text: root.targets-note;
+                                font-size: 11px; color: #62736a; wrap: word-wrap;
+                            }
+                            Flickable {
+                                vertical-stretch: 1;
+                                VerticalLayout {
+                                    spacing: 2px;
+                                    for target[index] in root.targets: Rectangle {
+                                        height: 30px;
+                                        background: target-touch.has-hover
+                                            ? #24332c
+                                            : (Math.mod(index, 2) == 0 ? #1b2521 : #18211d);
+                                        border-radius: 5px;
+
+                                        target-touch := TouchArea {
+                                            mouse-cursor: pointer;
+                                            clicked => {
+                                                root.record-app = target.exe;
+                                                root.targets-open = false;
+                                            }
+                                        }
+                                        HorizontalLayout {
+                                            padding-left: 10px; padding-right: 10px; spacing: 8px;
+                                            Text {
+                                                text: target.label;
+                                                font-size: 12px; color: #e8f0ec;
+                                                vertical-alignment: center;
+                                                horizontal-stretch: 1;
+                                                overflow: elide;
+                                            }
+                                            Text {
+                                                text: target.exe;
+                                                font-size: 11px; color: #7d8f86;
+                                                vertical-alignment: center;
+                                                width: 170px;
+                                                overflow: elide;
+                                            }
+                                            Text {
+                                                text: target.source;
+                                                font-size: 11px; color: #62736a;
+                                                vertical-alignment: center;
+                                                width: 130px;
+                                                horizontal-alignment: right;
+                                            }
+                                        }
+                                    }
+                                }
                             }
                         }
                     }

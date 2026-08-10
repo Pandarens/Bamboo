@@ -138,6 +138,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     main_window.set_wakes(wakes_model.clone());
     main_window.set_journal(journal_model.clone());
     main_window.set_extensions(ModelRc::new(VecModel::from(Vec::<ExtensionRow>::new())));
+    main_window.set_targets(ModelRc::new(VecModel::from(Vec::<TargetRow>::new())));
     main_window.set_record_cpu(ModelRc::new(VecModel::from(Vec::<f32>::new())));
     main_window.set_record_memory(ModelRc::new(VecModel::from(Vec::<f32>::new())));
     main_window.set_record_gpu(ModelRc::new(VecModel::from(Vec::<f32>::new())));
@@ -163,6 +164,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let autopilot_holds: std::rc::Rc<
         std::cell::RefCell<std::collections::HashMap<(u32, &'static str), i64>>,
     > = std::rc::Rc::new(std::cell::RefCell::new(std::collections::HashMap::new()));
+
+    // Установленные игры: читаются с диска при открытии раздела «Анализ»
+    // и живут до закрытия программы. Перечитывать их каждый тик значило бы
+    // ходить на диск без нужды.
+    let known_games: std::sync::Arc<std::sync::Mutex<Vec<bamboo_sys::Game>>> =
+        std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
 
     // Идущая запись наблюдения за программой.
     let recording: std::rc::Rc<std::cell::RefCell<Option<session::Session>>> =
@@ -809,6 +816,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let refresh_limits = io_limits.clone();
         let refresh_rows = main_processes.clone();
         let refresh_pilot = autopilot.clone();
+        let refresh_games = known_games.clone();
         main_window.on_refresh(move || {
             let Some(win) = weak.upgrade() else {
                 return;
@@ -831,6 +839,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         &refresh_rows,
                         &refresh_limits.borrow(),
                         &refresh_pilot,
+                        &refresh_games,
                     );
                 }
                 return;
@@ -841,6 +850,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 3 => "Читаю журнал пробуждений…",
                 4 => "Открываю журнал действий…",
                 7 => "Читаю профили браузеров…",
+                8 => "Ищу установленные игры…",
                 _ => "",
             };
             match section {
@@ -848,6 +858,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 3 => win.set_power_note(SharedString::from(note)),
                 4 => win.set_journal_note(SharedString::from(note)),
                 7 => win.set_extensions_note(SharedString::from(note)),
+                8 => win.set_targets_note(SharedString::from(note)),
                 _ => return,
             }
 
@@ -855,6 +866,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             // живут в потоке интерфейса и через границу потока не проходят.
             // Забираем их из самого окна, уже вернувшись в его поток.
             let back = weak.clone();
+            // Клонируем на каждый заход: замыкание вызывается многократно,
+            // а поток забирает своё владение навсегда.
+            let refresh_games = refresh_games.clone();
 
             std::thread::spawn(move || match section {
                 2 => {
@@ -878,6 +892,24 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 rows.into_iter().map(to_wake_row).collect(),
                             );
                             win.set_power_note(SharedString::from(note));
+                        }
+                    });
+                }
+                8 => {
+                    // Библиотеки магазинов читаются с диска, поэтому в потоке
+                    // и только при открытии раздела. Найденное складываем
+                    // в общий список, а в строки его превратит ближайший тик:
+                    // там есть снимок с запущенными программами.
+                    let found = bamboo_sys::installed_games().unwrap_or_default();
+                    let count = found.len();
+                    if let Ok(mut known) = refresh_games.lock() {
+                        *known = found;
+                    }
+                    let _ = slint::invoke_from_event_loop(move || {
+                        if let Some(win) = back.upgrade() {
+                            win.set_targets_note(SharedString::from(format!(
+                                "Игр найдено: {count}. Список ниже — обновляется сам."
+                            )));
                         }
                     });
                 }
@@ -946,6 +978,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let update_weak = main_window.as_weak();
     let update_found = pending_update.clone();
 
+    let tick_games = known_games.clone();
     let tick_recording = recording.clone();
     let started = std::time::Instant::now();
     let tick_pilot = autopilot.clone();
@@ -1120,6 +1153,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             &main_processes,
                             &io_limits.borrow(),
                             &tick_pilot,
+                            &tick_games,
                         );
                     }
                 }
@@ -1221,6 +1255,28 @@ fn remedy_key(remedy: bamboo_analyze::suggest::Remedy) -> &'static str {
         Remedy::ThrottleDisk => "диск",
         Remedy::JustSaying => "ничего",
     }
+}
+
+/// Наполняет список того, за чем можно понаблюдать.
+///
+/// Список берётся из последнего снимка, а игры — с диска. Снимка может
+/// ещё не быть: раздел открывают сразу после запуска, а первый снимок
+/// приходит через секунду. Тогда покажем одни игры, а программы появятся
+/// со следующим тиком.
+#[cfg(windows)]
+fn fill_targets(main: &MainWindow, snapshot: &collector::Snapshot, games: &[bamboo_sys::Game]) {
+    let (rows, note) = mainwin::target_rows(snapshot, games);
+    replace(
+        &main.get_targets(),
+        rows.into_iter()
+            .map(|row| TargetRow {
+                label: SharedString::from(row.label),
+                exe: SharedString::from(row.exe),
+                source: SharedString::from(row.source),
+            })
+            .collect(),
+    );
+    main.set_targets_note(SharedString::from(note));
 }
 
 /// Рисует запись наблюдения: графики и разбор.
@@ -1337,6 +1393,7 @@ fn apply_overview(
     processes: &ModelRc<MainProcessRow>,
     limits: &actions::IoLimits,
     autopilot: &std::cell::RefCell<autopilot::Autopilot>,
+    known_games: &std::sync::Mutex<Vec<bamboo_sys::Game>>,
 ) {
     let overview = mainwin::overview(snapshot);
     main.set_cpu_summary(SharedString::from(overview.cpu));
@@ -1427,6 +1484,14 @@ fn apply_overview(
         snapshot.freeze.clone().unwrap_or_default(),
     ));
     main.set_freeze_culprits(SharedString::from(snapshot.freeze_culprits.clone()));
+
+    // Список целей для анализа: собирается из снимка, поэтому запущенные
+    // программы в нём появляются и исчезают сами.
+    if main.get_section() == 8 {
+        if let Ok(games) = known_games.lock() {
+            fill_targets(main, snapshot, &games);
+        }
+    }
 
     // Кто занимает диск. Считается из того же снимка каждым тиком: список
     // живой, а не снятый в момент открытия раздела.

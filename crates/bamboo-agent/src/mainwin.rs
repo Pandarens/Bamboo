@@ -655,6 +655,96 @@ pub struct DriveRow {
     pub verdict: String,
 }
 
+/// Что можно выбрать для анализа.
+pub struct TargetRow {
+    pub label: String,
+    pub exe: String,
+    pub source: String,
+}
+
+/// Собирает список того, за чем можно понаблюдать.
+///
+/// Игры идут первыми, а среди них — запущенные прямо сейчас. Ради этого
+/// список и делался: человек открывает раздел во время игры, и искать её
+/// среди трёхсот процессов он не должен.
+///
+/// Обычные программы тоже в списке: анализ не только про игры, а видеоредактор
+/// или сборка проекта упираются в те же самые потолки.
+pub fn target_rows(snapshot: &Snapshot, games: &[bamboo_sys::Game]) -> (Vec<TargetRow>, String) {
+    use std::collections::HashSet;
+
+    // Что сейчас запущено. По имени образа, а не по номеру процесса:
+    // записываем мы программу целиком.
+    let running: HashSet<String> = snapshot
+        .top
+        .iter()
+        .map(|line| line.name.to_lowercase())
+        .collect();
+
+    let mut rows = Vec::new();
+    let mut taken: HashSet<String> = HashSet::new();
+
+    // Игры, запущенные сейчас.
+    for game in games {
+        if game.exe.is_empty() || !running.contains(&game.exe.to_lowercase()) {
+            continue;
+        }
+        taken.insert(game.exe.to_lowercase());
+        rows.push(TargetRow {
+            label: game.name.clone(),
+            exe: game.exe.clone(),
+            source: format!("{} — запущена", game.source),
+        });
+    }
+
+    // Остальные установленные игры: выбрать можно и до запуска.
+    for game in games {
+        if game.exe.is_empty() || taken.contains(&game.exe.to_lowercase()) {
+            continue;
+        }
+        taken.insert(game.exe.to_lowercase());
+        rows.push(TargetRow {
+            label: game.name.clone(),
+            exe: game.exe.clone(),
+            source: game.source.clone(),
+        });
+    }
+
+    // Запущенные программы с окном — их человек и видит на экране.
+    // Без окна процессов втрое больше, и почти все они служебные.
+    let mut windowed: Vec<(String, String)> = snapshot
+        .top
+        .iter()
+        .filter(|line| !line.window_title.trim().is_empty())
+        .filter(|line| !taken.contains(&line.name.to_lowercase()))
+        .map(|line| (line.name.clone(), line.window_title.clone()))
+        .collect();
+    windowed.sort_by_key(|(name, _)| name.to_lowercase());
+    windowed.dedup_by(|a, b| a.0.eq_ignore_ascii_case(&b.0));
+
+    for (name, title) in windowed {
+        rows.push(TargetRow {
+            label: title,
+            exe: name,
+            source: "запущено сейчас".to_string(),
+        });
+    }
+
+    let note = if games.is_empty() {
+        "Установленных игр не нашлось — Bamboo смотрит библиотеки Steam и Epic \
+         Games. Наблюдать можно за любой запущенной программой из списка ниже."
+            .to_string()
+    } else {
+        format!(
+            "Игр найдено: {}. Наблюдать можно и за любой другой запущенной \
+             программой — она ниже по списку.",
+            games.len()
+        )
+    };
+
+    (rows, note)
+}
+
 /// Строка расширения браузера.
 pub struct ExtensionRow {
     pub name: String,
@@ -1615,6 +1705,100 @@ mod explain_tests {
         // Пустые куски между запятыми ничего не значат и не должны
         // превращать фильтр в «показать всё».
         assert!(!matches_filter("chrome.exe", " , , "));
+    }
+
+    fn game(name: &str, exe: &str) -> bamboo_sys::Game {
+        bamboo_sys::Game {
+            name: name.to_string(),
+            exe: exe.to_string(),
+            source: "Steam".to_string(),
+        }
+    }
+
+    #[test]
+    fn a_running_game_comes_first() {
+        // Ради этого список и делался: человек открывает раздел во время
+        // игры, и искать её среди трёхсот процессов он не должен.
+        let snapshot = Snapshot {
+            top: vec![line("BitCraft.exe", 100, 500)],
+            ..Default::default()
+        };
+        let games = vec![
+            game("Another Game", "another.exe"),
+            game("BitCraft Online", "BitCraft.exe"),
+        ];
+
+        let (rows, _) = target_rows(&snapshot, &games);
+        assert_eq!(rows[0].label, "BitCraft Online");
+        assert!(rows[0].source.contains("запущена"), "{}", rows[0].source);
+        // Незапущенная игра тоже в списке — выбрать её можно и заранее.
+        assert!(rows.iter().any(|row| row.exe == "another.exe"));
+    }
+
+    #[test]
+    fn a_game_without_an_executable_is_not_offered() {
+        // Показать игру, которую нечем записать, значило бы предложить
+        // нажать кнопку, которая ничего не сделает.
+        let games = vec![game("Сломанная игра", "")];
+        let (rows, _) = target_rows(&Snapshot::default(), &games);
+        assert!(rows.is_empty(), "{rows:?}", rows = rows.len());
+    }
+
+    #[test]
+    fn running_programs_with_windows_are_offered_too() {
+        // Анализ не только про игры: видеоредактор и сборка проекта
+        // упираются в те же самые потолки.
+        let mut windowed = line("chrome.exe", 200, 4000);
+        windowed.window_title = "Вкладка — Google Chrome".to_string();
+        let hidden = line("svchost.exe", 300, 50);
+
+        let snapshot = Snapshot {
+            top: vec![windowed, hidden],
+            ..Default::default()
+        };
+
+        let (rows, _) = target_rows(&snapshot, &[]);
+        assert!(rows.iter().any(|row| row.exe == "chrome.exe"));
+        // Служебные процессы без окна в списке не нужны: их втрое больше,
+        // и выбирать среди них человеку нечего.
+        assert!(!rows.iter().any(|row| row.exe == "svchost.exe"));
+    }
+
+    #[test]
+    fn one_program_appears_once_however_many_processes_it_has() {
+        let mut one = line("chrome.exe", 200, 400);
+        one.window_title = "Вкладка первая".to_string();
+        let mut two = line("chrome.exe", 201, 400);
+        two.window_title = "Вкладка вторая".to_string();
+
+        let snapshot = Snapshot {
+            top: vec![one, two],
+            ..Default::default()
+        };
+
+        let (rows, _) = target_rows(&snapshot, &[]);
+        assert_eq!(rows.iter().filter(|row| row.exe == "chrome.exe").count(), 1);
+    }
+
+    #[test]
+    fn a_running_game_is_not_listed_twice_as_a_program() {
+        let mut running = line("BitCraft.exe", 100, 500);
+        running.window_title = "BitCraft".to_string();
+        let snapshot = Snapshot {
+            top: vec![running],
+            ..Default::default()
+        };
+
+        let (rows, _) = target_rows(&snapshot, &[game("BitCraft Online", "BitCraft.exe")]);
+        assert_eq!(rows.len(), 1, "{rows:?}", rows = rows.len());
+        assert_eq!(rows[0].label, "BitCraft Online");
+    }
+
+    #[test]
+    fn no_games_found_is_explained_not_left_blank() {
+        let (_, note) = target_rows(&Snapshot::default(), &[]);
+        assert!(note.contains("Steam"), "{note}");
+        assert!(note.contains("любой запущенной"), "{note}");
     }
 
     #[test]
