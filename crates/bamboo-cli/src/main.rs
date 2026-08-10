@@ -146,7 +146,42 @@ mod commands {
             }
             render::drive(info, bamboo_sys::read_smart(info));
         }
+
+        println!();
+        render::disk_activity(&measure_activity(&drives));
+        println!();
+        render::pagefiles(&bamboo_sys::storage::pagefiles().unwrap_or_default());
         Ok(())
+    }
+
+    /// Меряет активность накопителей двумя замерами подряд.
+    ///
+    /// Счётчики накопительные, поэтому одного замера мало: занятость
+    /// выводится из того, сколько времени диск был занят между замерами.
+    fn measure_activity(
+        drives: &[bamboo_core::DriveInfo],
+    ) -> Vec<(String, bamboo_sys::storage::DiskActivity)> {
+        use bamboo_sys::storage::{activity_between, read_counters, Drive};
+
+        let before: Vec<_> = drives
+            .iter()
+            .filter_map(|info| {
+                let device = Drive::open(info.index).ok()?;
+                Some((info, read_counters(&device).ok()?))
+            })
+            .collect();
+
+        std::thread::sleep(Duration::from_millis(1000));
+
+        before
+            .into_iter()
+            .filter_map(|(info, first)| {
+                let device = Drive::open(info.index).ok()?;
+                let second = read_counters(&device).ok()?;
+                let activity = activity_between(first, second)?;
+                Some((info.display_name(), activity))
+            })
+            .collect()
     }
 
     pub fn boot() -> Result<()> {

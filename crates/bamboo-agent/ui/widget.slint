@@ -82,6 +82,10 @@ export component Widget inherits Window {
     in property <string> cpu-note: "";
     in property <string> memory-value: "—";
     in property <string> memory-note: "";
+    in property <string> disk-value: "—";
+    in property <string> disk-note: "";
+    // Объяснение, почему диск загружен. Пусто — диск свободен.
+    in property <string> disk-pressure: "";
     in property <string> status: "запускаюсь";
     in property <string> own-cost: "";
     in property <[ProcessRow]> processes: [];
@@ -175,6 +179,29 @@ export component Widget inherits Window {
                 value: root.memory-value;
                 note: root.memory-note;
                 horizontal-stretch: 1;
+            }
+            Card {
+                label: "Диск";
+                value: root.disk-value;
+                note: root.disk-note;
+                horizontal-stretch: 1;
+            }
+        }
+
+        // Диск упёрся в предел — говорим, из-за чего. Именно этого
+        // объяснения не даёт диспетчер задач: он показывает «100%»
+        // и оставляет гадать.
+        if root.disk-pressure != "": Rectangle {
+            background: #2a211c;
+            border-radius: 8px;
+            VerticalLayout {
+                padding: 8px;
+                Text {
+                    text: root.disk-pressure;
+                    font-size: 11px;
+                    color: #e0a44a;
+                    wrap: word-wrap;
+                }
             }
         }
 

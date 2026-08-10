@@ -5,11 +5,15 @@
 //! напрямую, а для этого устройство нужно открыть на запись — то есть
 //! от администратора. В продукте это делает брокер под SYSTEM.
 
+pub mod activity;
 mod ata;
 mod device;
 mod ioctl;
 mod nvme;
 
+pub use activity::{
+    activity_between, pagefiles, read_counters, DiskActivity, DiskCounters, Pagefile,
+};
 pub use device::{enumerate, Drive};
 
 use bamboo_core::storage::{BusType, DriveInfo, SmartHealth};

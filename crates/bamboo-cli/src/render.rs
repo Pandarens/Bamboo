@@ -579,6 +579,63 @@ fn wrap(text: &str, width: usize, indent: &str) {
     }
 }
 
+pub fn disk_activity(rows: &[(String, bamboo_sys::storage::DiskActivity)]) {
+    if rows.is_empty() {
+        println!("Активность накопителей прочитать не удалось.");
+        return;
+    }
+
+    println!("Чем заняты накопители прямо сейчас:");
+    for (name, activity) in rows {
+        let mark = if activity.is_saturated() {
+            "  ← упирается в предел"
+        } else {
+            ""
+        };
+        println!(
+            "  {:<28} занят {:>3.0}%   чтение {:>10}/с   запись {:>10}/с   очередь {}{}",
+            clip(name),
+            activity.busy * 100.0,
+            activity.read_per_second.to_string(),
+            activity.write_per_second.to_string(),
+            activity.queue_depth,
+            mark,
+        );
+    }
+    println!();
+    wrap(
+        "Занятость — это доля времени, когда накопитель обслуживал запросы. \
+         Сто процентов не значат «упёрлись в скорость»: диск может быть занят \
+         мелкими операциями, ползущими по очереди. Смотреть надо вместе \
+         с длиной очереди: она растёт, когда запросов больше, чем диск успевает.",
+        78,
+        "  ",
+    );
+}
+
+pub fn pagefiles(files: &[bamboo_sys::storage::Pagefile]) {
+    if files.is_empty() {
+        println!("Файлов подкачки нет — она отключена.");
+        return;
+    }
+
+    println!("Файлы подкачки:");
+    for file in files {
+        let where_ = file
+            .drive_letter()
+            .map(|letter| format!("диск {letter}"))
+            .unwrap_or_else(|| file.name.clone());
+        println!(
+            "  {:<12} занято {:>10} из {:>10} ({:.0}%), пик {}",
+            where_,
+            file.in_use.to_string(),
+            file.total.to_string(),
+            file.usage() * 100.0,
+            file.peak,
+        );
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

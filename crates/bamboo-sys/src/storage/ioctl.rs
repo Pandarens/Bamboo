@@ -36,6 +36,33 @@ pub const IOCTL_DISK_GET_DRIVE_GEOMETRY_EX: u32 =
 
 /// Прямая передача ATA-команды. Требует открытия устройства на чтение
 /// и запись, то есть прав администратора.
+/// `IOCTL_DISK_PERFORMANCE`: счётчики активности накопителя.
+///
+/// То же самое, чем меряет диспетчер задач: сколько байт прочитано
+/// и записано, сколько времени накопитель был занят и сколько простаивал.
+/// Из отношения занятости к общему времени и получается «активность 100%».
+pub const IOCTL_DISK_PERFORMANCE: u32 = ctl_code(0x0000_0007, 0x0008, 0, 0);
+
+/// Счётчики производительности накопителя.
+///
+/// Времена в единицах по 100 наносекунд, как принято в ядре Windows.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct DISK_PERFORMANCE {
+    pub BytesRead: i64,
+    pub BytesWritten: i64,
+    pub ReadTime: i64,
+    pub WriteTime: i64,
+    pub IdleTime: i64,
+    pub ReadCount: u32,
+    pub WriteCount: u32,
+    pub QueueDepth: u32,
+    pub SplitCount: u32,
+    pub QueryTime: i64,
+    pub StorageDeviceNumber: u32,
+    pub StorageManagerName: [u16; 8],
+}
+
 pub const IOCTL_ATA_PASS_THROUGH: u32 = ctl_code(
     FILE_DEVICE_CONTROLLER,
     0x040B,

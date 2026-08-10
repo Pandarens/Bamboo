@@ -97,6 +97,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     main_window
         .window()
         .set_size(slint::PhysicalSize::new(1080, 640));
+    // Модели дашборда: без них replace не найдёт VecModel и молча ничего
+    // не сделает — список останется пустым.
+    main_window.set_disk_load(ModelRc::new(VecModel::from(Vec::<DiskLoadRow>::new())));
+    main_window.set_pagefiles(ModelRc::new(VecModel::from(Vec::<PagefileRow>::new())));
     main_window.set_processes(main_processes.clone());
     main_window.set_drives(drives_model.clone());
     main_window.set_wakes(wakes_model.clone());
@@ -468,6 +472,45 @@ fn apply_overview(
     main.set_memory_summary(SharedString::from(overview.memory));
     main.set_process_summary(SharedString::from(overview.processes));
 
+    // Накопители и подкачка: дашборд в обзоре отвечает на вопрос «что
+    // именно грузит диск», который иначе приходится выяснять на ощупь.
+    let disks: Vec<DiskLoadRow> = snapshot
+        .disks
+        .iter()
+        .map(|disk| DiskLoadRow {
+            name: SharedString::from(disk.name.clone()),
+            busy: SharedString::from(format!("занят {:.0}%", disk.busy * 100.0)),
+            speed: SharedString::from(format!(
+                "чтение {}/с, запись {}/с",
+                disk.read_per_second, disk.write_per_second
+            )),
+            queue: SharedString::from(disk.queue_depth.to_string()),
+            saturated: disk.saturated,
+            fill: disk.busy as f32,
+        })
+        .collect();
+    replace(&main.get_disk_load(), disks);
+
+    let pagefiles: Vec<PagefileRow> = snapshot
+        .pagefiles
+        .iter()
+        .map(|file| PagefileRow {
+            r#where: SharedString::from(file.where_.clone()),
+            used: SharedString::from(format!(
+                "{} из {} ({:.0}%)",
+                file.in_use,
+                file.total,
+                file.usage * 100.0
+            )),
+            peak: SharedString::from(format!("наибольшая занятость с загрузки: {}", file.peak)),
+            fill: file.usage as f32,
+        })
+        .collect();
+    replace(&main.get_pagefiles(), pagefiles);
+    main.set_disk_pressure(SharedString::from(
+        snapshot.disk_pressure.clone().unwrap_or_default(),
+    ));
+
     fill_processes(main, snapshot, processes);
 }
 
@@ -493,6 +536,7 @@ fn fill_processes(
                 leak: row.leak,
                 state: SharedString::from(row.state),
                 hung: row.hung,
+                disk: SharedString::from(row.disk),
             })
             .collect();
     replace(processes, rows);
@@ -600,6 +644,30 @@ fn apply_snapshot(
         } else {
             format!("процессов: {}", snapshot.process_count)
         },
+    ));
+
+    // Диск: показываем самый занятый — если их несколько, интересен тот,
+    // который упирается в предел, а не средняя температура по больнице.
+    match snapshot
+        .disks
+        .iter()
+        .max_by(|a, b| a.busy.total_cmp(&b.busy))
+    {
+        Some(disk) => {
+            widget.set_disk_value(SharedString::from(format!("{:.0}%", disk.busy * 100.0)));
+            widget.set_disk_note(SharedString::from(format!(
+                "чтение {}/с
+запись {}/с",
+                disk.read_per_second, disk.write_per_second
+            )));
+        }
+        None => {
+            widget.set_disk_value(SharedString::from("—"));
+            widget.set_disk_note(SharedString::from("замеряю…"));
+        }
+    }
+    widget.set_disk_pressure(SharedString::from(
+        snapshot.disk_pressure.clone().unwrap_or_default(),
     ));
 
     widget.set_memory_value(SharedString::from(snapshot.memory_used.to_string()));

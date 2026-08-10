@@ -35,6 +35,8 @@ pub struct ProcessRow {
     /// У процессов без окон пусто: зависать там нечему.
     pub state: String,
     pub hung: bool,
+    /// Нагрузка на диск: «12.4 МБ/с». Пусто, если процесс диск не трогает.
+    pub disk: String,
 }
 
 /// По какому столбцу сортировать таблицу процессов.
@@ -49,6 +51,9 @@ pub enum SortColumn {
     /// Зависшие окна — наверх: если что-то не отвечает, это первое,
     /// что человек хочет увидеть.
     State,
+    /// Нагрузка на диск. Тот самый случай «кто забил диск на сто процентов»,
+    /// ради которого в список и добавлен этот столбец.
+    Disk,
 }
 
 impl SortColumn {
@@ -62,6 +67,7 @@ impl SortColumn {
             4 => SortColumn::Threads,
             5 => SortColumn::Growth,
             6 => SortColumn::State,
+            7 => SortColumn::Disk,
             _ => SortColumn::Cpu,
         }
     }
@@ -94,6 +100,7 @@ pub fn process_rows(snapshot: &Snapshot, sort: SortColumn, descending: bool) -> 
         // Процессы без роста идут как нули и остаются в конце при убывании.
         SortColumn::Growth => lines.sort_by(|a, b| growth_rate(a).total_cmp(&growth_rate(b))),
         SortColumn::State => lines.sort_by_key(|line| line.hung),
+        SortColumn::Disk => lines.sort_by_key(disk_bytes),
     }
     if descending {
         lines.reverse();
@@ -119,8 +126,29 @@ pub fn process_rows(snapshot: &Snapshot, sort: SortColumn, descending: bool) -> 
                 String::new()
             },
             hung: line.hung,
+            disk: describe_disk(line),
         })
         .collect()
+}
+
+/// Суммарная нагрузка процесса на диск, байт в секунду.
+fn disk_bytes(line: &&crate::collector::ProcessLine) -> u64 {
+    line.read_per_second.saturating_add(line.write_per_second)
+}
+
+/// Текст про нагрузку на диск.
+///
+/// Ниже килобайта в секунду не пишем ничего: у большинства процессов
+/// постоянно капает по несколько байт, и восемьдесят строк с «0.1 КБ/с»
+/// только мешали бы увидеть того, кто действительно грузит диск.
+fn describe_disk(line: &crate::collector::ProcessLine) -> String {
+    const FLOOR: u64 = 1024;
+
+    let total = line.read_per_second.saturating_add(line.write_per_second);
+    if total < FLOOR {
+        return String::new();
+    }
+    format!("{}/с", bamboo_core::Bytes(total))
 }
 
 fn growth_rate(line: &crate::collector::ProcessLine) -> f64 {
@@ -328,6 +356,8 @@ mod tests {
             badge: String::new(),
             memory_growth: None,
             hung: false,
+            read_per_second: 0,
+            write_per_second: 0,
         }
     }
 

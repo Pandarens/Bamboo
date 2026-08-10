@@ -20,6 +20,8 @@ pub const CLASS_PROCESS_INFORMATION: u32 = 5;
 pub const CLASS_PROCESSOR_PERFORMANCE: u32 = 8;
 /// Класс `SystemInterruptInformation`: детализация прерываний.
 pub const CLASS_INTERRUPT_INFORMATION: u32 = 23;
+/// Класс `SystemPagefileInformation`: файлы подкачки и их занятость.
+pub const CLASS_PAGEFILE_INFORMATION: u32 = 18;
 
 pub const fn nt_success(status: NTSTATUS) -> bool {
     status >= 0
@@ -31,6 +33,18 @@ pub struct UNICODE_STRING {
     pub Length: u16,
     pub MaximumLength: u16,
     pub Buffer: *mut u16,
+}
+
+/// Запись о файле подкачки. Записи идут цепочкой: `NextEntryOffset` — сдвиг
+/// до следующей в байтах, ноль означает конец. Размеры даны в страницах.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct SYSTEM_PAGEFILE_INFORMATION {
+    pub NextEntryOffset: u32,
+    pub TotalSize: u32,
+    pub TotalInUse: u32,
+    pub PeakUsage: u32,
+    pub PageFileName: UNICODE_STRING,
 }
 
 #[repr(C)]

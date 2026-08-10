@@ -93,3 +93,34 @@ mod tests {
         assert!(counts.threads > counts.processes);
     }
 }
+
+/// Размер страницы памяти в байтах.
+///
+/// Нужен там, где ядро отдаёт величины в страницах, — например, размеры
+/// файлов подкачки. Обычно это 4 КиБ, но на некоторых конфигурациях иначе,
+/// поэтому спрашиваем систему, а не подставляем константу.
+pub fn page_size() -> u32 {
+    use windows_sys::Win32::System::SystemInformation::{GetSystemInfo, SYSTEM_INFO};
+
+    let mut info: SYSTEM_INFO = unsafe { core::mem::zeroed() };
+    unsafe { GetSystemInfo(&mut info) };
+
+    // Ноль означал бы, что система не ответила; делить на него нельзя.
+    if info.dwPageSize == 0 {
+        4096
+    } else {
+        info.dwPageSize
+    }
+}
+
+#[cfg(test)]
+mod page_tests {
+    use super::*;
+
+    #[test]
+    fn the_page_size_is_a_sane_power_of_two() {
+        let size = page_size();
+        assert!(size >= 4096, "страница подозрительно мала: {size}");
+        assert!(size.is_power_of_two(), "страница не степень двойки: {size}");
+    }
+}

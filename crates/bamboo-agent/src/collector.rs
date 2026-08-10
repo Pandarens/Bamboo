@@ -34,6 +34,12 @@ pub struct ProcessLine {
     pub memory_growth: Option<bamboo_analyze::MemoryTrend>,
     /// Есть ли у процесса окно, которое перестало разбирать сообщения.
     pub hung: bool,
+    /// Сколько процесс читает и пишет на диск, байт в секунду.
+    /// Именно скорость, а не сумма за интервал: интервал опроса плавает
+    /// от секунды до минуты, и сырые дельты нельзя было бы сравнивать
+    /// между собой.
+    pub read_per_second: u64,
+    pub write_per_second: u64,
 }
 
 /// Снимок для интерфейса.
@@ -55,6 +61,37 @@ pub struct Snapshot {
     /// Собственное потребление Bamboo.
     pub own_memory: Bytes,
     pub cadence: String,
+    /// Чем заняты накопители: имя, занятость и скорости.
+    pub disks: Vec<DiskLine>,
+    /// Файлы подкачки и их занятость.
+    pub pagefiles: Vec<PagefileLine>,
+    /// Объяснение, почему диск загружен, если он загружен. `None` — диск
+    /// свободен либо виновник не назван честно.
+    pub disk_pressure: Option<String>,
+}
+
+/// Накопитель в снимке.
+#[derive(Clone, Debug)]
+pub struct DiskLine {
+    pub name: String,
+    /// Доля времени, когда накопитель был занят, 0..1.
+    pub busy: f64,
+    pub read_per_second: Bytes,
+    pub write_per_second: Bytes,
+    pub queue_depth: u32,
+    /// Занят настолько, что это уже мешает.
+    pub saturated: bool,
+}
+
+/// Файл подкачки в снимке.
+#[derive(Clone, Debug)]
+pub struct PagefileLine {
+    /// «диск C» либо полный путь, если буква не разобралась.
+    pub where_: String,
+    pub in_use: Bytes,
+    pub total: Bytes,
+    pub peak: Bytes,
+    pub usage: f64,
 }
 
 /// Флаг, которым интерфейс сообщает коллектору, открыт ли виджет.
@@ -83,6 +120,12 @@ pub fn spawn() -> (Receiver<Snapshot>, WidgetVisible) {
 /// раз в минуту, чаще этого результат просто не меняется.
 const GROWTH_EVERY: std::time::Duration = std::time::Duration::from_secs(60);
 
+/// Как часто перечитывать список файлов подкачки.
+///
+/// Их размер и состав меняются медленно, а запрос к ядру не бесплатный.
+/// Занятость подкачки скачками не ходит: раз в полминуты более чем хватает.
+const PAGEFILES_EVERY: std::time::Duration = std::time::Duration::from_secs(30);
+
 fn run(sender: Sender<Snapshot>, visible: WidgetVisible) {
     let mut collector = Collector::new();
     let mut memory_history: Vec<u64> = Vec::with_capacity(SPARK_POINTS);
@@ -91,6 +134,10 @@ fn run(sender: Sender<Snapshot>, visible: WidgetVisible) {
     let mut growth: std::collections::HashMap<u32, bamboo_analyze::MemoryTrend> =
         std::collections::HashMap::new();
     let mut growth_at: Option<std::time::Instant> = None;
+    // Счётчики накопителей с прошлого тика: активность считается по разнице.
+    let mut disk_before: Vec<bamboo_sys::storage::DiskCounters> = Vec::new();
+    let mut pagefiles: Vec<PagefileLine> = Vec::new();
+    let mut pagefiles_at: Option<std::time::Instant> = None;
 
     loop {
         collector.set_widget_open(visible.load(Ordering::Relaxed));
@@ -135,6 +182,17 @@ fn run(sender: Sender<Snapshot>, visible: WidgetVisible) {
         // процесс: EnumWindows всё равно обходит все окна системы.
         let hung = bamboo_sys::hung_process_ids();
 
+        // Накопители: счётчики накопительные, поэтому активность считаем
+        // по разнице с прошлым тиком, а не отдельной парой замеров — это
+        // избавляет от лишней паузы внутри тика.
+        let (disks, disk_now) = read_disks(&disk_before);
+        disk_before = disk_now;
+
+        if pagefiles_at.is_none_or(|at| at.elapsed() >= PAGEFILES_EVERY) {
+            pagefiles = read_pagefiles();
+            pagefiles_at = Some(std::time::Instant::now());
+        }
+
         // Берём все процессы, а не только топ по процессору: главное окно
         // сортирует их само, и по памяти в том числе. Обрежь мы список по
         // CPU, самый прожорливый по памяти процесс мог бы в него не попасть
@@ -151,12 +209,17 @@ fn run(sender: Sender<Snapshot>, visible: WidgetVisible) {
                 badge: badge_for(process),
                 memory_growth: growth.get(&process.pid()).copied(),
                 hung: hung.contains(&process.pid()),
+                read_per_second: per_second(process.last_point().read_kib, tick.interval_ms),
+                write_per_second: per_second(process.last_point().write_kib, tick.interval_ms),
             })
             .collect();
 
         // Порядок по умолчанию — по процессору: виджет показывает первые
         // строки и ждёт именно топ потребителей.
         top.sort_by(|a, b| b.cpu_percent.total_cmp(&a.cpu_percent));
+
+        // Считаем до сборки снимка: дальше список процессов уедет в него.
+        let disk_pressure = explain_disk_pressure(&disks, &top);
 
         let snapshot = Snapshot {
             cpu_busy: tick.cpu_busy(),
@@ -171,6 +234,9 @@ fn run(sender: Sender<Snapshot>, visible: WidgetVisible) {
                 .map(|m| m.working_set)
                 .unwrap_or(Bytes::ZERO),
             cadence: cadence_name(tick.cadence),
+            disk_pressure,
+            disks,
+            pagefiles: pagefiles.clone(),
         };
 
         // Интерфейс закрылся — поток должен закончиться вместе с ним.
@@ -242,5 +308,202 @@ mod tests {
         // растягивания на весь диапазон.
         assert_eq!(normalise(&[500, 500, 500]), vec![0.5, 0.5, 0.5]);
         assert!(normalise(&[]).is_empty());
+    }
+}
+
+/// Переводит дельту за интервал в скорость, байт в секунду.
+///
+/// Интервал опроса плавает от секунды до минуты (ТЗ, раздел 6.2), поэтому
+/// сырые дельты между собой несравнимы: одна и та же цифра за секунду
+/// и за минуту означает разную нагрузку.
+fn per_second(kib: u32, interval_ms: u64) -> u64 {
+    if interval_ms == 0 {
+        return 0;
+    }
+    (kib as u64 * 1024).saturating_mul(1000) / interval_ms
+}
+
+#[cfg(test)]
+mod speed_tests {
+    use super::*;
+
+    #[test]
+    fn a_delta_becomes_bytes_per_second() {
+        // 1024 КиБ за две секунды — это половина мегабайта в секунду.
+        assert_eq!(per_second(1024, 2000), 512 * 1024);
+    }
+
+    #[test]
+    fn the_first_tick_has_no_interval_and_no_speed() {
+        // На первом тике интервала нет: показать скорость неоткуда,
+        // и выдумывать её нельзя.
+        assert_eq!(per_second(5000, 0), 0);
+    }
+}
+
+/// Снимает счётчики накопителей и считает активность относительно прошлого
+/// тика. Возвращает готовые строки и свежие счётчики для следующего раза.
+fn read_disks(
+    before: &[bamboo_sys::storage::DiskCounters],
+) -> (Vec<DiskLine>, Vec<bamboo_sys::storage::DiskCounters>) {
+    use bamboo_sys::storage::{activity_between, read_counters, Drive};
+
+    let mut lines = Vec::new();
+    let mut counters = Vec::new();
+
+    for info in bamboo_sys::enumerate_drives() {
+        let Ok(device) = Drive::open(info.index) else {
+            continue;
+        };
+        let Ok(now) = read_counters(&device) else {
+            continue;
+        };
+
+        if let Some(previous) = before.iter().find(|c| c.index == now.index) {
+            if let Some(activity) = activity_between(*previous, now) {
+                lines.push(DiskLine {
+                    name: info.display_name(),
+                    busy: activity.busy,
+                    read_per_second: activity.read_per_second,
+                    write_per_second: activity.write_per_second,
+                    queue_depth: activity.queue_depth,
+                    saturated: activity.is_saturated(),
+                });
+            }
+        }
+        counters.push(now);
+    }
+
+    (lines, counters)
+}
+
+/// Читает файлы подкачки и готовит их к показу.
+fn read_pagefiles() -> Vec<PagefileLine> {
+    bamboo_sys::storage::pagefiles()
+        .unwrap_or_default()
+        .into_iter()
+        .map(|file| PagefileLine {
+            where_: file
+                .drive_letter()
+                .map(|letter| format!("диск {letter}"))
+                .unwrap_or_else(|| file.name.clone()),
+            in_use: file.in_use,
+            total: file.total,
+            peak: file.peak,
+            usage: file.usage(),
+        })
+        .collect()
+}
+
+/// Насколько активно процесс должен работать с диском, чтобы называть его
+/// виновником. Ниже мегабайта в секунду это фон, а не нагрузка.
+const CULPRIT_FLOOR: u64 = 1024 * 1024;
+
+/// Объясняет, почему диск занят, и называет виновника, если он очевиден.
+///
+/// Это ответ на вопрос, который диспетчер задач оставляет без ответа:
+/// он показывает «активность 100%» и молчит о том, из-за чего она.
+///
+/// Виновника называем, только когда он один и заметно выделяется. Если
+/// диск занят, а никто из процессов на него всерьёз не пишет, честно
+/// говорим и это: так бывает при работе антивируса, индексатора или
+/// самого накопителя, и врать про «виноват chrome.exe» нельзя.
+fn explain_disk_pressure(disks: &[DiskLine], processes: &[ProcessLine]) -> Option<String> {
+    let busiest = disks
+        .iter()
+        .filter(|disk| disk.saturated)
+        .max_by(|a, b| a.busy.total_cmp(&b.busy))?;
+
+    let culprit = processes
+        .iter()
+        .max_by_key(|line| line.read_per_second.saturating_add(line.write_per_second))
+        .filter(|line| line.read_per_second.saturating_add(line.write_per_second) >= CULPRIT_FLOOR);
+
+    Some(match culprit {
+        Some(line) => format!(
+            "{} загружен на {:.0}%: больше всех работает {} — чтение {}/с, запись {}/с",
+            busiest.name,
+            busiest.busy * 100.0,
+            line.name,
+            Bytes(line.read_per_second),
+            Bytes(line.write_per_second),
+        ),
+        None => format!(
+            "{} загружен на {:.0}%, но заметного виновника среди процессов нет. \
+             Так выглядит работа антивируса, индексатора поиска или самого \
+             накопителя — например, сборка мусора у SSD",
+            busiest.name,
+            busiest.busy * 100.0,
+        ),
+    })
+}
+
+#[cfg(test)]
+mod pressure_tests {
+    use super::*;
+
+    fn disk(busy: f64) -> DiskLine {
+        DiskLine {
+            name: "Диск 0".to_string(),
+            busy,
+            read_per_second: Bytes::ZERO,
+            write_per_second: Bytes::ZERO,
+            queue_depth: 0,
+            saturated: busy >= 0.85,
+        }
+    }
+
+    fn process(name: &str, write: u64) -> ProcessLine {
+        ProcessLine {
+            name: name.to_string(),
+            pid: 1,
+            threads: 1,
+            cpu_percent: 0.0,
+            memory: Bytes::ZERO,
+            badge: String::new(),
+            memory_growth: None,
+            hung: false,
+            read_per_second: 0,
+            write_per_second: write,
+        }
+    }
+
+    #[test]
+    fn a_free_disk_needs_no_explanation() {
+        let explanation = explain_disk_pressure(&[disk(0.2)], &[process("chrome.exe", 50 << 20)]);
+        assert_eq!(explanation, None);
+    }
+
+    #[test]
+    fn a_busy_disk_names_the_process_behind_it() {
+        let explanation =
+            explain_disk_pressure(&[disk(1.0)], &[process("chrome.exe", 45 << 20)]).unwrap();
+        assert!(explanation.contains("загружен на 100%"), "{explanation}");
+        assert!(explanation.contains("chrome.exe"), "{explanation}");
+    }
+
+    #[test]
+    fn a_busy_disk_without_a_culprit_says_so_honestly() {
+        // Диск занят, но процессы почти ничего не пишут: виноват кто-то
+        // невидимый снаружи. Назначать виновным первого попавшегося нельзя.
+        let explanation =
+            explain_disk_pressure(&[disk(0.95)], &[process("idle.exe", 1024)]).unwrap();
+        assert!(
+            explanation.contains("виновника среди процессов нет"),
+            "{explanation}"
+        );
+        assert!(!explanation.contains("idle.exe"), "{explanation}");
+    }
+
+    #[test]
+    fn the_busiest_disk_is_the_one_reported() {
+        let mut quiet = disk(0.9);
+        quiet.name = "Медленный".to_string();
+        let mut loud = disk(1.0);
+        loud.name = "Загруженный".to_string();
+
+        let explanation =
+            explain_disk_pressure(&[quiet, loud], &[process("app.exe", 10 << 20)]).unwrap();
+        assert!(explanation.starts_with("Загруженный"), "{explanation}");
     }
 }
