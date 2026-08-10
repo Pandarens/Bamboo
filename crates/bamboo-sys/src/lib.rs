@@ -25,6 +25,7 @@ pub mod power;
 pub mod process;
 pub mod service;
 pub mod services;
+pub mod settings;
 pub mod startup;
 pub mod storage;
 pub mod user;
@@ -48,7 +49,8 @@ pub use service::{
     install as install_service, service_start, set_service_start, uninstall as uninstall_service,
     ServiceStart, StopSignal,
 };
-pub use services::service_names;
+pub use services::{service_by_pid, service_names, stop_service, ServiceOwner};
+pub use settings::{set_show_widget_on_start, show_widget_on_start};
 pub use startup::{
     add_to_startup, is_in_startup, remove_from_startup, set_startup_enabled, user_startup_items,
     StartupItem,

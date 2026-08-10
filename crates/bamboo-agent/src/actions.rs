@@ -356,6 +356,8 @@ mod tests {
 pub struct Terminated {
     /// Имя процесса и момент, когда мы его завершили.
     recent: Vec<(String, std::time::Instant)>,
+    /// Служба, которая вернула процесс в последний раз.
+    culprit: Option<bamboo_sys::ServiceOwner>,
 }
 
 /// Сколько ждём возвращения. Дольше нескольких минут связь между нашим
@@ -377,6 +379,14 @@ impl Terminated {
     fn forget_old(&mut self) {
         self.recent
             .retain(|(_, at)| at.elapsed() < WATCH_FOR_RETURN);
+    }
+
+    /// Служба, поднявшая вернувшийся процесс, если это была служба.
+    ///
+    /// Держим её отдельно от текста: по ней интерфейс предлагает кнопку
+    /// «остановить источник», а из строки имя службы не выковырять.
+    pub fn culprit_service(&self) -> Option<bamboo_sys::ServiceOwner> {
+        self.culprit.clone()
     }
 
     /// Ищет вернувшиеся процессы и объясняет, кто их поднял.
@@ -405,6 +415,17 @@ impl Terminated {
 
             let (_, when) = self.recent.remove(at);
             let seconds = when.elapsed().as_secs();
+
+            // Если поднявший — служба, её можно остановить, и тогда
+            // процесс перестанет возвращаться. Это и есть настоящий ответ
+            // на «завершаю, а он опять появляется».
+            self.culprit = bamboo_sys::service_by_pid(*parent_pid);
+            if let Some(service) = &self.culprit {
+                return Some(format!(
+                    "{name} вернулся через {seconds} с (PID {pid}). Его поднимает служба                      «{}». Завершать процесс повторно бесполезно — он будет возвращаться,                      пока служба работает. Остановить её можно кнопкой ниже: это                      действие уровня 5, и служба поднимется обратно при перезагрузке.",
+                    service.display
+                ));
+            }
 
             // Родитель мог уже завершиться — так бывает, когда программу
             // поднял разовый запуск. Тогда честно говорим, что не знаем.
@@ -475,5 +496,76 @@ mod return_tests {
         let processes = vec![("updater.exe".to_string(), 500u32, 300u32)];
         assert!(watch.check_returns(&processes, &|_| None).is_some());
         assert_eq!(watch.check_returns(&processes, &|_| None), None);
+    }
+}
+
+/// Останавливает службу, которая возвращает завершённый процесс.
+///
+/// Отдельная и осознанно неудобная операция: это уровень риска 5 из
+/// иерархии ТЗ. Остановка службы способна сломать то, что от неё зависит,
+/// поэтому вызывается только по прямому требованию человека и только
+/// после того, как он увидел, о какой службе речь.
+pub fn stop_service(service: &bamboo_sys::ServiceOwner) -> String {
+    // Службы Windows, без которых система не работает, не трогаем даже
+    // по прямой просьбе: это тот случай, когда «пользователь сам попросил»
+    // не оправдание.
+    const NEVER: &[&str] = &[
+        "rpcss",
+        "dcomlaunch",
+        "lsm",
+        "plugplay",
+        "power",
+        "winlogon",
+        "csrss",
+        "eventlog",
+        "schedule",
+        "wuauserv",
+    ];
+
+    let lowered = service.name.to_lowercase();
+    if NEVER.contains(&lowered.as_str()) {
+        return format!(
+            "Службу «{}» Bamboo не остановит: без неё Windows работает неправильно. \
+             Это тот случай, когда «я сам попросил» — не повод.",
+            service.display
+        );
+    }
+
+    match bamboo_sys::stop_service(&service.name) {
+        Ok(()) => format!(
+            "Служба «{}» остановлена. Процесс больше не должен возвращаться. \
+             При перезагрузке служба запустится снова — чтобы этого не было, \
+             её нужно перевести в отключённые, а это отдельное решение.",
+            service.display
+        ),
+        Err(error) => format!("Остановить «{}» не удалось: {error}", service.display),
+    }
+}
+
+#[cfg(test)]
+mod stop_service_tests {
+    use super::*;
+
+    fn service(name: &str) -> bamboo_sys::ServiceOwner {
+        bamboo_sys::ServiceOwner {
+            name: name.to_string(),
+            display: name.to_string(),
+        }
+    }
+
+    #[test]
+    fn critical_services_are_refused_even_when_asked() {
+        // Пользователь может попросить остановить RPCSS. Выполнить эту
+        // просьбу — значит сломать ему систему.
+        for name in ["RpcSs", "DcomLaunch", "Winlogon", "Schedule"] {
+            let note = stop_service(&service(name));
+            assert!(note.contains("не остановит"), "{name}: {note}");
+        }
+    }
+
+    #[test]
+    fn a_missing_service_reports_the_failure() {
+        let note = stop_service(&service("НетТакойСлужбыBamboo"));
+        assert!(note.contains("не удалось"), "{note}");
     }
 }

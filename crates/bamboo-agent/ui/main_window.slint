@@ -259,6 +259,10 @@ export component MainWindow inherits Window {
     in-out property <bool> game-mode: false;
     // Bamboo запускается вместе с Windows.
     in-out property <bool> autostart: false;
+    // Показывать виджет сразу при запуске.
+    in-out property <bool> show-widget-on-start: false;
+    // Служба, вернувшая завершённый процесс. Пусто — предлагать нечего.
+    in-out property <string> culprit-service: "";
     // Сколько времени идёт наблюдение — от этого зависит, что мы можем
     // сказать про рост памяти.
     in property <string> watch-status: "";
@@ -302,6 +306,10 @@ export component MainWindow inherits Window {
     callback apply-filter();
     // Переключить запуск вместе с Windows.
     callback toggle-autostart();
+    // Переключить показ виджета при запуске.
+    callback toggle-widget-on-start();
+    // Остановить службу, которая возвращает завершённый процесс.
+    callback stop-culprit-service();
     // Завершить все процессы группы. Спрашиваем дважды, как и для одного.
     callback terminate-group(string);
     // PID, для которого сейчас показан вопрос «точно завершить?».
@@ -910,9 +918,23 @@ export component MainWindow inherits Window {
                             }
                         }
                     }
-                    Text {
-                        text: root.action-note;
-                        font-size: 11px; color: #9fb3a8; wrap: word-wrap;
+                    // Сообщение о последнем действии. Если процесс вернулся
+                    // из-за службы, рядом появляется кнопка остановки: без
+                    // неё совет «разберитесь со службой» остаётся советом.
+                    HorizontalLayout {
+                        spacing: 8px;
+                        Text {
+                            text: root.action-note;
+                            font-size: 11px; color: #9fb3a8; wrap: word-wrap;
+                            horizontal-stretch: 1;
+                            vertical-alignment: center;
+                        }
+                        if root.culprit-service != "": RowButton {
+                            label: "Остановить службу";
+                            danger: true;
+                            width: 140px;
+                            pressed => { root.stop-culprit-service(); }
+                        }
                     }
                 }
 
@@ -1079,6 +1101,40 @@ export component MainWindow inherits Window {
                                         label: root.autostart ? "Выключить" : "Включить";
                                         width: 110px;
                                         pressed => { root.toggle-autostart(); }
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    Rectangle {
+                        background: #1e2a24; border-radius: 8px;
+                        height: widgetstart.preferred-height;
+                        widgetstart := HorizontalLayout {
+                            padding: 12px; spacing: 12px;
+                            VerticalLayout {
+                                spacing: 3px;
+                                horizontal-stretch: 1;
+                                Text {
+                                    text: "Показывать виджет при запуске";
+                                    font-size: 13px; color: #e8f0ec;
+                                }
+                                Text {
+                                    text: root.show-widget-on-start
+                                        ? "Виджет появится сразу вместе с Bamboo."
+                                        : "Bamboo запускается в трее. Виджет открывается "
+                                          + "щелчком по значку — наблюдение идёт в любом случае.";
+                                    font-size: 11px; color: #7d8f86; wrap: word-wrap;
+                                }
+                            }
+                            Rectangle {
+                                width: 110px;
+                                VerticalLayout {
+                                    alignment: center;
+                                    RowButton {
+                                        label: root.show-widget-on-start ? "Выключить" : "Включить";
+                                        width: 110px;
+                                        pressed => { root.toggle-widget-on-start(); }
                                     }
                                 }
                             }

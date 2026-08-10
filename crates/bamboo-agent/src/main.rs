@@ -63,7 +63,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let (updates, visible) = collector::spawn();
     let widget = Widget::new()?;
 
+    // Окно создаём сразу — иначе стили и иконку применять некуда, — но
+    // показываем только если человек этого хочет. По умолчанию Bamboo
+    // запускается в трей и на экран не лезет.
     widget.show()?;
+    let show_widget = bamboo_sys::show_widget_on_start();
+    if !show_widget {
+        widget.window().hide().ok();
+    }
+    visible.store(show_widget, Ordering::Relaxed);
 
     // Закрепление поверх остальных окон — единственное действие,
     // доступное сейчас из интерфейса.
@@ -113,6 +121,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     main_window.set_volumes(ModelRc::new(VecModel::from(Vec::<VolumeRow>::new())));
     main_window.set_suggestions(ModelRc::new(VecModel::from(Vec::<SuggestionRow>::new())));
     main_window.set_autostart(bamboo_sys::is_in_startup());
+    main_window.set_show_widget_on_start(bamboo_sys::show_widget_on_start());
     main_window.set_processes(main_processes.clone());
     main_window.set_drives(drives_model.clone());
     main_window.set_wakes(wakes_model.clone());
@@ -420,6 +429,43 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             // Состояние читаем из реестра: пользователь мог поменять его
             // и мимо нас, через диспетчер задач.
             win.set_autostart(bamboo_sys::is_in_startup());
+            win.set_action_note(SharedString::from(note));
+        });
+    }
+
+    // Остановка службы, которая возвращает завершённый процесс.
+    {
+        let weak = main_window.as_weak();
+        let killed = terminated.clone();
+        main_window.on_stop_culprit_service(move || {
+            let Some(win) = weak.upgrade() else {
+                return;
+            };
+            let Some(service) = killed.borrow().culprit_service() else {
+                return;
+            };
+
+            win.set_action_note(SharedString::from(actions::stop_service(&service)));
+            // Предложение одноразовое: служба либо остановлена, либо нет,
+            // и держать кнопку висящей незачем.
+            win.set_culprit_service(SharedString::from(""));
+        });
+    }
+
+    // Показывать ли виджет при запуске.
+    {
+        let weak = main_window.as_weak();
+        main_window.on_toggle_widget_on_start(move || {
+            let Some(win) = weak.upgrade() else {
+                return;
+            };
+            let wanted = !win.get_show_widget_on_start();
+            let note = match bamboo_sys::set_show_widget_on_start(wanted) {
+                Ok(()) if wanted => "Виджет будет появляться сразу при запуске.",
+                Ok(()) => "Bamboo будет запускаться в трее, без виджета.",
+                Err(_) => "Настройку сохранить не удалось.",
+            };
+            win.set_show_widget_on_start(bamboo_sys::show_widget_on_start());
             win.set_action_note(SharedString::from(note));
         });
     }
@@ -791,12 +837,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     .map(|line| (line.pid, line.name.clone()))
                     .collect();
 
-                if let Some(note) = terminated
+                let returned = terminated
                     .borrow_mut()
-                    .check_returns(&processes, &|pid| parents.get(&pid).cloned())
-                {
+                    .check_returns(&processes, &|pid| parents.get(&pid).cloned());
+                if let Some(note) = returned {
                     if let Some(main) = main_weak.upgrade() {
                         main.set_action_note(SharedString::from(note));
+                        // Служба-источник: по ней рисуется кнопка остановки.
+                        let culprit = terminated
+                            .borrow()
+                            .culprit_service()
+                            .map(|service| service.display)
+                            .unwrap_or_default();
+                        main.set_culprit_service(SharedString::from(culprit));
                     }
                 }
 
@@ -807,7 +860,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         },
     );
 
-    widget.run()?;
+    // Не `widget.run()`: тот завершает цикл, когда закрыто последнее окно.
+    // Bamboo — фоновый наблюдатель, он живёт в трее и обязан пережить
+    // закрытие виджета. Раньше вместе с виджетом исчезала и иконка.
+    slint::run_event_loop_until_quit()?;
     Ok(())
 }
 
