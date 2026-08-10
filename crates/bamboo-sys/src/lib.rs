@@ -17,6 +17,7 @@ pub mod cpu;
 pub mod etw;
 pub mod eventlog;
 pub mod freeze;
+pub mod iolimit;
 pub mod memory;
 pub mod nt;
 pub mod pipe;
@@ -36,6 +37,7 @@ pub use budget::{apply_self_limits, own_memory, OwnMemory};
 pub use clock::{monotonic_ms, now};
 pub use cpu::CpuTimesBuffer;
 pub use eventlog::daily_error_count;
+pub use iolimit::{IoLimit, LimitedProcess};
 pub use memory::{memory_stat, system_counts, SystemCounts};
 pub use power::{power_status, PowerSource, PowerStatus};
 pub use process::{

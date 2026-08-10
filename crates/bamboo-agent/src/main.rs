@@ -96,7 +96,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // а не предпочтительный, и таблица процессов оказывается сжатой.
     main_window
         .window()
-        .set_size(slint::PhysicalSize::new(1080, 640));
+        .set_size(slint::PhysicalSize::new(1280, 700));
     // Модели дашборда: без них replace не найдёт VecModel и молча ничего
     // не сделает — список останется пустым.
     main_window.set_disk_load(ModelRc::new(VecModel::from(Vec::<DiskLoadRow>::new())));
@@ -111,12 +111,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let last_snapshot: std::rc::Rc<std::cell::RefCell<Option<collector::Snapshot>>> =
         std::rc::Rc::new(std::cell::RefCell::new(None));
 
+    // Придержанные процессы: реестр держит job-объекты, а без них
+    // ограничение снялось бы сразу после установки.
+    let io_limits: std::rc::Rc<std::cell::RefCell<actions::IoLimits>> =
+        std::rc::Rc::new(std::cell::RefCell::new(actions::IoLimits::new()));
+
     // Сортировка по столбцу. Повторный щелчок по тому же столбцу
     // разворачивает порядок — привычное поведение любой таблицы.
     {
         let weak = main_window.as_weak();
         let rows = main_processes.clone();
         let snapshot = last_snapshot.clone();
+        let limits = io_limits.clone();
         main_window.on_sort_by(move |column| {
             let Some(win) = weak.upgrade() else {
                 return;
@@ -129,7 +135,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 win.set_sort_descending(column != 0);
             }
             if let Some(snapshot) = snapshot.borrow().as_ref() {
-                fill_processes(&win, snapshot, &rows);
+                fill_processes(&win, snapshot, &rows, &limits.borrow());
             }
         });
     }
@@ -179,6 +185,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let weak = main_window.as_weak();
         let snapshot = last_snapshot.clone();
         let rows = main_processes.clone();
+        let limits = io_limits.clone();
         main_window.on_terminate_process(move |pid| {
             let Some(win) = weak.upgrade() else {
                 return;
@@ -211,7 +218,64 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 snapshot.top.retain(|line| line.pid != pid);
             }
             if let Some(snapshot) = snapshot.borrow().as_ref() {
-                fill_processes(&win, snapshot, &rows);
+                fill_processes(&win, snapshot, &rows, &limits.borrow());
+            }
+        });
+    }
+
+    // Переключение «по программам» / «по процессам».
+    {
+        let weak = main_window.as_weak();
+        let snapshot = last_snapshot.clone();
+        let limits = io_limits.clone();
+        let rows = main_processes.clone();
+        main_window.on_toggle_grouping(move || {
+            let Some(win) = weak.upgrade() else {
+                return;
+            };
+            win.set_grouped(!win.get_grouped());
+            if let Some(snapshot) = snapshot.borrow().as_ref() {
+                fill_processes(&win, snapshot, &rows, &limits.borrow());
+            }
+        });
+    }
+
+    // Придержать или отпустить диск процесса.
+    {
+        let weak = main_window.as_weak();
+        let snapshot = last_snapshot.clone();
+        let limits = io_limits.clone();
+        let rows = main_processes.clone();
+        main_window.on_toggle_io_limit(move |pid| {
+            let Some(win) = weak.upgrade() else {
+                return;
+            };
+            let Ok(pid) = pid.parse::<u32>() else {
+                return;
+            };
+
+            let name = snapshot
+                .borrow()
+                .as_ref()
+                .and_then(|snapshot| {
+                    snapshot
+                        .top
+                        .iter()
+                        .find(|line| line.pid == pid)
+                        .map(|line| line.name.clone())
+                })
+                .unwrap_or_default();
+            if name.is_empty() {
+                win.set_action_note(SharedString::from("Процесс уже завершился."));
+                return;
+            }
+
+            let note = limits.borrow_mut().toggle(pid, &name);
+            win.set_action_note(SharedString::from(note));
+
+            // Перерисовываем список, чтобы кнопка сразу сменила подпись.
+            if let Some(snapshot) = snapshot.borrow().as_ref() {
+                fill_processes(&win, snapshot, &rows, &limits.borrow());
             }
         });
     }
@@ -446,7 +510,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 // Обновляем главное окно, только если оно на экране.
                 if let Some(main) = main_weak.upgrade() {
                     if main.window().is_visible() {
-                        apply_overview(&main, &snapshot, &main_processes);
+                        apply_overview(&main, &snapshot, &main_processes, &io_limits.borrow());
                     }
                 }
                 // Держим свежий снимок для пересортировки по клику и для
@@ -466,6 +530,7 @@ fn apply_overview(
     main: &MainWindow,
     snapshot: &collector::Snapshot,
     processes: &ModelRc<MainProcessRow>,
+    limits: &actions::IoLimits,
 ) {
     let overview = mainwin::overview(snapshot);
     main.set_cpu_summary(SharedString::from(overview.cpu));
@@ -511,7 +576,7 @@ fn apply_overview(
         snapshot.disk_pressure.clone().unwrap_or_default(),
     ));
 
-    fill_processes(main, snapshot, processes);
+    fill_processes(main, snapshot, processes, limits);
 }
 
 /// Перестраивает таблицу процессов по текущей сортировке окна.
@@ -520,14 +585,25 @@ fn fill_processes(
     main: &MainWindow,
     snapshot: &collector::Snapshot,
     processes: &ModelRc<MainProcessRow>,
+    limits: &actions::IoLimits,
 ) {
     let sort = mainwin::SortColumn::from_index(main.get_sort_column());
-    let rows: Vec<MainProcessRow> =
+    // Режим групп и режим процессов дают одинаковые строки, поэтому
+    // дальше таблица о разнице не знает.
+    let prepared = if main.get_grouped() {
+        mainwin::grouped_rows(snapshot, sort, main.get_sort_descending())
+    } else {
         mainwin::process_rows(snapshot, sort, main.get_sort_descending())
-            .into_iter()
-            .map(|row| MainProcessRow {
+    };
+    let rows: Vec<MainProcessRow> = prepared
+        .into_iter()
+        .map(|row| {
+            let throttled = row
+                .pid
+                .parse::<u32>()
+                .is_ok_and(|pid| limits.is_limited(pid));
+            MainProcessRow {
                 name: SharedString::from(row.name),
-                pid: SharedString::from(row.pid),
                 cpu: SharedString::from(row.cpu),
                 memory: SharedString::from(row.memory),
                 threads: SharedString::from(row.threads),
@@ -537,8 +613,11 @@ fn fill_processes(
                 state: SharedString::from(row.state),
                 hung: row.hung,
                 disk: SharedString::from(row.disk),
-            })
-            .collect();
+                throttled,
+                pid: SharedString::from(row.pid),
+            }
+        })
+        .collect();
     replace(processes, rows);
 }
 

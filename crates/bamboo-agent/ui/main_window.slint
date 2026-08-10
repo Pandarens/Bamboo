@@ -20,6 +20,8 @@ struct MainProcessRow {
     hung: bool,
     // Нагрузка на диск: «12.4 МБ/с» либо пусто.
     disk: string,
+    // Диску этого процесса мы придержали скорость.
+    throttled: bool,
 }
 
 // Накопитель в обзоре.
@@ -187,9 +189,9 @@ export component MainWindow inherits Window {
     no-frame: true;
     // Шире прежнего: в таблице процессов прибавились столбец роста памяти
     // и кнопки действий.
-    preferred-width: 1080px;
+    preferred-width: 1280px;
     preferred-height: 640px;
-    min-width: 900px;
+    min-width: 1080px;
     min-height: 480px;
     background: #141b18;
 
@@ -215,6 +217,9 @@ export component MainWindow inherits Window {
     // 0 имя, 1 PID, 2 CPU, 3 память, 4 потоки, 5 рост памяти.
     in-out property <int> sort-column: 2;
     in-out property <bool> sort-descending: true;
+    // Схлопывать процессы одной программы в строку. По умолчанию да:
+    // двадцать вкладок Chrome по отдельности мало о чём говорят.
+    in-out property <bool> grouped: true;
     // Что случилось с последним действием — показываем под таблицей.
     in property <string> action-note: "";
 
@@ -227,6 +232,10 @@ export component MainWindow inherits Window {
     callback apply-action(string, int);
     // Завершить процесс. Спрашиваем дважды: операция необратима.
     callback terminate-process(string);
+    // Придержать или отпустить диск процесса.
+    callback toggle-io-limit(string);
+    // Переключить режим «по программам» / «по процессам».
+    callback toggle-grouping();
     // PID, для которого сейчас показан вопрос «точно завершить?».
     in-out property <string> confirming: "";
 
@@ -479,14 +488,28 @@ export component MainWindow inherits Window {
                 // --- Процессы ---
                 if root.section == 1: VerticalLayout {
                     spacing: 8px;
-                    Text { text: "Процессы"; font-size: 20px; color: #e8f0ec; }
+                    HorizontalLayout {
+                        spacing: 8px;
+                        Text {
+                            text: root.grouped ? "Программы" : "Процессы";
+                            font-size: 20px; color: #e8f0ec;
+                            vertical-alignment: center; horizontal-stretch: 1;
+                        }
+                        RowButton {
+                            label: root.grouped ? "по процессам" : "по программам";
+                            width: 118px;
+                            pressed => { root.toggle-grouping(); }
+                        }
+                    }
                     Text {
                         text: "Столбец «Рост памяти» показывает то, чего нет в диспетчере задач: "
                             + "не сколько памяти занято сейчас, а растёт ли она и как быстро. "
                             + "Щёлкните по заголовку столбца, чтобы отсортировать. "
                             + "«Эконом» уводит процесс на энергоэффективные ядра, «Память ↓» "
                             + "понижает приоритет его памяти — оба действия записываются в журнал "
-                            + "и обратимы. «Завершить» — единственное необратимое действие: "
+                            + "и обратимы. «Диск ↓» придерживает скорость диска: полного "
+                            + "запрета не бывает — процесс, которому отказали в чтении, упал бы. "
+                            + "«Завершить» — единственное необратимое действие: "
                             + "несохранённые данные пропадут, поэтому кнопка спрашивает второй раз. "
                             + "Показаны первые 80 строк: сортировка идёт по всем процессам, "
                             + "обрезается уже результат.";
@@ -515,7 +538,7 @@ export component MainWindow inherits Window {
                             chosen => { root.sort-by(3); }
                         }
                         ColumnHeader {
-                            label: "Потоки"; width: 60px;
+                            label: root.grouped ? "Процессов" : "Потоки"; width: 74px;
                             active: root.sort-column == 4; descending: root.sort-descending;
                             chosen => { root.sort-by(4); }
                         }
@@ -534,7 +557,7 @@ export component MainWindow inherits Window {
                             active: root.sort-column == 6; descending: root.sort-descending;
                             chosen => { root.sort-by(6); }
                         }
-                        Rectangle { width: 250px; }
+                        Rectangle { width: 332px; }
                     }
                     Flickable {
                         VerticalLayout {
@@ -552,7 +575,7 @@ export component MainWindow inherits Window {
                                     Text { text: process.pid; color: #b6c6bd; font-size: 12px; vertical-alignment: center; width: 64px; }
                                     Text { text: process.cpu; color: #b6c6bd; font-size: 12px; vertical-alignment: center; width: 64px; }
                                     Text { text: process.memory; color: #b6c6bd; font-size: 12px; vertical-alignment: center; width: 90px; }
-                                    Text { text: process.threads; color: #b6c6bd; font-size: 12px; vertical-alignment: center; width: 60px; }
+                                    Text { text: process.threads; color: #b6c6bd; font-size: 12px; vertical-alignment: center; width: 74px; }
                                     // Подозрение на утечку выделяем цветом; измеренная
                                     // скорость без вердикта остаётся нейтральной.
                                     Text {
@@ -579,7 +602,7 @@ export component MainWindow inherits Window {
                                         font-size: 11px; vertical-alignment: center; width: 92px;
                                     }
                                     Rectangle {
-                                        width: 250px;
+                                        width: 332px;
                                         HorizontalLayout {
                                             spacing: 4px;
                                             alignment: end;
@@ -590,6 +613,10 @@ export component MainWindow inherits Window {
                                             RowButton {
                                                 label: "Память ↓";
                                                 pressed => { root.apply-action(process.pid, 1); }
+                                            }
+                                            RowButton {
+                                                label: process.throttled ? "Диск ✓" : "Диск ↓";
+                                                pressed => { root.toggle-io-limit(process.pid); }
                                             }
                                             // Завершение необратимо, поэтому
                                             // спрашиваем второй раз прямо на

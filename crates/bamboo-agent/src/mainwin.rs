@@ -73,6 +73,81 @@ impl SortColumn {
     }
 }
 
+/// Сводка по программе: все её процессы вместе.
+///
+/// Chrome, Edge и почти всё современное — это десяток процессов одной
+/// программы. По отдельности каждый выглядит скромно, а вместе они и
+/// съедают память. Складываем их в одну строку, чтобы человек видел цену
+/// программы, а не её кусочков.
+pub struct AppGroup {
+    pub name: String,
+    /// Сколько процессов в группе.
+    pub count: usize,
+    pub cpu_percent: f32,
+    pub memory: bamboo_core::Bytes,
+    pub disk_per_second: u64,
+    /// Самый заметный процесс группы: к нему применяются действия.
+    pub lead_pid: u32,
+    /// Хоть у одного окна нет отклика.
+    pub hung: bool,
+    /// Хоть у одного подозрение на утечку.
+    pub leak: bool,
+    /// Память ведущего процесса — по ней он и выбирается.
+    lead_memory: u64,
+}
+
+/// Группирует процессы по имени образа.
+///
+/// Именно по имени, а не по пути: у одной программы процессы лежат в одной
+/// папке, а разные программы с одинаковым именем — редкость по сравнению
+/// с пользой от того, что двадцать вкладок Chrome схлопнутся в строку.
+pub fn group_by_app(snapshot: &Snapshot) -> Vec<AppGroup> {
+    use std::collections::HashMap;
+
+    let mut groups: HashMap<String, AppGroup> = HashMap::new();
+
+    for line in &snapshot.top {
+        let key = line.name.to_lowercase();
+        let disk = line.read_per_second.saturating_add(line.write_per_second);
+
+        match groups.get_mut(&key) {
+            Some(group) => {
+                group.count += 1;
+                group.cpu_percent += line.cpu_percent;
+                group.memory = bamboo_core::Bytes(group.memory.as_u64() + line.memory.as_u64());
+                group.disk_per_second = group.disk_per_second.saturating_add(disk);
+                group.hung |= line.hung;
+                group.leak |= line.memory_growth.is_some_and(|trend| trend.suspected_leak);
+
+                // Ведущим считаем самый прожорливый по памяти: действие
+                // разумнее применить к нему, а не к случайному процессу.
+                if line.memory.as_u64() > group.lead_memory {
+                    group.lead_pid = line.pid;
+                    group.lead_memory = line.memory.as_u64();
+                }
+            }
+            None => {
+                groups.insert(
+                    key,
+                    AppGroup {
+                        name: line.name.clone(),
+                        count: 1,
+                        cpu_percent: line.cpu_percent,
+                        memory: line.memory,
+                        disk_per_second: disk,
+                        lead_pid: line.pid,
+                        lead_memory: line.memory.as_u64(),
+                        hung: line.hung,
+                        leak: line.memory_growth.is_some_and(|trend| trend.suspected_leak),
+                    },
+                );
+            }
+        }
+    }
+
+    groups.into_values().collect()
+}
+
 /// Сколько строк показываем в таблице.
 ///
 /// Сортируем весь список, а показываем верхушку. Триста строк, которые
@@ -81,6 +156,66 @@ impl SortColumn {
 /// идёт **после** сортировки: при сортировке по памяти видны самые
 /// прожорливые по памяти, а не случайные.
 pub const VISIBLE_ROWS: usize = 80;
+
+/// Готовит строки по программам: процессы одной программы схлопнуты.
+///
+/// Возвращает те же `ProcessRow`, что и обычный список, чтобы таблица
+/// не знала о двух разных режимах: в поле `pid` уезжает ведущий процесс,
+/// к нему и применяются действия.
+pub fn grouped_rows(snapshot: &Snapshot, sort: SortColumn, descending: bool) -> Vec<ProcessRow> {
+    let mut groups = group_by_app(snapshot);
+
+    match sort {
+        SortColumn::Name => groups.sort_by_key(|group| group.name.to_lowercase()),
+        SortColumn::Memory => groups.sort_by_key(|group| group.memory.as_u64()),
+        SortColumn::Disk => groups.sort_by_key(|group| group.disk_per_second),
+        SortColumn::State => groups.sort_by_key(|group| group.hung),
+        SortColumn::Growth => groups.sort_by_key(|group| group.leak),
+        // По числу процессов сортировать полезнее, чем по PID ведущего:
+        // у группы своего PID нет, а «сколько их» — осмысленный вопрос.
+        SortColumn::Pid | SortColumn::Threads => groups.sort_by_key(|group| group.count),
+        SortColumn::Cpu => groups.sort_by(|a, b| a.cpu_percent.total_cmp(&b.cpu_percent)),
+    }
+    if descending {
+        groups.reverse();
+    }
+
+    groups
+        .into_iter()
+        .take(VISIBLE_ROWS)
+        .map(|group| ProcessRow {
+            name: group.name,
+            pid: group.lead_pid.to_string(),
+            cpu: format!("{:.1}%", group.cpu_percent),
+            memory: group.memory.to_string(),
+            // В режиме групп в колонке потоков полезнее число процессов:
+            // сумма потоков у двадцати вкладок ничего не объясняет.
+            threads: if group.count > 1 {
+                format!("{} проц.", group.count)
+            } else {
+                "1 проц.".to_string()
+            },
+            badge: String::new(),
+            growth: if group.leak {
+                "утечка?".to_string()
+            } else {
+                String::new()
+            },
+            leak: group.leak,
+            state: if group.hung {
+                "не отвечает".to_string()
+            } else {
+                String::new()
+            },
+            hung: group.hung,
+            disk: if group.disk_per_second >= 1024 {
+                format!("{}/с", bamboo_core::Bytes(group.disk_per_second))
+            } else {
+                String::new()
+            },
+        })
+        .collect()
+}
 
 /// Готовит строки процессов из снимка, отсортированные по столбцу.
 ///
@@ -481,5 +616,98 @@ mod tests {
         assert!(!rows[1].leak);
         // Не растёт — не пишем ничего, а не «0 МБ/ч».
         assert!(rows[2].growth.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod grouping_tests {
+    use super::*;
+    use crate::collector::ProcessLine;
+    use bamboo_core::Bytes;
+
+    fn line(name: &str, pid: u32, cpu: f32, mib: u64, disk: u64) -> ProcessLine {
+        ProcessLine {
+            name: name.to_string(),
+            pid,
+            threads: 10,
+            cpu_percent: cpu,
+            memory: Bytes::from_mib(mib),
+            badge: String::new(),
+            memory_growth: None,
+            hung: false,
+            read_per_second: disk,
+            write_per_second: 0,
+        }
+    }
+
+    /// Chrome из трёх процессов и одинокий блокнот.
+    fn snapshot() -> Snapshot {
+        Snapshot {
+            top: vec![
+                line("chrome.exe", 100, 2.0, 400, 1 << 20),
+                line("chrome.exe", 101, 1.0, 300, 2 << 20),
+                line("chrome.exe", 102, 0.5, 500, 0),
+                line("notepad.exe", 200, 0.1, 50, 0),
+            ],
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn processes_of_one_app_collapse_into_a_single_row() {
+        let groups = group_by_app(&snapshot());
+        assert_eq!(groups.len(), 2, "должно остаться две программы");
+
+        let chrome = groups.iter().find(|g| g.name == "chrome.exe").unwrap();
+        assert_eq!(chrome.count, 3);
+        // Цена программы — это сумма её процессов, а не самый крупный.
+        assert_eq!(chrome.memory.as_u64(), Bytes::from_mib(1200).as_u64());
+        assert!((chrome.cpu_percent - 3.5).abs() < 1e-5);
+        assert_eq!(chrome.disk_per_second, 3 << 20);
+    }
+
+    #[test]
+    fn the_lead_process_is_the_hungriest_one() {
+        // Действие применяется к ведущему процессу: разумно взять того,
+        // кто занимает больше всех, а не случайного.
+        let groups = group_by_app(&snapshot());
+        let chrome = groups.iter().find(|g| g.name == "chrome.exe").unwrap();
+        assert_eq!(chrome.lead_pid, 102, "ведущим должен быть самый крупный");
+    }
+
+    #[test]
+    fn a_single_hung_process_marks_the_whole_app() {
+        let mut snapshot = snapshot();
+        snapshot.top[1].hung = true;
+
+        let groups = group_by_app(&snapshot);
+        let chrome = groups.iter().find(|g| g.name == "chrome.exe").unwrap();
+        assert!(
+            chrome.hung,
+            "если одна вкладка висит, программа не отвечает"
+        );
+    }
+
+    #[test]
+    fn grouped_rows_sort_by_total_memory() {
+        let rows = grouped_rows(&snapshot(), SortColumn::Memory, true);
+        assert_eq!(rows[0].name, "chrome.exe");
+        assert_eq!(rows[0].threads, "3 проц.");
+        assert_eq!(rows[1].name, "notepad.exe");
+        assert_eq!(rows[1].threads, "1 проц.");
+    }
+
+    #[test]
+    fn grouped_rows_sort_by_disk() {
+        let rows = grouped_rows(&snapshot(), SortColumn::Disk, true);
+        // У Chrome суммарно 3 МБ/с, у блокнота ничего.
+        assert_eq!(rows[0].name, "chrome.exe");
+        assert!(rows[0].disk.contains("МБ/с"), "{}", rows[0].disk);
+        assert!(rows[1].disk.is_empty());
+    }
+
+    #[test]
+    fn an_empty_snapshot_yields_no_groups() {
+        assert!(group_by_app(&Snapshot::default()).is_empty());
     }
 }

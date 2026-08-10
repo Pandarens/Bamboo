@@ -103,6 +103,73 @@ pub fn apply(pid: u32, image_name: &str, what: RowAction) -> String {
     }
 }
 
+/// Реестр процессов, которым мы придержали диск.
+///
+/// Ограничение держится job-объектом и живёт ровно столько, сколько живёт
+/// его дескриптор. Поэтому дескрипторы надо где-то хранить: выпустим —
+/// лимит снимется сам. Это же и защита от забытых изменений — закрылся
+/// Bamboo, и чужой процесс работает как раньше.
+#[derive(Default)]
+pub struct IoLimits {
+    limited: std::collections::HashMap<u32, bamboo_sys::LimitedProcess>,
+}
+
+impl IoLimits {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Придержан ли процесс прямо сейчас.
+    pub fn is_limited(&self, pid: u32) -> bool {
+        self.limited.contains_key(&pid)
+    }
+
+    /// Переключает ограничение и объясняет результат словами.
+    ///
+    /// Отдельно оговорка про «запретить». Запрета ввода-вывода в Windows
+    /// нет, и он был бы вреден: процесс, которому отказали в чтении файла,
+    /// не подождёт вежливо — он упадёт. Поэтому придерживаем скорость.
+    pub fn toggle(&mut self, pid: u32, image_name: &str) -> String {
+        use bamboo_policy::ProcessFacts;
+
+        if self.limited.remove(&pid).is_some() {
+            return format!("{image_name}: ограничение диска снято.");
+        }
+
+        let facts = ProcessFacts {
+            image_name,
+            session_id: 1,
+            ..Default::default()
+        };
+        if let Some(reason) = bamboo_policy::immutable_reason(&facts) {
+            return format!("{image_name}: придерживать нельзя — {reason}");
+        }
+
+        let limit = bamboo_sys::IoLimit::Background;
+        match bamboo_sys::LimitedProcess::throttle(pid, limit) {
+            Ok(limited) => {
+                self.limited.insert(pid, limited);
+                let held = self.count();
+                let others = if held > 1 {
+                    format!(" Сейчас придержано процессов: {held}.")
+                } else {
+                    String::new()
+                };
+                format!(
+                    "{image_name}: диск придержан — {}. Полного запрета не бывает:                      процесс, которому отказали в чтении, просто упал бы.                      Ограничение снимется само, когда Bamboo закроется.{others}",
+                    limit.describe()
+                )
+            }
+            Err(error) => format!("{image_name}: придержать не удалось — {error}"),
+        }
+    }
+
+    /// Сколько процессов сейчас придержано.
+    pub fn count(&self) -> usize {
+        self.limited.len()
+    }
+}
+
 /// Завершает процесс по требованию пользователя.
 ///
 /// Стоит особняком от `apply` и намеренно не идёт через журнал действий:
@@ -132,6 +199,44 @@ pub fn terminate(pid: u32, image_name: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn limiting_a_system_process_is_refused() {
+        let mut limits = IoLimits::new();
+        let note = limits.toggle(4, "lsass.exe");
+        assert!(note.contains("нельзя"), "получили: {note}");
+        assert_eq!(limits.count(), 0);
+    }
+
+    #[test]
+    fn toggling_a_missing_process_reports_failure() {
+        let mut limits = IoLimits::new();
+        let note = limits.toggle(0xFFFF_FFF0, "нет-такого.exe");
+        assert!(note.contains("не удалось"), "получили: {note}");
+        assert!(!limits.is_limited(0xFFFF_FFF0));
+    }
+
+    #[test]
+    fn a_limit_can_be_applied_and_lifted() {
+        let child = std::process::Command::new("cmd.exe")
+            .args(["/c", "ping -n 5 127.0.0.1 > nul"])
+            .spawn();
+        let Ok(mut child) = child else { return };
+
+        let mut limits = IoLimits::new();
+        let note = limits.toggle(child.id(), "cmd.exe");
+
+        if limits.is_limited(child.id()) {
+            assert!(note.contains("придержан"), "{note}");
+            // Второе нажатие снимает ограничение.
+            let off = limits.toggle(child.id(), "cmd.exe");
+            assert!(off.contains("снято"), "{off}");
+            assert_eq!(limits.count(), 0);
+        }
+
+        let _ = child.kill();
+        let _ = child.wait();
+    }
 
     #[test]
     fn a_system_process_cannot_be_terminated() {
