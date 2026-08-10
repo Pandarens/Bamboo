@@ -18,6 +18,7 @@
 #[cfg(windows)]
 mod actions;
 #[cfg(windows)]
+mod autopilot;
 mod collector;
 #[cfg(windows)]
 mod gamemode;
@@ -137,6 +138,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let io_limits: std::rc::Rc<std::cell::RefCell<actions::IoLimits>> =
         std::rc::Rc::new(std::cell::RefCell::new(actions::IoLimits::new()));
 
+    // Автоматика и её память: что придержано и какой записью журнала это
+    // откатывать. Без номера записи вернуть как было было бы нечем.
+    let autopilot: std::rc::Rc<std::cell::RefCell<autopilot::Autopilot>> = {
+        let mut pilot = autopilot::Autopilot::new();
+        pilot.set_enabled(bamboo_sys::autopilot_enabled());
+        std::rc::Rc::new(std::cell::RefCell::new(pilot))
+    };
+    let autopilot_holds: std::rc::Rc<
+        std::cell::RefCell<std::collections::HashMap<(u32, &'static str), i64>>,
+    > = std::rc::Rc::new(std::cell::RefCell::new(std::collections::HashMap::new()));
+
     // Игровой режим помнит, что и кому менял: без этого вернуть прежние
     // настройки было бы нечем.
     let game_mode: std::rc::Rc<std::cell::RefCell<gamemode::GameMode>> =
@@ -168,6 +180,42 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             if let Some(snapshot) = snapshot.borrow().as_ref() {
                 fill_processes(&win, snapshot, &rows, &limits.borrow());
             }
+        });
+    }
+
+    // Разрешение на самостоятельную оптимизацию.
+    {
+        let weak = main_window.as_weak();
+        let pilot = autopilot.clone();
+        let holds = autopilot_holds.clone();
+        main_window.on_toggle_autopilot(move || {
+            let Some(win) = weak.upgrade() else {
+                return;
+            };
+
+            let mut pilot = pilot.borrow_mut();
+            let now_on = !pilot.enabled();
+            // Выключение обязано вернуть всё придержанное: автоматика,
+            // оставившая после себя следы, — худшее из возможного.
+            let returned = pilot.set_enabled(now_on);
+            for held in &returned {
+                let key = (held.pid, remedy_key(held.remedy));
+                if let Some(journal_id) = holds.borrow_mut().remove(&key) {
+                    actions::revert_automatically(journal_id, "автоматика выключена");
+                }
+            }
+
+            let note = match bamboo_sys::set_autopilot_enabled(now_on) {
+                Ok(()) if now_on => "Автоматика включена. Пока вас нет, Bamboo придержит                     фоновую работу, а как только вы тронете мышь — вернёт всё                     на место. Каждое действие попадёт в журнал."
+                    .to_string(),
+                Ok(()) => format!(
+                    "Автоматика выключена, вернулось процессов: {}. Bamboo снова                      только предлагает.",
+                    returned.len()
+                ),
+                Err(error) => format!("Настройку сохранить не удалось: {error}"),
+            };
+            win.set_autopilot(pilot.enabled());
+            win.set_action_note(SharedString::from(note));
         });
     }
 
@@ -339,7 +387,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 // программы. Это ответ на «почему браузер занимает восемь
                 // гигабайт», который иначе приходится искать самому.
                 let note = if now_open {
-                    mainwin::explain_group_memory(snapshot, &name).unwrap_or_default()
+                    // Список расширений читается с диска, поэтому только
+                    // в момент разворачивания группы и только для браузера.
+                    let extensions = if mainwin::is_browser(&name) {
+                        bamboo_sys::installed_extensions().unwrap_or_default()
+                    } else {
+                        Vec::new()
+                    };
+                    mainwin::explain_group_memory(snapshot, &name, &extensions).unwrap_or_default()
                 } else {
                     String::new()
                 };
@@ -611,6 +666,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let refresh_snapshot = last_snapshot.clone();
         let refresh_limits = io_limits.clone();
         let refresh_rows = main_processes.clone();
+        let refresh_pilot = autopilot.clone();
         main_window.on_refresh(move || {
             let Some(win) = weak.upgrade() else {
                 return;
@@ -627,7 +683,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             // им не нужно, поэтому обновляем прямо здесь.
             if section == 6 {
                 if let Some(snapshot) = refresh_snapshot.borrow().as_ref() {
-                    apply_overview(&win, snapshot, &refresh_rows, &refresh_limits.borrow());
+                    apply_overview(
+                        &win,
+                        snapshot,
+                        &refresh_rows,
+                        &refresh_limits.borrow(),
+                        &refresh_pilot,
+                    );
                 }
                 return;
             }
@@ -704,6 +766,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let weak = widget.as_weak();
     let main_weak = main_window.as_weak();
+    let tick_pilot = autopilot.clone();
+    let tick_holds = autopilot_holds.clone();
     let timer = slint::Timer::default();
     // Состояние автоскрытия в полноэкранном режиме (ТЗ 14.2). Реагируем на
     // переходы, а не на само состояние: иначе, если пользователь вручную
@@ -818,10 +882,35 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
             if let Some(snapshot) = latest {
                 apply_snapshot(&widget, &snapshot, &processes, &spark, &spark_cpu);
+
+                // Автоматика работает независимо от окна: когда человека
+                // нет, окна тоже нет, а придерживать фоновую работу надо
+                // именно тогда.
+                {
+                    let applied = actions::AppliedActions::load();
+                    let limits = io_limits.borrow();
+                    let raw = mainwin::suggestions_for(&snapshot, &|pid| {
+                        limits.is_limited(pid) || !applied.marks(pid, false).is_empty()
+                    });
+                    drop(limits);
+
+                    let mut pilot = tick_pilot.borrow_mut();
+                    let plan = pilot.decide(snapshot.user_idle_ms, &raw);
+                    if !plan.is_empty() {
+                        apply_autopilot_plan(&mut pilot, plan, &tick_holds);
+                    }
+                }
+
                 // Обновляем главное окно, только если оно на экране.
                 if let Some(main) = main_weak.upgrade() {
                     if main.window().is_visible() {
-                        apply_overview(&main, &snapshot, &main_processes, &io_limits.borrow());
+                        apply_overview(
+                            &main,
+                            &snapshot,
+                            &main_processes,
+                            &io_limits.borrow(),
+                            &tick_pilot,
+                        );
                     }
                 }
                 // Не вернулся ли кто-то из завершённых? Если вернулся,
@@ -868,12 +957,69 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 /// Наполняет разделы «Обзор» и «Процессы» из снимка.
+/// Выполняет решение автоматики: применяет и снимает.
+///
+/// Номер записи журнала хранится рядом с процессом — им и откатываем.
+/// Если номера нет, снимать нечего: значит применить и не вышло.
+#[cfg(windows)]
+fn apply_autopilot_plan(
+    pilot: &mut autopilot::Autopilot,
+    plan: autopilot::Plan,
+    holds: &std::cell::RefCell<std::collections::HashMap<(u32, &'static str), i64>>,
+) {
+    use bamboo_analyze::suggest::Remedy;
+
+    for held in plan.release {
+        let key = (held.pid, remedy_key(held.remedy));
+        if let Some(journal_id) = holds.borrow_mut().remove(&key) {
+            actions::revert_automatically(journal_id, "человек вернулся за компьютер");
+        }
+    }
+
+    for held in plan.apply {
+        let what = match held.remedy {
+            Remedy::EcoQos => actions::RowAction::EcoQos,
+            Remedy::LowerMemory => actions::RowAction::LowerMemory,
+            // Придержать диск умеет только ограничитель, и он снимается
+            // сам вместе с дескриптором — журнал ему не нужен.
+            _ => {
+                pilot.forget(held.pid);
+                continue;
+            }
+        };
+
+        match actions::apply_automatically(held.pid, &held.name, what) {
+            Some(journal_id) => {
+                holds
+                    .borrow_mut()
+                    .insert((held.pid, remedy_key(held.remedy)), journal_id);
+            }
+            // Политика отказала или процесс исчез — забываем, иначе будем
+            // показывать человеку неправду о числе придержанных.
+            None => pilot.forget(held.pid),
+        }
+    }
+}
+
+/// Короткое имя средства: по нему находим запись журнала для отката.
+#[cfg(windows)]
+fn remedy_key(remedy: bamboo_analyze::suggest::Remedy) -> &'static str {
+    use bamboo_analyze::suggest::Remedy;
+    match remedy {
+        Remedy::EcoQos => "эконом",
+        Remedy::LowerMemory => "память",
+        Remedy::ThrottleDisk => "диск",
+        Remedy::JustSaying => "ничего",
+    }
+}
+
 #[cfg(windows)]
 fn apply_overview(
     main: &MainWindow,
     snapshot: &collector::Snapshot,
     processes: &ModelRc<MainProcessRow>,
     limits: &actions::IoLimits,
+    autopilot: &std::cell::RefCell<autopilot::Autopilot>,
 ) {
     let overview = mainwin::overview(snapshot);
     main.set_cpu_summary(SharedString::from(overview.cpu));
@@ -947,12 +1093,21 @@ fn apply_overview(
         .collect();
     replace(&main.get_suggestions(), rows);
     main.set_suggestions_note(SharedString::from(note));
+
+    // Автоматика сама работает в цикле — здесь только показываем, что она
+    // сейчас делает.
+    let pilot = autopilot.borrow();
+    main.set_autopilot(pilot.enabled());
+    main.set_autopilot_status(SharedString::from(pilot.status(snapshot.user_idle_ms)));
     main.set_disk_pressure(SharedString::from(
         snapshot.disk_pressure.clone().unwrap_or_default(),
     ));
     main.set_watch_status(SharedString::from(mainwin::watch_status(snapshot)));
     main.set_system_io(SharedString::from(
         snapshot.system_io.clone().unwrap_or_default(),
+    ));
+    main.set_freeze(SharedString::from(
+        snapshot.freeze.clone().unwrap_or_default(),
     ));
 
     fill_processes(main, snapshot, processes, limits);

@@ -199,7 +199,11 @@ pub fn group_by_app(snapshot: &Snapshot) -> Vec<AppGroup> {
 /// ответ у него скучный: браузер — это десятки процессов, по одному-два
 /// на вкладку и на расширение, и восемь гигабайт это их сумма. Полезнее
 /// не пугать числом, а показать, куда оно разошлось.
-pub fn explain_group_memory(snapshot: &Snapshot, name: &str) -> Option<String> {
+pub fn explain_group_memory(
+    snapshot: &Snapshot,
+    name: &str,
+    extensions: &[bamboo_sys::Extension],
+) -> Option<String> {
     let group = group_by_app(snapshot)
         .into_iter()
         .find(|group| group.name.eq_ignore_ascii_case(name))?;
@@ -219,7 +223,7 @@ pub fn explain_group_memory(snapshot: &Snapshot, name: &str) -> Option<String> {
 
     let tabs = role_summary(&members, bamboo_sys::BrowserRole::Tab);
     if tabs.0 > 0 {
-        let extensions = role_summary(&members, bamboo_sys::BrowserRole::Extension);
+        let extension_processes = role_summary(&members, bamboo_sys::BrowserRole::Extension);
         let gpu = role_summary(&members, bamboo_sys::BrowserRole::Gpu);
         let average = bamboo_core::Bytes(tabs.1 / tabs.0 as u64);
 
@@ -228,11 +232,11 @@ pub fn explain_group_memory(snapshot: &Snapshot, name: &str) -> Option<String> {
             tabs.0,
             bamboo_core::Bytes(tabs.1)
         )];
-        if extensions.0 > 0 {
+        if extension_processes.0 > 0 {
             parts.push(format!(
                 "{} расширений — {}",
-                extensions.0,
-                bamboo_core::Bytes(extensions.1)
+                extension_processes.0,
+                bamboo_core::Bytes(extension_processes.1)
             ));
         }
         if gpu.0 > 0 {
@@ -240,11 +244,12 @@ pub fn explain_group_memory(snapshot: &Snapshot, name: &str) -> Option<String> {
         }
 
         return Some(format!(
-            "{} занимает {} и состоит из {} процессов: {}. На вкладку в среднем              {average} — это обычная цена современного сайта. Память освободится,              когда вы закроете вкладки: браузер отдаёт её сам и под нехваткой              отдаёт быстрее. Здесь нечего «чистить» — есть что закрыть.",
+            "{} занимает {} и состоит из {} процессов: {}. На вкладку в среднем              {average} — это обычная цена современного сайта. Память освободится,              когда вы закроете вкладки: браузер отдаёт её сам и под нехваткой              отдаёт быстрее. Здесь нечего «чистить» — есть что закрыть.{}",
             group.name,
             group.memory,
             group.count,
             parts.join(", "),
+            list_extensions(extensions),
         ));
     }
 
@@ -265,6 +270,57 @@ pub fn explain_group_memory(snapshot: &Snapshot, name: &str) -> Option<String> {
         group.memory,
         biggest.memory,
     ))
+}
+
+/// Похоже ли имя процесса на браузер.
+///
+/// Нужно, чтобы не лезть на диск за списком расширений всякий раз, когда
+/// человек разворачивает любую группу.
+pub fn is_browser(name: &str) -> bool {
+    let lowered = name.to_lowercase();
+    [
+        "chrome.exe",
+        "msedge.exe",
+        "brave.exe",
+        "opera.exe",
+        "vivaldi.exe",
+        "yandex.exe",
+    ]
+    .contains(&lowered.as_str())
+}
+
+/// Перечисляет установленные расширения браузера.
+///
+/// Сказать «шесть процессов расширений» мало: человек хочет знать, каких.
+/// Сопоставить процесс с расширением снаружи нельзя — идентификатора
+/// в командной строке нет, — поэтому называем то, что установлено.
+/// Это честно и всё равно полезно: обычно виновник узнаётся по имени.
+fn list_extensions(extensions: &[bamboo_sys::Extension]) -> String {
+    if extensions.is_empty() {
+        return String::new();
+    }
+
+    // Длинный список в одну строку нечитаем: показываем начало и число
+    // остальных.
+    const SHOW: usize = 12;
+    let names: Vec<&str> = extensions
+        .iter()
+        .take(SHOW)
+        .map(|extension| extension.name.as_str())
+        .collect();
+
+    let tail = extensions.len().saturating_sub(names.len());
+    let tail = if tail > 0 {
+        format!(" и ещё {tail}")
+    } else {
+        String::new()
+    };
+
+    format!(
+        " Установлено расширений: {} — {}{tail}. Какое из них какому процессу         соответствует, снаружи не видно: браузер этого не сообщает.",
+        extensions.len(),
+        names.join(", "),
+    )
 }
 
 /// Сколько процессов такой роли и сколько памяти они держат.
@@ -1015,7 +1071,19 @@ pub fn suggestion_rows(
     snapshot: &Snapshot,
     handled: &dyn Fn(u32) -> bool,
 ) -> (Vec<SuggestionRow>, String) {
-    use bamboo_analyze::suggest::{ProcessFacts, Remedy, Situation};
+    let suggestions = suggestions_for(snapshot, handled);
+    rows_from(snapshot, suggestions)
+}
+
+/// Разбирает снимок и возвращает сами предложения.
+///
+/// Отдельно от построения строк ради автоматики: ей нужны предложения,
+/// а не то, как они выглядят в окне.
+pub fn suggestions_for(
+    snapshot: &Snapshot,
+    handled: &dyn Fn(u32) -> bool,
+) -> Vec<bamboo_analyze::suggest::Suggestion> {
+    use bamboo_analyze::suggest::{ProcessFacts, Situation};
 
     let facts: Vec<ProcessFacts<'_>> = snapshot
         .top
@@ -1050,7 +1118,15 @@ pub fn suggestion_rows(
         disk_saturated: snapshot.disks.iter().any(|disk| disk.saturated),
     };
 
-    let suggestions = bamboo_analyze::suggest(&facts, situation);
+    bamboo_analyze::suggest(&facts, situation)
+}
+
+/// Превращает предложения в строки окна.
+fn rows_from(
+    snapshot: &Snapshot,
+    suggestions: Vec<bamboo_analyze::suggest::Suggestion>,
+) -> (Vec<SuggestionRow>, String) {
+    use bamboo_analyze::suggest::Remedy;
 
     let note = if suggestions.is_empty() {
         if snapshot.user_idle_ms < bamboo_analyze::suggest::IDLE_BEFORE_SUGGESTING_MS {
@@ -1292,7 +1368,8 @@ mod explain_tests {
             ..Default::default()
         };
 
-        let text = explain_group_memory(&snapshot, "chrome.exe").expect("объяснение должно быть");
+        let text =
+            explain_group_memory(&snapshot, "chrome.exe", &[]).expect("объяснение должно быть");
         assert!(text.contains("3 процессов"), "{text}");
         // Самый крупный держит половину — это и есть ответ на «почему столько».
         assert!(text.contains("50%"), "{text}");
@@ -1314,9 +1391,70 @@ mod explain_tests {
             ..Default::default()
         };
 
-        let text = explain_group_memory(&snapshot, "chrome.exe").unwrap();
+        let text = explain_group_memory(&snapshot, "chrome.exe", &[]).unwrap();
         assert!(text.contains("2 вкладок"), "{text}");
         assert!(text.contains("1 расширений"), "{text}");
+    }
+
+    #[test]
+    fn installed_extensions_are_named_because_a_count_says_nothing() {
+        let mut tab = line("chrome.exe", 100, 3000);
+        tab.browser_role = Some(bamboo_sys::BrowserRole::Tab);
+        let mut extension = line("chrome.exe", 101, 400);
+        extension.browser_role = Some(bamboo_sys::BrowserRole::Extension);
+        let snapshot = Snapshot {
+            top: vec![tab, extension],
+            ..Default::default()
+        };
+
+        let extensions = vec![
+            bamboo_sys::Extension {
+                name: "uBlock Origin".into(),
+                id: "a".repeat(32),
+            },
+            bamboo_sys::Extension {
+                name: "Tampermonkey".into(),
+                id: "b".repeat(32),
+            },
+        ];
+        let text = explain_group_memory(&snapshot, "chrome.exe", &extensions).unwrap();
+        assert!(text.contains("uBlock Origin"), "{text}");
+        assert!(text.contains("Tampermonkey"), "{text}");
+        // Обещать больше, чем можем, нельзя: сопоставление процесса
+        // с расширением снаружи недоступно, и об этом надо сказать.
+        assert!(text.contains("снаружи не видно"), "{text}");
+    }
+
+    #[test]
+    fn a_long_extension_list_is_shortened() {
+        let many: Vec<bamboo_sys::Extension> = (0..30)
+            .map(|n| bamboo_sys::Extension {
+                name: format!("Расширение {n}"),
+                id: "c".repeat(32),
+            })
+            .collect();
+        let text = list_extensions(&many);
+        assert!(text.contains("Установлено расширений: 30"), "{text}");
+        assert!(text.contains("и ещё 18"), "{text}");
+    }
+
+    #[test]
+    fn no_extensions_means_no_sentence_about_them() {
+        assert_eq!(list_extensions(&[]), "");
+    }
+
+    #[test]
+    fn the_browser_answer_ends_with_what_to_actually_do() {
+        let mut tab = line("chrome.exe", 100, 3000);
+        tab.browser_role = Some(bamboo_sys::BrowserRole::Tab);
+        let mut other = line("chrome.exe", 101, 3000);
+        other.browser_role = Some(bamboo_sys::BrowserRole::Tab);
+        let snapshot = Snapshot {
+            top: vec![tab, other],
+            ..Default::default()
+        };
+
+        let text = explain_group_memory(&snapshot, "chrome.exe", &[]).unwrap();
         // Средняя цена вкладки — то, по чему видно, много это или нормально.
         assert!(text.contains("На вкладку в среднем"), "{text}");
         // И главное: чистить нечего, есть что закрыть.
@@ -1330,12 +1468,15 @@ mod explain_tests {
             top: vec![line("notepad.exe", 200, 50)],
             ..Default::default()
         };
-        assert_eq!(explain_group_memory(&snapshot, "notepad.exe"), None);
+        assert_eq!(explain_group_memory(&snapshot, "notepad.exe", &[]), None);
     }
 
     #[test]
     fn an_unknown_app_yields_nothing() {
-        assert_eq!(explain_group_memory(&Snapshot::default(), "нет.exe"), None);
+        assert_eq!(
+            explain_group_memory(&Snapshot::default(), "нет.exe", &[]),
+            None
+        );
     }
 
     #[test]

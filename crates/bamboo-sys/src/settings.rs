@@ -20,6 +20,9 @@ const SETTINGS_KEY: &str = "Software\\Bamboo";
 /// Показывать ли виджет сразу при запуске.
 const SHOW_WIDGET: &str = "ShowWidgetOnStart";
 
+/// Разрешение на самостоятельную оптимизацию.
+const AUTOPILOT: &str = "Autopilot";
+
 struct Key(HKEY);
 
 impl Drop for Key {
@@ -120,6 +123,20 @@ pub fn show_widget_on_start() -> bool {
 /// Запоминает, показывать ли виджет при запуске.
 pub fn set_show_widget_on_start(enabled: bool) -> Result<()> {
     write_flag(SHOW_WIDGET, enabled)
+}
+
+/// Разрешена ли самостоятельная оптимизация.
+///
+/// По умолчанию нет, и это принципиально: вмешательство без спроса человек
+/// должен разрешить сам. Утилита, которая начинает распоряжаться чужим
+/// компьютером сразу после установки, — ровно то, чем Bamboo быть не должен.
+pub fn autopilot_enabled() -> bool {
+    read_flag(AUTOPILOT, false)
+}
+
+/// Запоминает разрешение на самостоятельную оптимизацию.
+pub fn set_autopilot_enabled(enabled: bool) -> Result<()> {
+    write_flag(AUTOPILOT, enabled)
 }
 
 #[cfg(test)]

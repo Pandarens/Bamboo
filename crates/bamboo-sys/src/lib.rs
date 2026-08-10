@@ -17,6 +17,7 @@ pub mod control;
 pub mod cpu;
 pub mod etw;
 pub mod eventlog;
+pub mod extensions;
 pub mod freeze;
 pub mod iolimit;
 pub mod memory;
@@ -40,6 +41,7 @@ pub use clock::{monotonic_ms, now};
 pub use cmdline::{browser_role, command_line, BrowserRole};
 pub use cpu::CpuTimesBuffer;
 pub use eventlog::daily_error_count;
+pub use extensions::{installed as installed_extensions, Extension};
 pub use iolimit::{IoLimit, LimitedProcess};
 pub use memory::{memory_stat, system_counts, SystemCounts};
 pub use power::{power_status, PowerSource, PowerStatus};
@@ -52,7 +54,9 @@ pub use service::{
     ServiceStart, StopSignal,
 };
 pub use services::{service_by_pid, service_names, stop_service, ServiceOwner};
-pub use settings::{set_show_widget_on_start, show_widget_on_start};
+pub use settings::{
+    autopilot_enabled, set_autopilot_enabled, set_show_widget_on_start, show_widget_on_start,
+};
 pub use startup::{
     add_to_startup, is_in_startup, remove_from_startup, set_startup_enabled, user_startup_items,
     StartupItem,

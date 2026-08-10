@@ -83,6 +83,9 @@ pub struct Snapshot {
     pub user_idle_ms: u64,
     /// Объяснение дисковой активности ядра, если оно грузит накопитель.
     pub system_io: Option<String>,
+    /// Последнее подвисание системы и его причина. `None` — система вела
+    /// себя ровно всё время наблюдения.
+    pub freeze: Option<String>,
     /// Сколько Bamboo уже наблюдает за системой. От этого зависит, что он
     /// вправе сказать про рост памяти: выводы требуют часов.
     pub watching_ms: u64,
@@ -183,6 +186,9 @@ fn run(sender: Sender<Snapshot>, visible: WidgetVisible) {
     let mut roles: std::collections::HashMap<u32, bamboo_sys::BrowserRole> =
         std::collections::HashMap::new();
     let mut roles_at: Option<std::time::Instant> = None;
+    // Подвисания: копим их непрерывно. Смотреть надо в момент подвисания,
+    // а он короткий — пока человек откроет окно, всё уже прошло.
+    let mut freezes = bamboo_analyze::FreezeLog::new();
 
     loop {
         collector.set_widget_open(visible.load(Ordering::Relaxed));
@@ -276,6 +282,24 @@ fn run(sender: Sender<Snapshot>, visible: WidgetVisible) {
         // строки и ждёт именно топ потребителей.
         top.sort_by(|a, b| b.cpu_percent.total_cmp(&a.cpu_percent));
 
+        // Проверяем обстановку на подвисание каждым тиком.
+        let busiest = disks.iter().max_by(|a, b| a.busy.total_cmp(&b.busy));
+        let compressing = top.iter().any(|line| {
+            line.name.contains("Memory Compression") && line.memory.as_u64() > (128 << 20)
+        });
+
+        let moment = bamboo_analyze::moment_from(
+            tick.driver_time(),
+            busiest.map_or(0, |disk| disk.queue_depth),
+            busiest.map_or(0.0, |disk| disk.busy),
+            used,
+            tick.system.memory.physical_total,
+            compressing,
+        );
+        let now_ms = started.elapsed().as_millis() as u64;
+        freezes.observe(moment, now_ms);
+        let freeze = freezes.summary(now_ms);
+
         // Считаем до сборки снимка: дальше список процессов уедет в него.
         let disk_pressure = explain_disk_pressure(&disks, &top);
         let system_io = explain_system(&top, used, tick.system.memory.physical_total);
@@ -299,6 +323,7 @@ fn run(sender: Sender<Snapshot>, visible: WidgetVisible) {
             volumes: volumes.clone(),
             user_idle_ms: bamboo_sys::idle_ms().unwrap_or(0),
             system_io,
+            freeze,
             watching_ms: started.elapsed().as_millis() as u64,
         };
 

@@ -50,6 +50,69 @@ fn journal_path() -> std::path::PathBuf {
         .join("journal.db")
 }
 
+/// Применяет действие от имени автоматики и возвращает номер записи журнала.
+///
+/// Отличий от ручного применения два, и оба существенные. Первое: в журнале
+/// стоит `Auto`, и человек всегда видит, что это сделал не он. Второе:
+/// возвращается номер записи — без него автоматика не смогла бы вернуть
+/// как было, а право вмешиваться она имеет ровно потому, что умеет вернуть.
+///
+/// `None` — политика отказала либо действие не удалось. Это штатный исход:
+/// молча настаивать автоматика не будет.
+pub fn apply_automatically(pid: u32, image_name: &str, what: RowAction) -> Option<i64> {
+    let journal = open_journal()?;
+    let executor = Executor::new(&journal, SystemBackend);
+    let whitelist = UserWhitelist::new();
+
+    let context = Context {
+        action: what.action(),
+        process: ProcessFacts {
+            image_name,
+            session_id: 1,
+            ..Default::default()
+        },
+        app_key: image_name,
+        app_class: None,
+        profile: Profile::Normal,
+        mode: AutonomyMode::Assist,
+        learning: false,
+        whitelist: &whitelist,
+    };
+    let target = Target {
+        app_key: image_name.to_string(),
+        pid: Some(pid),
+        ..Default::default()
+    };
+
+    let now = bamboo_core::SampleTime::wall_clock_now();
+    match executor.apply(now, &context, &target, Actor::Auto, false) {
+        Outcome::Applied { journal_id } => Some(journal_id),
+        _ => None,
+    }
+}
+
+/// Возвращает как было по номеру записи журнала.
+///
+/// Возвращает `true`, если откат состоялся. Неудача здесь означает, что
+/// процесса уже нет — тогда и возвращать нечего.
+pub fn revert_automatically(journal_id: i64, reason: &str) -> bool {
+    let Some(journal) = open_journal() else {
+        return false;
+    };
+    Executor::new(&journal, SystemBackend)
+        .revert(journal_id, reason)
+        .is_ok()
+}
+
+/// Открывает журнал, создавая папку под него.
+fn open_journal() -> Option<Journal> {
+    let path = journal_path();
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    Journal::open(&path).ok()
+}
+
 /// Применяет действие к процессу и возвращает строку для показа пользователю.
 ///
 /// Ничего не делает молча: и успех, и отказ объясняются словами. Отказ

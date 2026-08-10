@@ -11,6 +11,7 @@
 pub mod baseline;
 pub mod boot;
 pub mod driver;
+pub mod freeze;
 pub mod growth;
 pub mod idle;
 pub mod observation;
@@ -27,6 +28,7 @@ pub mod wear;
 pub use baseline::{Baseline, Learning};
 pub use boot::{BootPoint, BootVerdict};
 pub use driver::DriverInput;
+pub use freeze::{moment_from, FreezeCause, FreezeLog, Moment};
 pub use growth::{memory_trend, GrowthInput, MemoryTrend, Point};
 pub use idle::IdleInput;
 pub use observation::{Observation, ObservationKind, Severity};
