@@ -34,6 +34,8 @@ pub struct ProcessLine {
     pub memory_growth: Option<bamboo_analyze::MemoryTrend>,
     /// Есть ли у процесса окно, которое перестало разбирать сообщения.
     pub hung: bool,
+    /// Номер процесса-родителя: по нему видно, кто запустил.
+    pub parent_pid: u32,
     /// Сколько процесс читает и пишет на диск, байт в секунду.
     /// Именно скорость, а не сумма за интервал: интервал опроса плавает
     /// от секунды до минуты, и сырые дельты нельзя было бы сравнивать
@@ -75,6 +77,9 @@ pub struct Snapshot {
     pub user_idle_ms: u64,
     /// Объяснение дисковой активности ядра, если оно грузит накопитель.
     pub system_io: Option<String>,
+    /// Сколько Bamboo уже наблюдает за системой. От этого зависит, что он
+    /// вправе сказать про рост памяти: выводы требуют часов.
+    pub watching_ms: u64,
 }
 
 /// Раздел в снимке.
@@ -146,6 +151,7 @@ const GROWTH_EVERY: std::time::Duration = std::time::Duration::from_secs(60);
 const PAGEFILES_EVERY: std::time::Duration = std::time::Duration::from_secs(30);
 
 fn run(sender: Sender<Snapshot>, visible: WidgetVisible) {
+    let started = std::time::Instant::now();
     let mut collector = Collector::new();
     let mut memory_history: Vec<u64> = Vec::with_capacity(SPARK_POINTS);
     let mut cpu_history: Vec<f32> = Vec::with_capacity(SPARK_POINTS);
@@ -231,6 +237,7 @@ fn run(sender: Sender<Snapshot>, visible: WidgetVisible) {
                 badge: badge_for(process),
                 memory_growth: growth.get(&process.pid()).copied(),
                 hung: hung.contains(&process.pid()),
+                parent_pid: process.parent_pid,
                 read_per_second: per_second(process.last_point().read_kib, tick.interval_ms),
                 write_per_second: per_second(process.last_point().write_kib, tick.interval_ms),
             })
@@ -263,6 +270,7 @@ fn run(sender: Sender<Snapshot>, visible: WidgetVisible) {
             volumes: volumes.clone(),
             user_idle_ms: bamboo_sys::idle_ms().unwrap_or(0),
             system_io,
+            watching_ms: started.elapsed().as_millis() as u64,
         };
 
         // Интерфейс закрылся — поток должен закончиться вместе с ним.
@@ -555,6 +563,7 @@ mod pressure_tests {
             badge: String::new(),
             memory_growth: None,
             hung: false,
+            parent_pid: 0,
             read_per_second: 0,
             write_per_second: write,
         }

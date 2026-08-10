@@ -342,3 +342,138 @@ mod tests {
         );
     }
 }
+
+/// Слежение за процессами, которые мы завершили.
+///
+/// Некоторые процессы возвращаются: их поднимает служба, планировщик или
+/// родительская программа. Человек нажимает «Завершить», процесс исчезает
+/// и через секунду появляется снова — и выглядит это как будто Bamboo
+/// ничего не сделал. На самом деле сделал, просто его тут же переиграли.
+///
+/// Поэтому запоминаем завершённое и, увидев возвращение, называем того,
+/// кто его вернул.
+#[derive(Default)]
+pub struct Terminated {
+    /// Имя процесса и момент, когда мы его завершили.
+    recent: Vec<(String, std::time::Instant)>,
+}
+
+/// Сколько ждём возвращения. Дольше нескольких минут связь между нашим
+/// действием и появлением процесса становится надуманной.
+const WATCH_FOR_RETURN: std::time::Duration = std::time::Duration::from_secs(180);
+
+impl Terminated {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Запоминает, что процесс с таким именем был завершён нами.
+    pub fn remember(&mut self, image_name: &str) {
+        self.recent
+            .push((image_name.to_lowercase(), std::time::Instant::now()));
+        self.forget_old();
+    }
+
+    fn forget_old(&mut self) {
+        self.recent
+            .retain(|(_, at)| at.elapsed() < WATCH_FOR_RETURN);
+    }
+
+    /// Ищет вернувшиеся процессы и объясняет, кто их поднял.
+    ///
+    /// `processes` — свежий список, `parent_name` — как узнать имя
+    /// родителя по его номеру.
+    pub fn check_returns(
+        &mut self,
+        processes: &[(String, u32, u32)],
+        parent_name: &dyn Fn(u32) -> Option<String>,
+    ) -> Option<String> {
+        self.forget_old();
+        if self.recent.is_empty() {
+            return None;
+        }
+
+        for (name, pid, parent_pid) in processes {
+            let lowered = name.to_lowercase();
+            let Some(at) = self
+                .recent
+                .iter()
+                .position(|(remembered, _)| *remembered == lowered)
+            else {
+                continue;
+            };
+
+            let (_, when) = self.recent.remove(at);
+            let seconds = when.elapsed().as_secs();
+
+            // Родитель мог уже завершиться — так бывает, когда программу
+            // поднял разовый запуск. Тогда честно говорим, что не знаем.
+            return Some(match parent_name(*parent_pid) {
+                Some(parent) => format!(
+                    "{name} вернулся через {seconds} с (PID {pid}). Его запустил {parent}. \
+                     Такое поднимают службы, планировщик заданий или сама программа — \
+                     завершать его повторно бесполезно, надо разбираться с тем, кто \
+                     его вызывает."
+                ),
+                None => format!(
+                    "{name} вернулся через {seconds} с (PID {pid}). Кто его запустил, \
+                     сказать не могу: родительский процесс уже закрылся. Так ведут \
+                     себя разовые запуски из планировщика заданий."
+                ),
+            });
+        }
+
+        None
+    }
+}
+
+#[cfg(test)]
+mod return_tests {
+    use super::*;
+
+    #[test]
+    fn a_returning_process_names_its_parent() {
+        let mut watch = Terminated::new();
+        watch.remember("updater.exe");
+
+        let processes = vec![("updater.exe".to_string(), 500u32, 300u32)];
+        let note = watch
+            .check_returns(&processes, &|pid| {
+                (pid == 300).then(|| "services.exe".to_string())
+            })
+            .expect("возвращение должно быть замечено");
+
+        assert!(note.contains("вернулся"), "{note}");
+        assert!(note.contains("services.exe"), "{note}");
+        // Совет по делу: повторно завершать бесполезно.
+        assert!(note.contains("бесполезно"), "{note}");
+    }
+
+    #[test]
+    fn an_unknown_parent_is_admitted_not_invented() {
+        let mut watch = Terminated::new();
+        watch.remember("task.exe");
+
+        let processes = vec![("task.exe".to_string(), 500u32, 999u32)];
+        let note = watch.check_returns(&processes, &|_| None).unwrap();
+        assert!(note.contains("сказать не могу"), "{note}");
+    }
+
+    #[test]
+    fn a_process_we_did_not_kill_is_not_reported() {
+        let mut watch = Terminated::new();
+        let processes = vec![("chrome.exe".to_string(), 500u32, 300u32)];
+        assert_eq!(watch.check_returns(&processes, &|_| None), None);
+    }
+
+    #[test]
+    fn the_same_return_is_reported_only_once() {
+        // Иначе сообщение висело бы вечно и раздражало.
+        let mut watch = Terminated::new();
+        watch.remember("updater.exe");
+
+        let processes = vec![("updater.exe".to_string(), 500u32, 300u32)];
+        assert!(watch.check_returns(&processes, &|_| None).is_some());
+        assert_eq!(watch.check_returns(&processes, &|_| None), None);
+    }
+}

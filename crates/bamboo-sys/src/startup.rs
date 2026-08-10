@@ -12,7 +12,7 @@ use bamboo_core::{Error, Result};
 use windows_sys::Win32::Foundation::ERROR_SUCCESS;
 use windows_sys::Win32::System::Registry::{
     RegCloseKey, RegEnumValueW, RegOpenKeyExW, RegQueryValueExW, RegSetValueExW, HKEY,
-    HKEY_CURRENT_USER, KEY_READ, KEY_SET_VALUE, REG_BINARY,
+    HKEY_CURRENT_USER, KEY_READ, KEY_SET_VALUE, REG_BINARY, REG_SZ,
 };
 
 const RUN_KEY: &str = "Software\\Microsoft\\Windows\\CurrentVersion\\Run";
@@ -205,5 +205,138 @@ mod tests {
 
         // Возвращаем как было (для несуществующей записи before = true).
         set_startup_enabled(name, before).unwrap();
+    }
+}
+
+/// Имя, под которым Bamboo прописывается в автозапуск.
+pub const STARTUP_NAME: &str = "Bamboo";
+
+/// Строка в кодировке Windows с завершающим нулём.
+fn wide(text: &str) -> Vec<u16> {
+    text.encode_utf16().chain(core::iter::once(0)).collect()
+}
+
+/// Стоит ли Bamboo в автозапуске.
+pub fn is_in_startup() -> bool {
+    let Ok(run) = Key::open(RUN_KEY, KEY_READ) else {
+        return false;
+    };
+    read_value(&run, STARTUP_NAME).is_some()
+}
+
+/// Добавляет Bamboo в автозапуск текущего пользователя.
+///
+/// Пишем в раздел пользователя, а не машины: для машинного нужны права
+/// администратора, а наблюдатель за системой должен ставиться без них.
+/// Путь берём собственный — тот, откуда программа запущена сейчас.
+pub fn add_to_startup() -> Result<()> {
+    let exe = std::env::current_exe()
+        .map_err(|_| Error::Unsupported("не удалось определить путь к себе"))?;
+    // Путь в кавычках: без них пробел в пути превратит команду в две.
+    let command = format!("\"{}\"", exe.to_string_lossy());
+
+    let run = Key::open(RUN_KEY, KEY_SET_VALUE)?;
+    let name = wide(STARTUP_NAME);
+    let value = wide(&command);
+
+    let status = unsafe {
+        RegSetValueExW(
+            run.0,
+            name.as_ptr(),
+            0,
+            REG_SZ,
+            value.as_ptr().cast(),
+            (value.len() * 2) as u32,
+        )
+    };
+    if status != ERROR_SUCCESS {
+        return Err(Error::Win32 {
+            call: "RegSetValueExW(автозапуск)",
+            code: status,
+        });
+    }
+    Ok(())
+}
+
+/// Убирает Bamboo из автозапуска.
+pub fn remove_from_startup() -> Result<()> {
+    use windows_sys::Win32::System::Registry::RegDeleteValueW;
+
+    let run = Key::open(RUN_KEY, KEY_SET_VALUE)?;
+    let name = wide(STARTUP_NAME);
+
+    let status = unsafe { RegDeleteValueW(run.0, name.as_ptr()) };
+    // Значения не было — цель достигнута, это не ошибка.
+    if status != ERROR_SUCCESS && status != 2 {
+        return Err(Error::Win32 {
+            call: "RegDeleteValueW(автозапуск)",
+            code: status,
+        });
+    }
+    Ok(())
+}
+
+/// Читает строковое значение из ключа.
+fn read_value(key: &Key, name: &str) -> Option<String> {
+    let wide_name = wide(name);
+    let mut buffer = [0u16; 1024];
+    let mut size = (buffer.len() * 2) as u32;
+
+    let status = unsafe {
+        RegQueryValueExW(
+            key.0,
+            wide_name.as_ptr(),
+            core::ptr::null_mut(),
+            core::ptr::null_mut(),
+            buffer.as_mut_ptr().cast(),
+            &mut size,
+        )
+    };
+    if status != ERROR_SUCCESS || size < 2 {
+        return None;
+    }
+    let chars = (size as usize / 2).saturating_sub(1);
+    Some(String::from_utf16_lossy(&buffer[..chars]))
+}
+
+#[cfg(test)]
+mod autostart_tests {
+    use super::*;
+    use std::sync::Mutex;
+
+    /// Оба теста правят один и тот же ключ реестра. Параллельно они
+    /// гонялись бы за него и мешали друг другу, поэтому сериализуем.
+    static REGISTRY_LOCK: Mutex<()> = Mutex::new(());
+
+    #[test]
+    fn adding_and_removing_autostart_works() {
+        let _guard = REGISTRY_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        // Проверяем на живом реестре: раздел пользователя, прав не нужно.
+        // Прибираем за собой в любом случае.
+        let was_there = is_in_startup();
+
+        add_to_startup().expect("добавление в автозапуск не удалось");
+        assert!(is_in_startup(), "после добавления запись должна быть");
+
+        remove_from_startup().expect("удаление из автозапуска не удалось");
+        assert!(!is_in_startup(), "после удаления записи быть не должно");
+
+        // Возвращаем как было, чтобы тест не менял настройки машины.
+        if was_there {
+            add_to_startup().ok();
+        }
+    }
+
+    #[test]
+    fn removing_what_is_not_there_is_not_an_error() {
+        let _guard = REGISTRY_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let was_there = is_in_startup();
+        remove_from_startup().expect("первое удаление");
+        // Повторное удаление — цель уже достигнута.
+        remove_from_startup().expect("повторное удаление не должно падать");
+
+        if was_there {
+            add_to_startup().ok();
+        }
     }
 }

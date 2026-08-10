@@ -152,17 +152,28 @@ component RowButton inherits Rectangle {
     callback pressed();
 
     width: 72px;
-    height: 22px;
+    height: 24px;
     border-radius: 4px;
-    background: touch.has-hover ? (root.danger ? #8f3b3b : #2f6f4f) : #24312b;
+    // При наведении кнопка светлеет, а не темнеет: раньше опасная кнопка
+    // уходила в тёмно-красный и выглядела погасшей.
+    background: touch.pressed
+        ? (root.danger ? #b04a4a : #3f8f66)
+        : (touch.has-hover
+            ? (root.danger ? #a04444 : #38805c)
+            : (root.danger ? #3a2a2a : #2a3830));
+    border-width: 1px;
+    border-color: touch.has-hover
+        ? (root.danger ? #c25a5a : #4aa377)
+        : (root.danger ? #573c3c : #35473d);
 
     touch := TouchArea {
+        mouse-cursor: MouseCursor.pointer;
         clicked => { root.pressed(); }
     }
     Text {
         text: root.label;
         font-size: 10px;
-        color: #e8f0ec;
+        color: touch.has-hover ? #ffffff : #d5e2da;
         horizontal-alignment: center;
         vertical-alignment: center;
         width: 100%;
@@ -246,6 +257,11 @@ export component MainWindow inherits Window {
     in property <string> system-io: "";
     // Игровой режим включён.
     in-out property <bool> game-mode: false;
+    // Bamboo запускается вместе с Windows.
+    in-out property <bool> autostart: false;
+    // Сколько времени идёт наблюдение — от этого зависит, что мы можем
+    // сказать про рост памяти.
+    in property <string> watch-status: "";
     in property <string> disk-note: "";
     in property <string> power-note: "";
     in property <string> journal-note: "";
@@ -260,6 +276,8 @@ export component MainWindow inherits Window {
     // Имена развёрнутых групп, разделённые символом с кодом 1: он не
     // встречается в именах процессов, поэтому подойдёт как разделитель.
     in-out property <string> expanded-groups: "";
+    // Фильтр по имени процесса.
+    in-out property <string> filter: "";
     // Что случилось с последним действием — показываем под таблицей.
     in property <string> action-note: "";
 
@@ -280,6 +298,10 @@ export component MainWindow inherits Window {
     callback toggle-group(string);
     // Включить или выключить игровой режим.
     callback toggle-game-mode();
+    // Перестроить список после изменения фильтра.
+    callback apply-filter();
+    // Переключить запуск вместе с Windows.
+    callback toggle-autostart();
     // Завершить все процессы группы. Спрашиваем дважды, как и для одного.
     callback terminate-group(string);
     // PID, для которого сейчас показан вопрос «точно завершить?».
@@ -385,7 +407,7 @@ export component MainWindow inherits Window {
                     chosen => { root.section = 4; root.refresh(); }
                 }
                 NavButton {
-                    label: "Ещё";
+                    label: "Настройки";
                     active: root.section == 5;
                     chosen => { root.section = 5; }
                 }
@@ -459,11 +481,12 @@ export component MainWindow inherits Window {
                                     font-size: 13px; color: #e8f0ec;
                                 }
                                 Text {
-                                    text: "Игре на переднем плане — процессорное время и приоритет "
-                                        + "памяти, фоновой мелочи — экономичный режим. Голосовые чаты "
-                                        + "и Steam не трогаю. Сеть не регулирую: Windows не даёт делить "
-                                        + "полосу между программами, и обещать этого я не буду. "
-                                        + "Выключение возвращает всё как было.";
+                                    text: root.game-mode
+                                        ? "Игра получает процессор и память в первую очередь. "
+                                          + "Выключите — всё вернётся как было."
+                                        : "Отдаёт процессор и память той программе, что сейчас "
+                                          + "на экране. Фоновые уводит в энергосберегающий режим. "
+                                          + "Discord, Steam и OBS не трогает.";
                                     font-size: 11px; color: #7d8f86; wrap: word-wrap;
                                 }
                             }
@@ -636,6 +659,41 @@ export component MainWindow inherits Window {
                             font-size: 20px; color: #e8f0ec;
                             vertical-alignment: center; horizontal-stretch: 1;
                         }
+                        // Поиск по имени: на трёхстах процессах глазами
+                        // нужный не найти.
+                        Rectangle {
+                            width: 200px;
+                            height: 26px;
+                            background: #1a231f;
+                            border-radius: 5px;
+                            border-width: 1px;
+                            border-color: search.has-focus ? #2f6f4f : #24312b;
+
+                            HorizontalLayout {
+                                padding-left: 8px; padding-right: 8px; spacing: 4px;
+                                Text {
+                                    text: "🔍";
+                                    font-size: 11px;
+                                    vertical-alignment: center;
+                                }
+                                search := TextInput {
+                                    text <=> root.filter;
+                                    font-size: 12px;
+                                    color: #e8f0ec;
+                                    vertical-alignment: center;
+                                    horizontal-stretch: 1;
+                                    single-line: true;
+                                    accepted => { root.apply-filter(); }
+                                    edited => { root.apply-filter(); }
+                                }
+                                if root.filter == "": Text {
+                                    text: "поиск";
+                                    font-size: 12px;
+                                    color: #62736a;
+                                    vertical-alignment: center;
+                                }
+                            }
+                        }
                         RowButton {
                             label: root.grouped ? "по процессам" : "по программам";
                             width: 118px;
@@ -703,17 +761,33 @@ export component MainWindow inherits Window {
                             active: root.sort-column == 6; descending: root.sort-descending;
                             chosen => { root.sort-by(6); }
                         }
-                        Rectangle { width: 312px; }
+                        Rectangle { width: 316px; }
                     }
                     Flickable {
                         VerticalLayout {
                             spacing: 2px;
                             for process in root.processes: Rectangle {
                                 height: 30px;
-                                background: row-touch.has-hover ? #22302a : #1a231f;
+                                // Процесс внутри группы отличаем фоном и полоской
+                                // слева, а не отступом: отступ читался как
+                                // «подпроцесс», хотя это равноправный процесс
+                                // той же программы.
+                                background: row-touch.has-hover
+                                    ? (process.is-member ? #1b262f : #22302a)
+                                    : (process.is-member ? #161f26 : #1a231f);
                                 border-radius: 5px;
 
                                 row-touch := TouchArea { }
+
+                                // Полоска слева у процессов группы: видно,
+                                // что строка относится к программе выше.
+                                if process.is-member: Rectangle {
+                                    x: 0; y: 4px;
+                                    width: 3px;
+                                    height: parent.height - 8px;
+                                    background: #3f6f8f;
+                                    border-radius: 2px;
+                                }
 
                                 HorizontalLayout {
                                     padding-left: 8px; padding-right: 8px; spacing: 4px;
@@ -730,8 +804,11 @@ export component MainWindow inherits Window {
                                             // Стрелка и отступ — дело интерфейса:
                                             // процессы внутри группы сдвигаем вправо,
                                             // группе показываем её состояние.
+                                            // У процесса группы имя то же самое,
+                                            // повторять его двадцать раз незачем —
+                                            // полезнее номер процесса.
                                             text: process.is-member
-                                                ? "      " + process.name
+                                                ? "процесс " + process.pid
                                                 : (process.is-group
                                                     ? (process.expanded ? "▾ " : "▸ ") + process.name
                                                     : process.name);
@@ -745,7 +822,11 @@ export component MainWindow inherits Window {
                                     Text { text: process.pid; color: #b6c6bd; font-size: 12px; vertical-alignment: center; width: 64px; }
                                     Text { text: process.cpu; color: #b6c6bd; font-size: 12px; vertical-alignment: center; width: 64px; }
                                     Text { text: process.memory; color: #b6c6bd; font-size: 12px; vertical-alignment: center; width: 90px; }
-                                    Text { text: process.threads; color: #b6c6bd; font-size: 12px; vertical-alignment: center; width: 74px; }
+                                    Text {
+                                        text: process.threads;
+                                        color: #b6c6bd; font-size: 12px;
+                                        vertical-alignment: center; width: 74px;
+                                    }
                                     // Подозрение на утечку выделяем цветом; измеренная
                                     // скорость без вердикта остаётся нейтральной.
                                     Text {
@@ -781,8 +862,9 @@ export component MainWindow inherits Window {
                                         font-size: 11px; vertical-alignment: center; width: 92px;
                                     }
                                     Rectangle {
-                                        width: 312px;
+                                        width: 316px;
                                         HorizontalLayout {
+                                            padding-right: 4px;
                                             spacing: 4px;
                                             alignment: end;
                                             RowButton {
@@ -963,15 +1045,85 @@ export component MainWindow inherits Window {
                     }
                 }
 
-                // --- Ещё ---
+                // --- Настройки ---
                 if root.section == 5: VerticalLayout {
-                    spacing: 8px;
-                    Text { text: "Ещё"; font-size: 20px; color: #e8f0ec; }
+                    spacing: 10px;
+                    Text { text: "Настройки"; font-size: 20px; color: #e8f0ec; }
+
+                    Rectangle {
+                        background: #1e2a24; border-radius: 8px;
+                        height: startup.preferred-height;
+                        startup := HorizontalLayout {
+                            padding: 12px; spacing: 12px;
+                            VerticalLayout {
+                                spacing: 3px;
+                                horizontal-stretch: 1;
+                                Text {
+                                    text: "Запускать вместе с Windows";
+                                    font-size: 13px; color: #e8f0ec;
+                                }
+                                Text {
+                                    text: root.autostart
+                                        ? "Bamboo запустится сам и продолжит наблюдение."
+                                        : "Сейчас выключено. Наблюдение идёт только пока "
+                                          + "программа запущена, а выводы о росте памяти "
+                                          + "требуют нескольких часов подряд.";
+                                    font-size: 11px; color: #7d8f86; wrap: word-wrap;
+                                }
+                            }
+                            Rectangle {
+                                width: 110px;
+                                VerticalLayout {
+                                    alignment: center;
+                                    RowButton {
+                                        label: root.autostart ? "Выключить" : "Включить";
+                                        width: 110px;
+                                        pressed => { root.toggle-autostart(); }
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    Rectangle {
+                        background: #1e2a24; border-radius: 8px;
+                        height: watch.preferred-height;
+                        watch := VerticalLayout {
+                            padding: 12px; spacing: 3px;
+                            Text {
+                                text: "Наблюдение";
+                                font-size: 13px; color: #e8f0ec;
+                            }
+                            Text {
+                                text: root.watch-status;
+                                font-size: 11px; color: #7d8f86; wrap: word-wrap;
+                            }
+                        }
+                    }
+
+                    Rectangle {
+                        background: #1e2a24; border-radius: 8px;
+                        height: about.preferred-height;
+                        about := VerticalLayout {
+                            padding: 12px; spacing: 3px;
+                            Text {
+                                text: "О программе";
+                                font-size: 13px; color: #e8f0ec;
+                            }
+                            Text {
+                                text: "Bamboo наблюдает за системой и объясняет, что в ней "
+                                    + "происходит. Все действия записываются в журнал и "
+                                    + "обратимы. Того, что нельзя измерить, Bamboo не обещает: "
+                                    + "здесь нет «очистки памяти», «ускорения интернета» "
+                                    + "и прочего, чему нет доказательств.";
+                                font-size: 11px; color: #7d8f86; wrap: word-wrap;
+                            }
+                        }
+                    }
+
                     Text {
-                        text: "Разделы «Загрузка», «Автозапуск», «Отчёты» и «Настройки» "
-                            + "готовятся. Данные для них уже собираются — их можно посмотреть "
-                            + "через отладочную утилиту: bamboo boot, bamboo power, bamboo disk.";
-                        font-size: 12px; color: #7d8f86; wrap: word-wrap;
+                        text: root.action-note;
+                        font-size: 11px; color: #9fb3a8; wrap: word-wrap;
                     }
                     Rectangle { vertical-stretch: 1; }
                 }

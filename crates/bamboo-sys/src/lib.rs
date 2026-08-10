@@ -49,7 +49,10 @@ pub use service::{
     ServiceStart, StopSignal,
 };
 pub use services::service_names;
-pub use startup::{set_startup_enabled, user_startup_items, StartupItem};
+pub use startup::{
+    add_to_startup, is_in_startup, remove_from_startup, set_startup_enabled, user_startup_items,
+    StartupItem,
+};
 pub use storage::{enumerate as enumerate_drives, read_smart, Drive};
 pub use user::{idle_ms, notification_state, NotificationState};
 pub use wake::{wake_history, WakeEvent, WakeSource};

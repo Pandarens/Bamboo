@@ -185,6 +185,103 @@ pub fn group_by_app(snapshot: &Snapshot) -> Vec<AppGroup> {
     groups.into_values().collect()
 }
 
+/// Объясняет, из чего складывается память программы с множеством процессов.
+///
+/// Вопрос «почему браузер занимает восемь гигабайт» возникает у всех, и
+/// ответ у него скучный: браузер — это десятки процессов, по одному-два
+/// на вкладку и на расширение, и восемь гигабайт это их сумма. Полезнее
+/// не пугать числом, а показать, куда оно разошлось.
+pub fn explain_group_memory(snapshot: &Snapshot, name: &str) -> Option<String> {
+    let group = group_by_app(snapshot)
+        .into_iter()
+        .find(|group| group.name.eq_ignore_ascii_case(name))?;
+
+    if group.count < 2 {
+        return None;
+    }
+
+    let mut members = group.members;
+    members.sort_by_key(|member| core::cmp::Reverse(member.memory.as_u64()));
+
+    let biggest = members.first()?;
+    let share = if group.memory.as_u64() == 0 {
+        0.0
+    } else {
+        biggest.memory.as_u64() as f64 / group.memory.as_u64() as f64 * 100.0
+    };
+
+    Some(format!(
+        "{} — это {} процессов, и {} складываются из них. Самый крупный держит {}          ({share:.0}%). У браузеров так устроено: отдельный процесс на вкладку и на          расширение, чтобы падение одной вкладки не роняло остальные. Память          вернётся, когда вы закроете вкладки, — сама по себе она не «утекает».",
+        group.name,
+        group.count,
+        group.memory,
+        biggest.memory,
+    ))
+}
+
+/// Объясняет, что Bamboo уже может сказать про рост памяти.
+///
+/// Отдельная надпись нужна потому, что молчание анализатора выглядит как
+/// поломка. На деле рост памяти — единственное наблюдение, которое просто
+/// не может появиться быстро: чтобы отличить утечку от кэша, нужны часы
+/// непрерывной работы, и врать про «утечек нет» на десятой минуте нельзя.
+pub fn watch_status(snapshot: &Snapshot) -> String {
+    const TREND_MIN_MS: u64 = bamboo_analyze::growth::TREND_MIN_WINDOW_MS;
+    const LEAK_MIN_MS: u64 = bamboo_analyze::growth::MIN_LIFETIME_MS;
+
+    let watching = snapshot.watching_ms;
+    let minutes = watching / 60_000;
+    let hours = watching as f64 / 3_600_000.0;
+
+    let growing = snapshot
+        .top
+        .iter()
+        .filter(|line| line.memory_growth.is_some())
+        .count();
+    let leaking = snapshot
+        .top
+        .iter()
+        .filter(|line| line.memory_growth.is_some_and(|trend| trend.suspected_leak))
+        .count();
+
+    if watching < TREND_MIN_MS {
+        let left = (TREND_MIN_MS - watching) / 60_000 + 1;
+        return format!(
+            "Наблюдаю {minutes} мин. Скорость роста памяти появится примерно через              {left} мин: на более коротком отрезке любой всплеск выглядит как рост.              Слово «утечка» Bamboo позволит себе только после {} часов непрерывной              работы — иначе отличить её от обычного кэша невозможно.",
+            LEAK_MIN_MS / 3_600_000
+        );
+    }
+
+    if watching < LEAK_MIN_MS {
+        let left = (LEAK_MIN_MS - watching) as f64 / 3_600_000.0;
+        return format!(
+            "Наблюдаю {hours:.1} ч. Скорость роста памяти уже считается: сейчас              растёт программ — {growing}. Про утечку смогу говорить примерно через              {left:.1} ч: короче этого срока растущий кэш неотличим от утечки.",
+        );
+    }
+
+    if leaking > 0 {
+        format!(
+            "Наблюдаю {hours:.1} ч. Похоже на утечку у программ: {leaking}.              Смотрите столбец «Рост памяти» в списке процессов."
+        )
+    } else {
+        format!(
+            "Наблюдаю {hours:.1} ч — достаточно, чтобы отличить утечку от кэша.              Ни одна программа не растёт монотонно: утечек нет. Растущих без              вердикта — {growing}."
+        )
+    }
+}
+
+/// Подходит ли имя под фильтр.
+///
+/// Сравниваем без учёта регистра и по вхождению: человек ищет «chrome»,
+/// а не «chrome.exe», и уж точно не помнит, с какой буквы оно пишется.
+fn matches_filter(name: &str, filter: &str) -> bool {
+    let filter = filter.trim();
+    if filter.is_empty() {
+        return true;
+    }
+    name.to_lowercase().contains(&filter.to_lowercase())
+}
+
 /// Сколько строк показываем в таблице.
 ///
 /// Сортируем весь список, а показываем верхушку. Триста строк, которые
@@ -204,8 +301,12 @@ pub fn grouped_rows(
     sort: SortColumn,
     descending: bool,
     expanded: &dyn Fn(&str) -> bool,
+    filter: &str,
 ) -> Vec<ProcessRow> {
-    let mut groups = group_by_app(snapshot);
+    let mut groups: Vec<AppGroup> = group_by_app(snapshot)
+        .into_iter()
+        .filter(|group| matches_filter(&group.name, filter))
+        .collect();
 
     match sort {
         SortColumn::Name => groups.sort_by_key(|group| group.name.to_lowercase()),
@@ -308,8 +409,17 @@ pub fn grouped_rows(
 ///
 /// Сортируем по сырым числам из снимка, а не по показанному тексту: иначе
 /// «1.2 ГБ» оказалось бы меньше «900 МБ», потому что единица меньше девятки.
-pub fn process_rows(snapshot: &Snapshot, sort: SortColumn, descending: bool) -> Vec<ProcessRow> {
-    let mut lines: Vec<&crate::collector::ProcessLine> = snapshot.top.iter().collect();
+pub fn process_rows(
+    snapshot: &Snapshot,
+    sort: SortColumn,
+    descending: bool,
+    filter: &str,
+) -> Vec<ProcessRow> {
+    let mut lines: Vec<&crate::collector::ProcessLine> = snapshot
+        .top
+        .iter()
+        .filter(|line| matches_filter(&line.name, filter))
+        .collect();
 
     match sort {
         // Имя сравниваем без учёта регистра: иначе Windows-процессы
@@ -582,6 +692,7 @@ mod tests {
             badge: String::new(),
             memory_growth: None,
             hung: false,
+            parent_pid: 0,
             read_per_second: 0,
             write_per_second: 0,
         }
@@ -607,25 +718,25 @@ mod tests {
     fn sorting_by_memory_uses_bytes_not_the_printed_text() {
         // Ровно та ошибка, ради которой сортируем по сырым числам:
         // «900 МБ» как текст больше «1.2 ГБ», а как размер — меньше.
-        let rows = process_rows(&snapshot(), SortColumn::Memory, true);
+        let rows = process_rows(&snapshot(), SortColumn::Memory, true, "");
         assert_eq!(names(&rows), vec!["chrome.exe", "beta.exe", "Alpha.exe"]);
     }
 
     #[test]
     fn sorting_by_cpu_puts_the_hungriest_first() {
-        let rows = process_rows(&snapshot(), SortColumn::Cpu, true);
+        let rows = process_rows(&snapshot(), SortColumn::Cpu, true, "");
         assert_eq!(names(&rows), vec!["Alpha.exe", "beta.exe", "chrome.exe"]);
     }
 
     #[test]
     fn sorting_by_threads_and_pid_works() {
-        let by_threads = process_rows(&snapshot(), SortColumn::Threads, true);
+        let by_threads = process_rows(&snapshot(), SortColumn::Threads, true, "");
         assert_eq!(
             names(&by_threads),
             vec!["beta.exe", "chrome.exe", "Alpha.exe"]
         );
 
-        let by_pid = process_rows(&snapshot(), SortColumn::Pid, false);
+        let by_pid = process_rows(&snapshot(), SortColumn::Pid, false, "");
         assert_eq!(names(&by_pid), vec!["Alpha.exe", "beta.exe", "chrome.exe"]);
     }
 
@@ -633,14 +744,14 @@ mod tests {
     fn names_sort_case_insensitively() {
         // Иначе «Alpha» и «beta» разъехались бы по регистру: все процессы
         // с большой буквы собрались бы отдельной кучей.
-        let rows = process_rows(&snapshot(), SortColumn::Name, false);
+        let rows = process_rows(&snapshot(), SortColumn::Name, false, "");
         assert_eq!(names(&rows), vec!["Alpha.exe", "beta.exe", "chrome.exe"]);
     }
 
     #[test]
     fn the_direction_flips_the_order() {
-        let down = process_rows(&snapshot(), SortColumn::Memory, true);
-        let up = process_rows(&snapshot(), SortColumn::Memory, false);
+        let down = process_rows(&snapshot(), SortColumn::Memory, true, "");
+        let up = process_rows(&snapshot(), SortColumn::Memory, false, "");
         assert_eq!(
             names(&down),
             names(&up).into_iter().rev().collect::<Vec<_>>()
@@ -658,7 +769,7 @@ mod tests {
                 .push(line(&format!("p{index}.exe"), index as u32, 0.0, index, 1));
         }
 
-        let rows = process_rows(&snapshot, SortColumn::Memory, true);
+        let rows = process_rows(&snapshot, SortColumn::Memory, true, "");
         assert_eq!(rows.len(), VISIBLE_ROWS, "список не обрезан");
         // Первым обязан быть самый прожорливый из всех, а не из первых.
         assert_eq!(rows[0].name, format!("p{}.exe", VISIBLE_ROWS + 39));
@@ -669,7 +780,7 @@ mod tests {
         let mut snapshot = snapshot();
         snapshot.top[1].hung = true; // Alpha.exe не отвечает
 
-        let rows = process_rows(&snapshot, SortColumn::State, true);
+        let rows = process_rows(&snapshot, SortColumn::State, true, "");
         assert_eq!(
             rows[0].name, "Alpha.exe",
             "зависший процесс должен быть первым"
@@ -696,7 +807,7 @@ mod tests {
             suspected_leak: false,
         });
 
-        let rows = process_rows(&snapshot, SortColumn::Growth, true);
+        let rows = process_rows(&snapshot, SortColumn::Growth, true, "");
         // Самый быстрый рост — первым, процесс без роста — последним.
         assert_eq!(names(&rows), vec!["chrome.exe", "Alpha.exe", "beta.exe"]);
 
@@ -726,6 +837,7 @@ mod grouping_tests {
             badge: String::new(),
             memory_growth: None,
             hung: false,
+            parent_pid: 0,
             read_per_second: disk,
             write_per_second: 0,
         }
@@ -781,7 +893,7 @@ mod grouping_tests {
 
     #[test]
     fn grouped_rows_sort_by_total_memory() {
-        let rows = grouped_rows(&snapshot(), SortColumn::Memory, true, &|_| false);
+        let rows = grouped_rows(&snapshot(), SortColumn::Memory, true, &|_| false, "");
         assert_eq!(rows[0].name, "chrome.exe");
         assert_eq!(rows[0].threads, "3 проц.");
         assert_eq!(rows[1].name, "notepad.exe");
@@ -790,7 +902,7 @@ mod grouping_tests {
 
     #[test]
     fn grouped_rows_sort_by_disk() {
-        let rows = grouped_rows(&snapshot(), SortColumn::Disk, true, &|_| false);
+        let rows = grouped_rows(&snapshot(), SortColumn::Disk, true, &|_| false, "");
         // У Chrome суммарно 3 МБ/с, у блокнота ничего.
         assert_eq!(rows[0].name, "chrome.exe");
         assert!(rows[0].disk.contains("МБ/с"), "{}", rows[0].disk);
@@ -914,6 +1026,7 @@ mod expansion_tests {
             badge: String::new(),
             memory_growth: None,
             hung: false,
+            parent_pid: 0,
             read_per_second: 0,
             write_per_second: 0,
         }
@@ -933,7 +1046,7 @@ mod expansion_tests {
 
     #[test]
     fn a_collapsed_group_is_one_row() {
-        let rows = grouped_rows(&snapshot(), SortColumn::Memory, true, &|_| false);
+        let rows = grouped_rows(&snapshot(), SortColumn::Memory, true, &|_| false, "");
         assert_eq!(rows.len(), 2, "свёрнутыми должны быть две строки");
         assert!(rows[0].is_group, "chrome — группа");
         assert!(!rows[1].is_group, "блокнот — одиночка");
@@ -941,9 +1054,13 @@ mod expansion_tests {
 
     #[test]
     fn an_expanded_group_lists_its_processes() {
-        let rows = grouped_rows(&snapshot(), SortColumn::Memory, true, &|name| {
-            name == "chrome.exe"
-        });
+        let rows = grouped_rows(
+            &snapshot(),
+            SortColumn::Memory,
+            true,
+            &|name| name == "chrome.exe",
+            "",
+        );
         // Строка группы плюс три её процесса плюс блокнот.
         assert_eq!(rows.len(), 5);
         assert_eq!(rows[0].name, "chrome.exe");
@@ -958,7 +1075,7 @@ mod expansion_tests {
 
     #[test]
     fn a_group_carries_all_its_pids_for_bulk_termination() {
-        let rows = grouped_rows(&snapshot(), SortColumn::Memory, true, &|_| false);
+        let rows = grouped_rows(&snapshot(), SortColumn::Memory, true, &|_| false, "");
         let chrome = rows.iter().find(|row| row.is_group).unwrap();
 
         let pids: Vec<&str> = chrome.member_pids.split(',').collect();
@@ -976,12 +1093,168 @@ mod expansion_tests {
     #[test]
     fn a_lone_process_is_never_marked_as_a_group() {
         // Разворачивать одиночку нечего, и стрелку рисовать незачем.
-        let rows = grouped_rows(&snapshot(), SortColumn::Memory, true, &|_| true);
+        let rows = grouped_rows(&snapshot(), SortColumn::Memory, true, &|_| true, "");
         let notepad = rows
             .iter()
             .find(|row| row.name.contains("notepad"))
             .unwrap();
         assert!(!notepad.is_group);
         assert!(notepad.member_pids.contains("200"));
+    }
+}
+
+#[cfg(test)]
+mod filter_tests {
+    use super::*;
+    use crate::collector::ProcessLine;
+    use bamboo_core::Bytes;
+
+    fn line(name: &str, pid: u32) -> ProcessLine {
+        ProcessLine {
+            name: name.to_string(),
+            pid,
+            threads: 1,
+            cpu_percent: 1.0,
+            memory: Bytes::from_mib(100),
+            badge: String::new(),
+            memory_growth: None,
+            hung: false,
+            parent_pid: 0,
+            read_per_second: 0,
+            write_per_second: 0,
+        }
+    }
+
+    fn snapshot() -> Snapshot {
+        Snapshot {
+            top: vec![
+                line("chrome.exe", 100),
+                line("Chrome.exe", 101),
+                line("notepad.exe", 200),
+                line("Telegram.exe", 300),
+            ],
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn an_empty_filter_shows_everything() {
+        let rows = process_rows(&snapshot(), SortColumn::Pid, false, "");
+        assert_eq!(rows.len(), 4);
+        // Пробелы фильтром не считаются.
+        assert_eq!(
+            process_rows(&snapshot(), SortColumn::Pid, false, "   ").len(),
+            4
+        );
+    }
+
+    #[test]
+    fn the_filter_ignores_case_and_matches_partially() {
+        // Человек ищет «chrome», а не «Chrome.exe», и не помнит регистра.
+        let rows = process_rows(&snapshot(), SortColumn::Pid, false, "CHROME");
+        assert_eq!(rows.len(), 2);
+
+        let rows = process_rows(&snapshot(), SortColumn::Pid, false, "gram");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].name, "Telegram.exe");
+    }
+
+    #[test]
+    fn a_filter_that_matches_nothing_yields_an_empty_list() {
+        let rows = process_rows(&snapshot(), SortColumn::Pid, false, "неттакого");
+        assert!(rows.is_empty());
+    }
+
+    #[test]
+    fn groups_are_filtered_by_name_too() {
+        let rows = grouped_rows(&snapshot(), SortColumn::Memory, true, &|_| false, "chrome");
+        assert_eq!(rows.len(), 1, "должна остаться одна группа");
+        assert_eq!(rows[0].name, "chrome.exe");
+    }
+}
+
+#[cfg(test)]
+mod explain_tests {
+    use super::*;
+    use crate::collector::ProcessLine;
+    use bamboo_core::Bytes;
+
+    fn line(name: &str, pid: u32, mib: u64) -> ProcessLine {
+        ProcessLine {
+            name: name.to_string(),
+            pid,
+            threads: 4,
+            cpu_percent: 0.5,
+            memory: Bytes::from_mib(mib),
+            badge: String::new(),
+            memory_growth: None,
+            hung: false,
+            parent_pid: 0,
+            read_per_second: 0,
+            write_per_second: 0,
+        }
+    }
+
+    #[test]
+    fn a_multi_process_app_gets_its_memory_explained() {
+        let snapshot = Snapshot {
+            top: vec![
+                line("chrome.exe", 100, 4000),
+                line("chrome.exe", 101, 2000),
+                line("chrome.exe", 102, 2000),
+            ],
+            ..Default::default()
+        };
+
+        let text = explain_group_memory(&snapshot, "chrome.exe").expect("объяснение должно быть");
+        assert!(text.contains("3 процессов"), "{text}");
+        // Самый крупный держит половину — это и есть ответ на «почему столько».
+        assert!(text.contains("50%"), "{text}");
+        // И главное: не пугаем словом «утечка» там, где её нет.
+        assert!(text.contains("не «утекает»"), "{text}");
+    }
+
+    #[test]
+    fn a_single_process_app_needs_no_explanation() {
+        // Одному процессу объяснять нечего: его память и есть его память.
+        let snapshot = Snapshot {
+            top: vec![line("notepad.exe", 200, 50)],
+            ..Default::default()
+        };
+        assert_eq!(explain_group_memory(&snapshot, "notepad.exe"), None);
+    }
+
+    #[test]
+    fn an_unknown_app_yields_nothing() {
+        assert_eq!(explain_group_memory(&Snapshot::default(), "нет.exe"), None);
+    }
+
+    #[test]
+    fn the_watch_status_admits_it_is_too_early() {
+        // Главное свойство: на десятой минуте не говорить «утечек нет».
+        let snapshot = Snapshot {
+            watching_ms: 10 * 60 * 1000,
+            ..Default::default()
+        };
+        let status = watch_status(&snapshot);
+        assert!(status.contains("Наблюдаю 10 мин"), "{status}");
+        assert!(
+            status.contains("утечка"),
+            "должно объяснять про срок: {status}"
+        );
+        assert!(
+            !status.contains("утечек нет"),
+            "рано делать вывод: {status}"
+        );
+    }
+
+    #[test]
+    fn after_enough_hours_the_status_is_a_verdict() {
+        let snapshot = Snapshot {
+            watching_ms: 8 * 3_600_000,
+            ..Default::default()
+        };
+        let status = watch_status(&snapshot);
+        assert!(status.contains("утечек нет"), "{status}");
     }
 }

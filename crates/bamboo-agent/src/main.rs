@@ -112,6 +112,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     main_window.set_pagefiles(ModelRc::new(VecModel::from(Vec::<PagefileRow>::new())));
     main_window.set_volumes(ModelRc::new(VecModel::from(Vec::<VolumeRow>::new())));
     main_window.set_suggestions(ModelRc::new(VecModel::from(Vec::<SuggestionRow>::new())));
+    main_window.set_autostart(bamboo_sys::is_in_startup());
     main_window.set_processes(main_processes.clone());
     main_window.set_drives(drives_model.clone());
     main_window.set_wakes(wakes_model.clone());
@@ -131,6 +132,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // настройки было бы нечем.
     let game_mode: std::rc::Rc<std::cell::RefCell<gamemode::GameMode>> =
         std::rc::Rc::new(std::cell::RefCell::new(gamemode::GameMode::new()));
+
+    // Завершённые процессы: следим, не вернулись ли они. Возвращение
+    // означает, что кто-то их поднимает, и человеку полезно знать кто.
+    let terminated: std::rc::Rc<std::cell::RefCell<actions::Terminated>> =
+        std::rc::Rc::new(std::cell::RefCell::new(actions::Terminated::new()));
 
     // Сортировка по столбцу. Повторный щелчок по тому же столбцу
     // разворачивает порядок — привычное поведение любой таблицы.
@@ -202,6 +208,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let snapshot = last_snapshot.clone();
         let rows = main_processes.clone();
         let limits = io_limits.clone();
+        let killed = terminated.clone();
         main_window.on_terminate_process(move |pid| {
             let Some(win) = weak.upgrade() else {
                 return;
@@ -227,6 +234,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
 
             win.set_action_note(SharedString::from(actions::terminate(pid, &name)));
+            killed.borrow_mut().remember(&name);
 
             // Список сразу перестраиваем: строки завершённого процесса
             // в таблице быть не должно, а следующего тика ждать секунду.
@@ -303,16 +311,30 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .map(str::to_string)
                 .collect();
 
-            match open.iter().position(|entry| *entry == name) {
+            let now_open = match open.iter().position(|entry| *entry == name) {
                 Some(at) => {
                     open.remove(at);
+                    false
                 }
-                None => open.push(name),
-            }
+                None => {
+                    open.push(name.clone());
+                    true
+                }
+            };
             win.set_expanded_groups(SharedString::from(open.join(&GROUP_SEPARATOR.to_string())));
 
             if let Some(snapshot) = snapshot.borrow().as_ref() {
                 fill_processes(&win, snapshot, &rows, &limits.borrow());
+
+                // Развернули — объясняем, из чего складывается память
+                // программы. Это ответ на «почему браузер занимает восемь
+                // гигабайт», который иначе приходится искать самому.
+                let note = if now_open {
+                    mainwin::explain_group_memory(snapshot, &name).unwrap_or_default()
+                } else {
+                    String::new()
+                };
+                win.set_action_note(SharedString::from(note));
             }
         });
     }
@@ -323,6 +345,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let snapshot = last_snapshot.clone();
         let limits = io_limits.clone();
         let rows = main_processes.clone();
+        let killed = terminated.clone();
         main_window.on_terminate_group(move |pids| {
             let Some(win) = weak.upgrade() else {
                 return;
@@ -365,10 +388,52 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 Some(failure) => format!("{name}: завершено {done} из {}. {failure}", wanted.len()),
             };
             win.set_action_note(SharedString::from(note));
+            killed.borrow_mut().remember(&name);
 
             if let Some(snapshot) = snapshot.borrow_mut().as_mut() {
                 snapshot.top.retain(|line| !wanted.contains(&line.pid));
             }
+            if let Some(snapshot) = snapshot.borrow().as_ref() {
+                fill_processes(&win, snapshot, &rows, &limits.borrow());
+            }
+        });
+    }
+
+    // Автозапуск из раздела настроек: та же операция, что и галочка в трее.
+    {
+        let weak = main_window.as_weak();
+        main_window.on_toggle_autostart(move || {
+            let Some(win) = weak.upgrade() else {
+                return;
+            };
+            let note = if bamboo_sys::is_in_startup() {
+                match bamboo_sys::remove_from_startup() {
+                    Ok(()) => "Bamboo больше не будет запускаться вместе с Windows.",
+                    Err(_) => "Убрать из автозапуска не удалось.",
+                }
+            } else {
+                match bamboo_sys::add_to_startup() {
+                    Ok(()) => "Bamboo будет запускаться вместе с Windows.",
+                    Err(_) => "Добавить в автозапуск не удалось.",
+                }
+            };
+            // Состояние читаем из реестра: пользователь мог поменять его
+            // и мимо нас, через диспетчер задач.
+            win.set_autostart(bamboo_sys::is_in_startup());
+            win.set_action_note(SharedString::from(note));
+        });
+    }
+
+    // Фильтр по имени процесса.
+    {
+        let weak = main_window.as_weak();
+        let snapshot = last_snapshot.clone();
+        let limits = io_limits.clone();
+        let rows = main_processes.clone();
+        main_window.on_apply_filter(move || {
+            let Some(win) = weak.upgrade() else {
+                return;
+            };
             if let Some(snapshot) = snapshot.borrow().as_ref() {
                 fill_processes(&win, snapshot, &rows, &limits.borrow());
             }
@@ -682,6 +747,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 main.invoke_refresh();
                             }
                         }
+                        tray::TrayAction::ToggleAutostart => {
+                            let note = tray.toggle_autostart();
+                            if let Some(main) = main_weak.upgrade() {
+                                main.set_autostart(tray.autostart_enabled());
+                                main.set_action_note(SharedString::from(note));
+                            }
+                        }
                         tray::TrayAction::Quit => {
                             let _ = slint::quit_event_loop();
                             return;
@@ -706,6 +778,28 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         apply_overview(&main, &snapshot, &main_processes, &io_limits.borrow());
                     }
                 }
+                // Не вернулся ли кто-то из завершённых? Если вернулся,
+                // называем того, кто его поднял.
+                let processes: Vec<(String, u32, u32)> = snapshot
+                    .top
+                    .iter()
+                    .map(|line| (line.name.clone(), line.pid, line.parent_pid))
+                    .collect();
+                let parents: std::collections::HashMap<u32, String> = snapshot
+                    .top
+                    .iter()
+                    .map(|line| (line.pid, line.name.clone()))
+                    .collect();
+
+                if let Some(note) = terminated
+                    .borrow_mut()
+                    .check_returns(&processes, &|pid| parents.get(&pid).cloned())
+                {
+                    if let Some(main) = main_weak.upgrade() {
+                        main.set_action_note(SharedString::from(note));
+                    }
+                }
+
                 // Держим свежий снимок для пересортировки по клику и для
                 // поиска имени процесса при действиях.
                 *last_snapshot.borrow_mut() = Some(snapshot);
@@ -800,6 +894,7 @@ fn apply_overview(
     main.set_disk_pressure(SharedString::from(
         snapshot.disk_pressure.clone().unwrap_or_default(),
     ));
+    main.set_watch_status(SharedString::from(mainwin::watch_status(snapshot)));
     main.set_system_io(SharedString::from(
         snapshot.system_io.clone().unwrap_or_default(),
     ));
@@ -818,6 +913,7 @@ fn fill_processes(
     let sort = mainwin::SortColumn::from_index(main.get_sort_column());
     // Режим групп и режим процессов дают одинаковые строки, поэтому
     // дальше таблица о разнице не знает.
+    let filter = main.get_filter().to_string();
     // Метки прошлых действий читаем один раз на перестроение таблицы,
     // а не на каждую строку: это обращение к базе журнала.
     let applied = actions::AppliedActions::load();
@@ -825,11 +921,15 @@ fn fill_processes(
         // Развёрнутые группы держим одной строкой имён: список короткий,
         // а заводить ради него отдельную модель в окне Slint неудобно.
         let open = main.get_expanded_groups().to_string();
-        mainwin::grouped_rows(snapshot, sort, main.get_sort_descending(), &|name| {
-            open.split(GROUP_SEPARATOR).any(|entry| entry == name)
-        })
+        mainwin::grouped_rows(
+            snapshot,
+            sort,
+            main.get_sort_descending(),
+            &|name| open.split(GROUP_SEPARATOR).any(|entry| entry == name),
+            &filter,
+        )
     } else {
-        mainwin::process_rows(snapshot, sort, main.get_sort_descending())
+        mainwin::process_rows(snapshot, sort, main.get_sort_descending(), &filter)
     };
     let rows: Vec<MainProcessRow> = prepared
         .into_iter()

@@ -2,7 +2,7 @@
 
 #![forbid(unsafe_code)]
 
-use tray_icon::menu::{Menu, MenuEvent, MenuId, MenuItem, PredefinedMenuItem};
+use tray_icon::menu::{CheckMenuItem, Menu, MenuEvent, MenuId, MenuItem, PredefinedMenuItem};
 use tray_icon::{Icon, TrayIcon, TrayIconBuilder, TrayIconEvent};
 
 /// Что пользователь сделал с иконкой.
@@ -10,6 +10,8 @@ use tray_icon::{Icon, TrayIcon, TrayIconBuilder, TrayIconEvent};
 pub enum TrayAction {
     ToggleWidget,
     OpenWindow,
+    /// Переключить запуск вместе с Windows.
+    ToggleAutostart,
     Quit,
 }
 
@@ -18,7 +20,10 @@ pub struct Tray {
     _icon: TrayIcon,
     show_id: MenuId,
     window_id: MenuId,
+    autostart_id: MenuId,
     quit_id: MenuId,
+    /// Пункт с галочкой: его состояние надо обновлять после переключения.
+    autostart: CheckMenuItem,
 }
 
 impl Tray {
@@ -26,9 +31,19 @@ impl Tray {
         let menu = Menu::new();
         let show = MenuItem::new("Показать виджет", true, None);
         let window = MenuItem::new("Открыть окно", true, None);
+        // Галочка показывает нынешнее состояние: читаем его из реестра,
+        // а не помним у себя — пользователь мог убрать запись руками.
+        let autostart = CheckMenuItem::new(
+            "Запускать вместе с Windows",
+            true,
+            bamboo_sys::is_in_startup(),
+            None,
+        );
         let quit = MenuItem::new("Выход", true, None);
         menu.append(&show)?;
         menu.append(&window)?;
+        menu.append(&PredefinedMenuItem::separator())?;
+        menu.append(&autostart)?;
         menu.append(&PredefinedMenuItem::separator())?;
         menu.append(&quit)?;
 
@@ -42,8 +57,37 @@ impl Tray {
             _icon: icon,
             show_id: show.id().clone(),
             window_id: window.id().clone(),
+            autostart_id: autostart.id().clone(),
             quit_id: quit.id().clone(),
+            autostart,
         })
+    }
+
+    /// Переключает запуск вместе с Windows и возвращает объяснение.
+    ///
+    /// Состояние берём из реестра, а не из галочки: пользователь мог
+    /// убрать запись руками через диспетчер задач, и тогда галочка врёт.
+    pub fn toggle_autostart(&self) -> String {
+        let note = if bamboo_sys::is_in_startup() {
+            match bamboo_sys::remove_from_startup() {
+                Ok(()) => "Bamboo больше не будет запускаться вместе с Windows.",
+                Err(_) => "Убрать из автозапуска не удалось.",
+            }
+        } else {
+            match bamboo_sys::add_to_startup() {
+                Ok(()) => "Bamboo будет запускаться вместе с Windows.",
+                Err(_) => "Добавить в автозапуск не удалось.",
+            }
+        };
+
+        // Галочку выставляем по факту, а не по намерению.
+        self.autostart.set_checked(bamboo_sys::is_in_startup());
+        note.to_string()
+    }
+
+    /// Стоит ли Bamboo в автозапуске.
+    pub fn autostart_enabled(&self) -> bool {
+        bamboo_sys::is_in_startup()
     }
 
     /// Забирает накопившиеся события. Вызывается из таймера интерфейса:
@@ -56,6 +100,8 @@ impl Tray {
                 actions.push(TrayAction::ToggleWidget);
             } else if event.id == self.window_id {
                 actions.push(TrayAction::OpenWindow);
+            } else if event.id == self.autostart_id {
+                actions.push(TrayAction::ToggleAutostart);
             } else if event.id == self.quit_id {
                 actions.push(TrayAction::Quit);
             }
