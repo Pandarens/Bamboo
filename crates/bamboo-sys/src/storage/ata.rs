@@ -204,6 +204,29 @@ fn life_left_attribute_order(vendor: &str, model: &str) -> &'static [u8] {
     }
 }
 
+/// Проверяет, правдоподобен ли объём записи для такой наработки.
+///
+/// Атрибут 241 по соглашению считает логические блоки по 512 байт, но
+/// соглашение это не стандарт: часть дешёвых контроллеров пишет туда
+/// гигабайты, часть — свои единицы, и узнать какие именно неоткуда.
+/// Пересчёт тогда даёт бессмыслицу вроде «записано 3.87 МБ» у диска
+/// с наработкой в три тысячи часов.
+///
+/// Отличить эти случаи можно по здравому смыслу: любой накопитель,
+/// проживший сотню часов, записал больше гигабайта — одни только журналы
+/// Windows дают больше. Если насчитали меньше, значит единицы атрибута
+/// нам неизвестны, и мы не показываем ничего. Выдуманная цифра хуже
+/// честного пробела (ТЗ, разделы 5.7 и 19).
+fn plausible_written(written: Bytes, power_on_hours: Option<u64>) -> Option<Bytes> {
+    const MIN_PLAUSIBLE: u64 = 1024 * 1024 * 1024; // 1 ГБ
+    const HOURS_TO_JUDGE: u64 = 100;
+
+    match power_on_hours {
+        Some(hours) if hours >= HOURS_TO_JUDGE && written.as_u64() < MIN_PLAUSIBLE => None,
+        _ => Some(written),
+    }
+}
+
 fn build_health(attributes: &[Attribute], vendor: &str, model: &str) -> SmartHealth {
     let life_left = life_left_attribute_order(vendor, model)
         .iter()
@@ -224,6 +247,8 @@ fn build_health(attributes: &[Attribute], vendor: &str, model: &str) -> SmartHea
         .map(|a| a.raw as u128)
         .or_else(|| find(attributes, ids::PENDING_SECTORS).map(|a| a.raw as u128));
 
+    let hours = find(attributes, ids::POWER_ON_HOURS).map(|a| a.raw);
+
     SmartHealth {
         source: Some(SmartSource::AtaSmart),
         critical_warning: None,
@@ -233,10 +258,12 @@ fn build_health(attributes: &[Attribute], vendor: &str, model: &str) -> SmartHea
         percentage_used: None,
         life_left_percent: life_left,
         data_written: find(attributes, ids::TOTAL_LBA_WRITTEN)
-            .map(|a| Bytes(a.raw.saturating_mul(LBA_BYTES))),
+            .map(|a| Bytes(a.raw.saturating_mul(LBA_BYTES)))
+            .and_then(|written| plausible_written(written, hours)),
         data_read: find(attributes, ids::TOTAL_LBA_READ)
-            .map(|a| Bytes(a.raw.saturating_mul(LBA_BYTES))),
-        power_on_hours: find(attributes, ids::POWER_ON_HOURS).map(|a| a.raw),
+            .map(|a| Bytes(a.raw.saturating_mul(LBA_BYTES)))
+            .and_then(|read| plausible_written(read, hours)),
+        power_on_hours: hours,
         power_cycles: find(attributes, ids::POWER_CYCLES).map(|a| a.raw),
         unsafe_shutdowns: None,
         media_errors,
@@ -342,5 +369,33 @@ mod tests {
             build_health(&attributes, "", "Intel SSDSC2BB").life_left_percent,
             Some(70)
         );
+    }
+}
+
+#[cfg(test)]
+mod plausibility_tests {
+    use super::*;
+
+    #[test]
+    fn an_impossible_write_volume_is_dropped() {
+        // Ровно случай Apacer AS350: 2571 час наработки и «3.87 МБ»
+        // записи. Столько не бывает — единицы атрибута нам неизвестны,
+        // и показывать это число нельзя.
+        assert_eq!(plausible_written(Bytes(4_058_624), Some(2571)), None);
+    }
+
+    #[test]
+    fn a_realistic_write_volume_is_kept() {
+        let written = Bytes(20 * 1024 * 1024 * 1024 * 1024); // 20 ТБ
+        assert_eq!(plausible_written(written, Some(2571)), Some(written));
+    }
+
+    #[test]
+    fn a_fresh_drive_is_not_judged() {
+        // У нового накопителя записи и правда может быть мало —
+        // судить о единицах атрибута не по чему.
+        let written = Bytes(500 * 1024 * 1024);
+        assert_eq!(plausible_written(written, Some(3)), Some(written));
+        assert_eq!(plausible_written(written, None), Some(written));
     }
 }
