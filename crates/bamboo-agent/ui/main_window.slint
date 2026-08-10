@@ -202,6 +202,40 @@ component ResizeGrip inherits Rectangle {
     }
 }
 
+// Пункт контекстного меню.
+component MenuRow inherits Rectangle {
+    in property <string> label;
+    in property <string> hint;
+    in property <bool> danger;
+    callback chosen();
+
+    height: 30px;
+    background: touch.has-hover
+        ? (root.danger ? #4a2a2a : #2a3830)
+        : transparent;
+
+    touch := TouchArea {
+        mouse-cursor: MouseCursor.pointer;
+        clicked => { root.chosen(); }
+    }
+    HorizontalLayout {
+        padding-left: 12px; padding-right: 12px; spacing: 8px;
+        Text {
+            text: root.label;
+            font-size: 12px;
+            color: root.danger ? #e08a8a : #e8f0ec;
+            vertical-alignment: center;
+            horizontal-stretch: 1;
+        }
+        Text {
+            text: root.hint;
+            font-size: 10px;
+            color: #7d8f86;
+            vertical-alignment: center;
+        }
+    }
+}
+
 // Кнопка в своей шапке окна: свернуть, закрыть.
 component CaptionButton inherits Rectangle {
     in property <string> label;
@@ -285,6 +319,12 @@ export component MainWindow inherits Window {
     in-out property <string> expanded-groups: "";
     // Фильтр по имени процесса.
     in-out property <string> filter: "";
+    // Процесс, для которого открыто контекстное меню.
+    in-out property <string> menu-pid: "";
+    in-out property <string> menu-name: "";
+    in-out property <string> menu-pids: "";
+    in-out property <bool> menu-group: false;
+    in-out property <bool> menu-throttled: false;
     // Что случилось с последним действием — показываем под таблицей.
     in property <string> action-note: "";
 
@@ -325,6 +365,66 @@ export component MainWindow inherits Window {
     // Начать растягивание окна за край. Номер края: 0 левый, 1 правый,
     // 2 верх, 3 верх-лево, 4 верх-право, 5 низ, 6 низ-лево, 7 низ-право.
     callback resize-window(int);
+
+    // Меню действий по правой кнопке. Лежит в корне окна: из глубины
+    // разметки — из `if` раздела и `for` по строкам — до него было бы
+    // не достучаться, это разные области видимости.
+    menu := PopupWindow {
+        width: 260px;
+        close-policy: close-on-click-outside;
+
+        Rectangle {
+            background: #1e2a24;
+            border-radius: 8px;
+            border-width: 1px;
+            border-color: #2f4038;
+
+            VerticalLayout {
+                padding: 6px;
+                spacing: 1px;
+
+                Text {
+                    text: root.menu-name;
+                    font-size: 12px;
+                    color: #9fb3a8;
+                    horizontal-alignment: center;
+                    height: 26px;
+                    vertical-alignment: center;
+                    overflow: elide;
+                }
+                Rectangle { height: 1px; background: #2f4038; }
+
+                MenuRow {
+                    label: "Экономичный режим";
+                    hint: "процессор";
+                    chosen => { root.apply-action(root.menu-pid, 0); }
+                }
+                MenuRow {
+                    label: "Понизить приоритет памяти";
+                    hint: "память";
+                    chosen => { root.apply-action(root.menu-pid, 1); }
+                }
+                MenuRow {
+                    label: root.menu-throttled ? "Отпустить диск" : "Придержать диск";
+                    hint: "диск";
+                    chosen => { root.toggle-io-limit(root.menu-pid); }
+                }
+                Rectangle { height: 1px; background: #2f4038; }
+                MenuRow {
+                    label: root.menu-group ? "Завершить все процессы" : "Завершить процесс";
+                    hint: "необратимо";
+                    danger: true;
+                    chosen => {
+                        if (root.menu-group) {
+                            root.terminate-group(root.menu-pids);
+                        } else {
+                            root.terminate-process(root.menu-pid);
+                        }
+                    }
+                }
+            }
+        }
+    }
 
     // Всё содержимое лежит внутри, а полосы захвата — поверх него по краям.
     Rectangle {
@@ -712,24 +812,17 @@ export component MainWindow inherits Window {
                         }
                     }
                     Text {
-                        text: "Столбец «Рост памяти» показывает то, чего нет в диспетчере задач: "
-                            + "не сколько памяти занято сейчас, а растёт ли она и как быстро. "
-                            + "Щёлкните по заголовку столбца, чтобы отсортировать. "
-                            + "«Эконом» уводит процесс на энергоэффективные ядра, «Память ↓» "
-                            + "понижает приоритет его памяти — оба действия записываются в журнал "
-                            + "и обратимы. Щелчок по имени программы разворачивает её процессы — "
-                            + "тогда их можно завершать по одному. «Диск ↓» придерживает скорость диска: полного "
-                            + "запрета не бывает — процесс, которому отказали в чтении, упал бы. "
-                            + "«Завершить» — единственное необратимое действие: "
-                            + "несохранённые данные пропадут, поэтому кнопка спрашивает второй раз. "
-                            + "Показаны первые 80 строк: сортировка идёт по всем процессам, "
-                            + "обрезается уже результат.";
+                        text: "Правая кнопка по процессу — меню действий. Щелчок по имени "
+                            + "программы разворачивает её процессы. Столбец «Рост памяти» "
+                            + "показывает то, чего нет в диспетчере задач: не сколько памяти "
+                            + "занято сейчас, а растёт ли она и как быстро. Показаны первые "
+                            + "80 строк — сортировка идёт по всем процессам.";
                         font-size: 11px; color: #62736a; wrap: word-wrap;
                     }
                     HorizontalLayout {
                         padding-left: 10px; padding-right: 6px; spacing: 6px;
                         ColumnHeader {
-                            label: "Процесс"; horizontal-stretch: 1; min-width: 160px;
+                            label: "Процесс"; horizontal-stretch: 1; min-width: 220px;
                             active: root.sort-column == 0; descending: root.sort-descending;
                             chosen => { root.sort-by(0); }
                         }
@@ -772,7 +865,7 @@ export component MainWindow inherits Window {
                             active: root.sort-column == 6; descending: root.sort-descending;
                             chosen => { root.sort-by(6); }
                         }
-                        Rectangle { width: 316px; }
+                        
                     }
                     Flickable {
                         VerticalLayout {
@@ -788,6 +881,25 @@ export component MainWindow inherits Window {
                                     ? #16202a
                                     : (Math.mod(index, 2) == 0 ? #1b2521 : #18211d);
                                 border-radius: 5px;
+
+                                // Правая кнопка открывает меню действий. Кнопки
+                                // в каждой строке занимали треть таблицы и всё
+                                // равно не вмещались — меню и привычнее, и
+                                // оставляет место данным.
+                                TouchArea {
+                                    pointer-event(event) => {
+                                        if (event.button == PointerEventButton.right
+                                            && event.kind == PointerEventKind.down) {
+                                            root.menu-pid = process.pid;
+                                            root.menu-name = process.name;
+                                            root.menu-group = process.is-group;
+                                            root.menu-pids = process.member-pids;
+                                            root.menu-throttled = process.throttled;
+                                            root.confirming = "";
+                                            menu.show();
+                                        }
+                                    }
+                                }
 
                                 // Процесс внутри группы отмечаем полоской слева.
                                 if process.is-member: Rectangle {
@@ -806,7 +918,7 @@ export component MainWindow inherits Window {
                                     // что по нему можно щёлкнуть.
                                     Rectangle {
                                         horizontal-stretch: 1;
-                                        min-width: 160px;
+                                        min-width: 220px;
                                         background: (process.is-group && name-touch.has-hover)
                                             ? #24332c : transparent;
                                         border-radius: 4px;
@@ -894,51 +1006,6 @@ export component MainWindow inherits Window {
                                         font-size: 11px; vertical-alignment: center; width: 88px;
                                     }
 
-                                    Rectangle {
-                                        width: 316px;
-                                        HorizontalLayout {
-                                            padding-right: 4px;
-                                            spacing: 4px;
-                                            alignment: end;
-                                            RowButton {
-                                                label: "Эконом";
-                                                pressed => { root.apply-action(process.pid, 0); }
-                                            }
-                                            RowButton {
-                                                label: "Память \u{2193}";
-                                                pressed => { root.apply-action(process.pid, 1); }
-                                            }
-                                            RowButton {
-                                                label: process.throttled
-                                                    ? "Диск \u{2713}"
-                                                    : "Диск \u{2193}";
-                                                pressed => { root.toggle-io-limit(process.pid); }
-                                            }
-                                            // Завершение необратимо, поэтому кнопка
-                                            // спрашивает второй раз прямо на себе:
-                                            // модальное окно тут только мешало бы.
-                                            RowButton {
-                                                label: root.confirming == process.pid
-                                                    ? "Точно?"
-                                                    : (process.is-group
-                                                        ? "Завершить все"
-                                                        : "Завершить");
-                                                danger: true;
-                                                pressed => {
-                                                    if (root.confirming == process.pid) {
-                                                        root.confirming = "";
-                                                        if (process.is-group) {
-                                                            root.terminate-group(process.member-pids);
-                                                        } else {
-                                                            root.terminate-process(process.pid);
-                                                        }
-                                                    } else {
-                                                        root.confirming = process.pid;
-                                                    }
-                                                }
-                                            }
-                                        }
-                                    }
                                 }
                             }
                         }

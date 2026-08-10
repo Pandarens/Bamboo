@@ -36,6 +36,9 @@ pub struct ProcessLine {
     pub hung: bool,
     /// Номер процесса-родителя: по нему видно, кто запустил.
     pub parent_pid: u32,
+    /// Чем занят процесс браузера: вкладка, расширение, отрисовка.
+    /// `None` — это не браузер либо строку запуска прочитать не вышло.
+    pub browser_role: Option<bamboo_sys::BrowserRole>,
     /// Сколько процесс читает и пишет на диск, байт в секунду.
     /// Именно скорость, а не сумма за интервал: интервал опроса плавает
     /// от секунды до минуты, и сырые дельты нельзя было бы сравнивать
@@ -150,6 +153,14 @@ const GROWTH_EVERY: std::time::Duration = std::time::Duration::from_secs(60);
 /// Занятость подкачки скачками не ходит: раз в полминуты более чем хватает.
 const PAGEFILES_EVERY: std::time::Duration = std::time::Duration::from_secs(30);
 
+/// Как часто перечитывать состав процессов браузера.
+///
+/// Командная строка процесса не меняется никогда, поэтому читать её
+/// повторно незачем — но новые вкладки появляются, и раз в полминуты
+/// список стоит освежить. Само чтение недёшево: три обращения к чужой
+/// памяти на процесс.
+const BROWSER_ROLES_EVERY: std::time::Duration = std::time::Duration::from_secs(30);
+
 fn run(sender: Sender<Snapshot>, visible: WidgetVisible) {
     let started = std::time::Instant::now();
     let mut collector = Collector::new();
@@ -164,6 +175,11 @@ fn run(sender: Sender<Snapshot>, visible: WidgetVisible) {
     let mut pagefiles: Vec<PagefileLine> = Vec::new();
     let mut pagefiles_at: Option<std::time::Instant> = None;
     let mut volumes: Vec<VolumeLine> = Vec::new();
+    // Роли процессов браузера: ключ — номер процесса. Командная строка
+    // не меняется, поэтому once прочитанное держим до исчезновения.
+    let mut roles: std::collections::HashMap<u32, bamboo_sys::BrowserRole> =
+        std::collections::HashMap::new();
+    let mut roles_at: Option<std::time::Instant> = None;
 
     loop {
         collector.set_widget_open(visible.load(Ordering::Relaxed));
@@ -204,6 +220,12 @@ fn run(sender: Sender<Snapshot>, visible: WidgetVisible) {
             growth_at = Some(std::time::Instant::now());
         }
 
+        // Состав браузеров: читаем редко и только для них.
+        if roles_at.is_none_or(|at| at.elapsed() >= BROWSER_ROLES_EVERY) {
+            refresh_browser_roles(collector.table(), &mut roles);
+            roles_at = Some(std::time::Instant::now());
+        }
+
         // Зависшие окна — один обход на весь тик, а не запрос про каждый
         // процесс: EnumWindows всё равно обходит все окна системы.
         let hung = bamboo_sys::hung_process_ids();
@@ -238,6 +260,7 @@ fn run(sender: Sender<Snapshot>, visible: WidgetVisible) {
                 memory_growth: growth.get(&process.pid()).copied(),
                 hung: hung.contains(&process.pid()),
                 parent_pid: process.parent_pid,
+                browser_role: roles.get(&process.pid()).copied(),
                 read_per_second: per_second(process.last_point().read_kib, tick.interval_ms),
                 write_per_second: per_second(process.last_point().write_kib, tick.interval_ms),
             })
@@ -564,6 +587,7 @@ mod pressure_tests {
             memory_growth: None,
             hung: false,
             parent_pid: 0,
+            browser_role: None,
             read_per_second: 0,
             write_per_second: write,
         }
@@ -634,4 +658,47 @@ fn read_volumes() -> Vec<VolumeLine> {
             }
         })
         .collect()
+}
+
+/// Освежает состав процессов браузера.
+///
+/// Читаем командную строку только у тех, кто похож на браузер: чтение
+/// чужой памяти стоит дорого, а у остальных процессов там всё равно
+/// нет ничего интересного. Уже известные процессы пропускаем — командная
+/// строка не меняется за время жизни процесса.
+fn refresh_browser_roles(
+    table: &bamboo_collect::ProcessTable,
+    roles: &mut std::collections::HashMap<u32, bamboo_sys::BrowserRole>,
+) {
+    const BROWSERS: &[&str] = &[
+        "chrome.exe",
+        "msedge.exe",
+        "msedgewebview2.exe",
+        "brave.exe",
+        "opera.exe",
+        "vivaldi.exe",
+        "yandex.exe",
+    ];
+
+    let mut alive: std::collections::HashSet<u32> = std::collections::HashSet::new();
+
+    for process in table.iter() {
+        let name = process.image_name.to_lowercase();
+        if !BROWSERS.iter().any(|browser| name == *browser) {
+            continue;
+        }
+        alive.insert(process.pid());
+
+        if roles.contains_key(&process.pid()) {
+            continue;
+        }
+        if let Ok(line) = bamboo_sys::command_line(process.pid()) {
+            if let Some(role) = bamboo_sys::browser_role(&line) {
+                roles.insert(process.pid(), role);
+            }
+        }
+    }
+
+    // Забываем закрытые процессы, иначе список рос бы вечно.
+    roles.retain(|pid, _| alive.contains(pid));
 }

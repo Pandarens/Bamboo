@@ -117,6 +117,8 @@ pub struct GroupMember {
     pub memory: bamboo_core::Bytes,
     pub disk_per_second: u64,
     pub hung: bool,
+    /// Назначение процесса у браузера: вкладка, расширение, отрисовка.
+    pub role: Option<bamboo_sys::BrowserRole>,
 }
 
 /// Группирует процессы по имени образа.
@@ -142,6 +144,7 @@ pub fn group_by_app(snapshot: &Snapshot) -> Vec<AppGroup> {
                     memory: line.memory,
                     disk_per_second: disk,
                     hung: line.hung,
+                    role: line.browser_role,
                 });
                 group.cpu_percent += line.cpu_percent;
                 group.memory = bamboo_core::Bytes(group.memory.as_u64() + line.memory.as_u64());
@@ -173,6 +176,7 @@ pub fn group_by_app(snapshot: &Snapshot) -> Vec<AppGroup> {
                             memory: line.memory,
                             disk_per_second: disk,
                             hung: line.hung,
+                            role: line.browser_role,
                         }],
                         hung: line.hung,
                         leak: line.memory_growth.is_some_and(|trend| trend.suspected_leak),
@@ -200,10 +204,50 @@ pub fn explain_group_memory(snapshot: &Snapshot, name: &str) -> Option<String> {
         return None;
     }
 
-    let mut members = group.members;
-    members.sort_by_key(|member| core::cmp::Reverse(member.memory.as_u64()));
+    // Для браузера ответ гораздо содержательнее: у него процессы разного
+    // назначения, и «восемь гигабайт» почти всегда означает «много
+    // открытых вкладок». Это и говорим прямо, с числами.
+    let members: Vec<&crate::collector::ProcessLine> = snapshot
+        .top
+        .iter()
+        .filter(|line| line.name.eq_ignore_ascii_case(&group.name))
+        .collect();
 
-    let biggest = members.first()?;
+    let tabs = role_summary(&members, bamboo_sys::BrowserRole::Tab);
+    if tabs.0 > 0 {
+        let extensions = role_summary(&members, bamboo_sys::BrowserRole::Extension);
+        let gpu = role_summary(&members, bamboo_sys::BrowserRole::Gpu);
+        let average = bamboo_core::Bytes(tabs.1 / tabs.0 as u64);
+
+        let mut parts = vec![format!(
+            "{} вкладок держат {}",
+            tabs.0,
+            bamboo_core::Bytes(tabs.1)
+        )];
+        if extensions.0 > 0 {
+            parts.push(format!(
+                "{} расширений — {}",
+                extensions.0,
+                bamboo_core::Bytes(extensions.1)
+            ));
+        }
+        if gpu.0 > 0 {
+            parts.push(format!("отрисовка — {}", bamboo_core::Bytes(gpu.1)));
+        }
+
+        return Some(format!(
+            "{} занимает {} и состоит из {} процессов: {}. На вкладку в среднем              {average} — это обычная цена современного сайта. Память освободится,              когда вы закроете вкладки: браузер отдаёт её сам и под нехваткой              отдаёт быстрее. Здесь нечего «чистить» — есть что закрыть.",
+            group.name,
+            group.memory,
+            group.count,
+            parts.join(", "),
+        ));
+    }
+
+    // Не браузер: объясняем проще — просто сумма и самый крупный.
+    let mut sorted = group.members;
+    sorted.sort_by_key(|member| core::cmp::Reverse(member.memory.as_u64()));
+    let biggest = sorted.first()?;
     let share = if group.memory.as_u64() == 0 {
         0.0
     } else {
@@ -211,12 +255,28 @@ pub fn explain_group_memory(snapshot: &Snapshot, name: &str) -> Option<String> {
     };
 
     Some(format!(
-        "{} — это {} процессов, и {} складываются из них. Самый крупный держит {}          ({share:.0}%). У браузеров так устроено: отдельный процесс на вкладку и на          расширение, чтобы падение одной вкладки не роняло остальные. Память          вернётся, когда вы закроете вкладки, — сама по себе она не «утекает».",
+        "{} — это {} процессов, и {} складываются из них. Самый крупный держит {}          ({share:.0}%). Программы делят работу между процессами, чтобы сбой в одном          не ронял остальные.",
         group.name,
         group.count,
         group.memory,
         biggest.memory,
     ))
+}
+
+/// Сколько процессов такой роли и сколько памяти они держат.
+fn role_summary(
+    members: &[&crate::collector::ProcessLine],
+    role: bamboo_sys::BrowserRole,
+) -> (usize, u64) {
+    let matching: Vec<&&crate::collector::ProcessLine> = members
+        .iter()
+        .filter(|line| line.browser_role == Some(role))
+        .collect();
+
+    (
+        matching.len(),
+        matching.iter().map(|line| line.memory.as_u64()).sum(),
+    )
 }
 
 /// Объясняет, что Bamboo уже может сказать про рост памяти.
@@ -379,7 +439,12 @@ pub fn grouped_rows(
                 pid: member.pid.to_string(),
                 cpu: format!("{:.1}%", member.cpu_percent),
                 memory: member.memory.to_string(),
-                threads: String::new(),
+                // В колонке «Процессов» у члена группы полезнее его
+                // назначение: «вкладка», «расширение», «отрисовка».
+                threads: member
+                    .role
+                    .map(|role| role.name().to_string())
+                    .unwrap_or_default(),
                 badge: String::new(),
                 growth: String::new(),
                 leak: false,
@@ -693,6 +758,7 @@ mod tests {
             memory_growth: None,
             hung: false,
             parent_pid: 0,
+            browser_role: None,
             read_per_second: 0,
             write_per_second: 0,
         }
@@ -838,6 +904,7 @@ mod grouping_tests {
             memory_growth: None,
             hung: false,
             parent_pid: 0,
+            browser_role: None,
             read_per_second: disk,
             write_per_second: 0,
         }
@@ -1027,6 +1094,7 @@ mod expansion_tests {
             memory_growth: None,
             hung: false,
             parent_pid: 0,
+            browser_role: None,
             read_per_second: 0,
             write_per_second: 0,
         }
@@ -1120,6 +1188,7 @@ mod filter_tests {
             memory_growth: None,
             hung: false,
             parent_pid: 0,
+            browser_role: None,
             read_per_second: 0,
             write_per_second: 0,
         }
@@ -1190,6 +1259,7 @@ mod explain_tests {
             memory_growth: None,
             hung: false,
             parent_pid: 0,
+            browser_role: None,
             read_per_second: 0,
             write_per_second: 0,
         }
@@ -1210,8 +1280,31 @@ mod explain_tests {
         assert!(text.contains("3 процессов"), "{text}");
         // Самый крупный держит половину — это и есть ответ на «почему столько».
         assert!(text.contains("50%"), "{text}");
-        // И главное: не пугаем словом «утечка» там, где её нет.
-        assert!(text.contains("не «утекает»"), "{text}");
+    }
+
+    #[test]
+    fn a_browser_is_explained_by_what_its_processes_do() {
+        // Главный ответ на «почему браузер занимает восемь гигабайт»:
+        // это вкладки, и их видно поимённо.
+        let mut tab_one = line("chrome.exe", 100, 3000);
+        tab_one.browser_role = Some(bamboo_sys::BrowserRole::Tab);
+        let mut tab_two = line("chrome.exe", 101, 3000);
+        tab_two.browser_role = Some(bamboo_sys::BrowserRole::Tab);
+        let mut extension = line("chrome.exe", 102, 400);
+        extension.browser_role = Some(bamboo_sys::BrowserRole::Extension);
+
+        let snapshot = Snapshot {
+            top: vec![tab_one, tab_two, extension],
+            ..Default::default()
+        };
+
+        let text = explain_group_memory(&snapshot, "chrome.exe").unwrap();
+        assert!(text.contains("2 вкладок"), "{text}");
+        assert!(text.contains("1 расширений"), "{text}");
+        // Средняя цена вкладки — то, по чему видно, много это или нормально.
+        assert!(text.contains("На вкладку в среднем"), "{text}");
+        // И главное: чистить нечего, есть что закрыть.
+        assert!(text.contains("есть что закрыть"), "{text}");
     }
 
     #[test]
