@@ -12,7 +12,12 @@
 //! как к сомнительному ПО.
 
 /// Откуда берём выпуски.
-const RELEASES_URL: &str = "https://api.github.com/repos/Pandarens/Bamboo/releases/latest";
+///
+/// Именно список, а не `/releases/latest`. Тот отдаёт только окончательные
+/// выпуски и молча пропускает предвыпуски — на бете обновление не нашлось бы
+/// никогда. Выяснилось это не рассуждением, а запросом: на живом выпуске
+/// пришёл честный 404.
+const RELEASES_URL: &str = "https://api.github.com/repos/Pandarens/Bamboo/releases?per_page=10";
 
 /// Какая версия собрана сейчас.
 pub const CURRENT: &str = env!("CARGO_PKG_VERSION");
@@ -57,6 +62,61 @@ pub struct UpdateState {
 /// а тащить разборщик ради них — плохой размен, тот же довод, что и для
 /// манифестов расширений.
 pub fn parse_release(json: &str) -> Option<Release> {
+    // Ответ бывает и списком, и одиночным выпуском. Список разбираем
+    // поэлементно: искать поля во всём тексте разом нельзя — метка версии
+    // взялась бы из первого выпуска, а файл из второго.
+    for element in top_level_objects(json) {
+        if let Some(release) = parse_one(element) {
+            return Some(release);
+        }
+    }
+    None
+}
+
+/// Разбивает ответ на верхнеуровневые объекты.
+///
+/// Для одиночного выпуска это он сам, для списка — его элементы по порядку,
+/// а GitHub отдаёт список от новых к старым.
+fn top_level_objects(json: &str) -> Vec<&str> {
+    let mut out = Vec::new();
+    let mut depth = 0usize;
+    let mut start = 0usize;
+    let mut in_string = false;
+    let mut escaped = false;
+
+    for (at, symbol) in json.char_indices() {
+        if in_string {
+            // Скобки внутри строк не считаются: в описании выпуска их полно.
+            match symbol {
+                _ if escaped => escaped = false,
+                '\\' => escaped = true,
+                '"' => in_string = false,
+                _ => {}
+            }
+            continue;
+        }
+        match symbol {
+            '"' => in_string = true,
+            '{' => {
+                if depth == 0 {
+                    start = at;
+                }
+                depth += 1;
+            }
+            '}' => {
+                depth = depth.saturating_sub(1);
+                if depth == 0 {
+                    out.push(&json[start..=at]);
+                }
+            }
+            _ => {}
+        }
+    }
+    out
+}
+
+/// Разбирает один выпуск.
+fn parse_one(json: &str) -> Option<Release> {
     let tag = json_string(json, "tag_name")?;
     let version = tag.trim_start_matches('v').to_string();
     if version.is_empty() {
@@ -389,6 +449,91 @@ mod tests {
             release.sha256.as_deref(),
             Some("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef")
         );
+    }
+
+    #[test]
+    fn a_list_of_releases_yields_the_newest_one() {
+        // GitHub отдаёт список от новых к старым. Брать надо первый —
+        // и брать целиком: метка версии и файл обязаны быть из одного
+        // выпуска, иначе поставится не то, о чём сказали.
+        let json = r#"[
+            {"tag_name":"v0.9.0-beta.1","body":"новая",
+             "assets":[{"browser_download_url":"https://example.com/new.exe"}]},
+            {"tag_name":"v0.8.0","body":"старая",
+             "assets":[{"browser_download_url":"https://example.com/old.exe"}]}
+        ]"#;
+
+        let release = parse_release(json).unwrap();
+        assert_eq!(release.version, "0.9.0-beta.1");
+        assert_eq!(release.download_url, "https://example.com/new.exe");
+    }
+
+    #[test]
+    fn a_release_without_an_executable_is_skipped_for_the_next_one() {
+        // Выпуск, к которому не приложили файла, ставить нечем. Молча
+        // взять файл от следующего было бы враньём — берём следующий целиком.
+        let json = r#"[
+            {"tag_name":"v0.9.0","body":"","assets":[]},
+            {"tag_name":"v0.8.0","body":"",
+             "assets":[{"browser_download_url":"https://example.com/old.exe"}]}
+        ]"#;
+
+        let release = parse_release(json).unwrap();
+        assert_eq!(release.version, "0.8.0");
+        assert_eq!(release.download_url, "https://example.com/old.exe");
+    }
+
+    #[test]
+    fn braces_inside_release_notes_do_not_break_the_split() {
+        // В описании выпуска скобки и кавычки — обычное дело.
+        let json = r#"[
+            {"tag_name":"v1.0.0","body":"починили {это} и \"то\"",
+             "assets":[{"browser_download_url":"https://example.com/a.exe"}]}
+        ]"#;
+
+        let release = parse_release(json).unwrap();
+        assert_eq!(release.version, "1.0.0");
+        assert_eq!(release.download_url, "https://example.com/a.exe");
+    }
+
+    #[test]
+    fn the_real_answer_from_github_is_understood() {
+        // Кусок настоящего ответа, снятый с живого выпуска. Выдуманные
+        // ответы проверяют разбор, но не проверяют главного: что поля
+        // называются так, как мы думаем, и лежат там, где мы ищем.
+        // Именно на живом запросе и выяснилось, что `/releases/latest`
+        // молча пропускает предвыпуски.
+        let json = r#"[{"url":"https://api.github.com/repos/Pandarens/Bamboo/releases/367888042",
+        "tag_name":"v0.9.0-beta.1","target_commitish":"main","name":"Bamboo 0.9.0 beta 1",
+        "draft":false,"prerelease":true,
+        "assets":[{"url":"https://api.github.com/repos/Pandarens/Bamboo/releases/assets/508720269",
+        "id":508720269,"name":"bamboo-agent.exe","content_type":"application/octet-stream",
+        "size":9519104,"browser_download_url":"https://github.com/Pandarens/Bamboo/releases/download/v0.9.0-beta.1/bamboo-agent.exe"}],
+        "body":"Первая публичная бета.
+
+SHA256: 4d427149e96c088247715c646a366ce34e33c4899bd2f5a9256a66569ab8dc8b
+"}]"#;
+
+        let release = parse_release(json).expect("живой ответ обязан разбираться");
+        assert_eq!(release.version, "0.9.0-beta.1");
+        assert_eq!(
+            release.download_url,
+            "https://github.com/Pandarens/Bamboo/releases/download/v0.9.0-beta.1/bamboo-agent.exe",
+            "адрес обязан быть настоящим файлом, а не ссылкой API"
+        );
+        assert_eq!(
+            release.sha256.as_deref(),
+            Some("4d427149e96c088247715c646a366ce34e33c4899bd2f5a9256a66569ab8dc8b")
+        );
+        assert!(release.notes.contains("Первая публичная бета."));
+    }
+
+    #[test]
+    fn a_single_release_object_still_works() {
+        // Ответ бывает и одиночным объектом — разбор обязан понимать оба.
+        let json = r#"{"tag_name":"v1.0.0","body":"",
+            "assets":[{"browser_download_url":"https://example.com/a.exe"}]}"#;
+        assert_eq!(parse_release(json).unwrap().version, "1.0.0");
     }
 
     #[test]
