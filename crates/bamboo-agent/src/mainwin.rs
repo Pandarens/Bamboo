@@ -119,6 +119,8 @@ pub struct GroupMember {
     pub hung: bool,
     /// Назначение процесса у браузера: вкладка, расширение, отрисовка.
     pub role: Option<bamboo_sys::BrowserRole>,
+    /// Заголовок окна, если оно есть.
+    pub title: String,
 }
 
 /// Группирует процессы по имени образа.
@@ -145,6 +147,7 @@ pub fn group_by_app(snapshot: &Snapshot) -> Vec<AppGroup> {
                     disk_per_second: disk,
                     hung: line.hung,
                     role: line.browser_role,
+                    title: line.window_title.clone(),
                 });
                 group.cpu_percent += line.cpu_percent;
                 group.memory = bamboo_core::Bytes(group.memory.as_u64() + line.memory.as_u64());
@@ -177,6 +180,7 @@ pub fn group_by_app(snapshot: &Snapshot) -> Vec<AppGroup> {
                             disk_per_second: disk,
                             hung: line.hung,
                             role: line.browser_role,
+                            title: line.window_title.clone(),
                         }],
                         hung: line.hung,
                         leak: line.memory_growth.is_some_and(|trend| trend.suspected_leak),
@@ -435,7 +439,14 @@ pub fn grouped_rows(
 
         for member in members {
             rows.push(ProcessRow {
-                name: group.name.clone(),
+                // Что показать вместо повтора имени: заголовок окна, если
+                // он есть, — по нему сразу видно, что это за процесс.
+                // У вкладок браузера окна нет, там остаётся номер.
+                name: if member.title.is_empty() {
+                    format!("PID {}", member.pid)
+                } else {
+                    member.title.clone()
+                },
                 pid: member.pid.to_string(),
                 cpu: format!("{:.1}%", member.cpu_percent),
                 memory: member.memory.to_string(),
@@ -759,6 +770,7 @@ mod tests {
             hung: false,
             parent_pid: 0,
             browser_role: None,
+            window_title: String::new(),
             read_per_second: 0,
             write_per_second: 0,
         }
@@ -905,6 +917,7 @@ mod grouping_tests {
             hung: false,
             parent_pid: 0,
             browser_role: None,
+            window_title: String::new(),
             read_per_second: disk,
             write_per_second: 0,
         }
@@ -1095,6 +1108,7 @@ mod expansion_tests {
             hung: false,
             parent_pid: 0,
             browser_role: None,
+            window_title: String::new(),
             read_per_second: 0,
             write_per_second: 0,
         }
@@ -1189,6 +1203,7 @@ mod filter_tests {
             hung: false,
             parent_pid: 0,
             browser_role: None,
+            window_title: String::new(),
             read_per_second: 0,
             write_per_second: 0,
         }
@@ -1260,6 +1275,7 @@ mod explain_tests {
             hung: false,
             parent_pid: 0,
             browser_role: None,
+            window_title: String::new(),
             read_per_second: 0,
             write_per_second: 0,
         }

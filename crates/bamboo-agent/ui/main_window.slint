@@ -325,6 +325,10 @@ export component MainWindow inherits Window {
     in-out property <string> menu-pids: "";
     in-out property <bool> menu-group: false;
     in-out property <bool> menu-throttled: false;
+    // Где открыть меню. Без этих координат PopupWindow встаёт в угол окна:
+    // он позиционируется относительно родителя, а родитель у него — окно.
+    in-out property <length> menu-x: 0px;
+    in-out property <length> menu-y: 0px;
     // Что случилось с последним действием — показываем под таблицей.
     in property <string> action-note: "";
 
@@ -370,6 +374,8 @@ export component MainWindow inherits Window {
     // разметки — из `if` раздела и `for` по строкам — до него было бы
     // не достучаться, это разные области видимости.
     menu := PopupWindow {
+        x: root.menu-x;
+        y: root.menu-y;
         width: 260px;
         close-policy: close-on-click-outside;
 
@@ -886,10 +892,18 @@ export component MainWindow inherits Window {
                                 // в каждой строке занимали треть таблицы и всё
                                 // равно не вмещались — меню и привычнее, и
                                 // оставляет место данным.
-                                TouchArea {
+                                row-touch := TouchArea {
                                     pointer-event(event) => {
                                         if (event.button == PointerEventButton.right
                                             && event.kind == PointerEventKind.down) {
+                                            // Координаты курсора в окне: своя позиция
+                                            // строки плюс положение мыши внутри неё.
+                                            root.menu-x = row-touch.absolute-position.x
+                                                + row-touch.mouse-x
+                                                - root.absolute-position.x;
+                                            root.menu-y = row-touch.absolute-position.y
+                                                + row-touch.mouse-y
+                                                - root.absolute-position.y;
                                             root.menu-pid = process.pid;
                                             root.menu-name = process.name;
                                             root.menu-group = process.is-group;
@@ -944,9 +958,9 @@ export component MainWindow inherits Window {
                                                 width: 10px;
                                             }
                                             Text {
-                                                text: process.is-member
-                                                    ? "PID " + process.pid
-                                                    : process.name;
+                                                // Имя строки готовит Rust: у члена
+                                                // группы это заголовок окна либо номер.
+                                                text: process.name;
                                                 color: process.is-member ? #9fb3c8 : #e8f0ec;
                                                 font-size: 12px;
                                                 font-weight: process.is-group ? 700 : 400;

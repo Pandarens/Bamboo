@@ -403,3 +403,100 @@ mod foreground_tests {
         }
     }
 }
+
+/// Заголовки главных окон процессов.
+///
+/// Полезнее голого номера: у процесса с окном заголовок обычно говорит,
+/// что там открыто, — «Telegram», имя документа, адрес страницы.
+///
+/// Оговорка, которая важнее самой возможности: **у вкладок браузера
+/// заголовка не будет**. Вкладка живёт в процессе отрисовки, а окно
+/// одно на весь браузер и принадлежит его главному процессу. Заголовки
+/// вкладок Chrome снаружи не достать — они внутри браузера, и никакой
+/// системный вызов их не отдаёт.
+///
+/// Возвращаем сразу все процессы за один обход: спрашивать про каждый
+/// отдельно значило бы перебирать все окна системы столько же раз.
+pub fn window_titles() -> Vec<(u32, String)> {
+    use windows_sys::Win32::Foundation::LPARAM;
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        GetWindowTextLengthW, GetWindowTextW, GetWindowThreadProcessId, IsWindowVisible,
+    };
+
+    /// Что собираем: номер процесса и заголовок его самого длинного окна.
+    struct Found {
+        titles: Vec<(u32, String)>,
+    }
+
+    // SAFETY: вызывается только из EnumWindows ниже, куда передан указатель
+    // на живой Found со стека этой функции.
+    unsafe extern "system" fn visit(hwnd: HWND, param: LPARAM) -> i32 {
+        let found = &mut *(param as *mut Found);
+
+        if IsWindowVisible(hwnd) == 0 {
+            return 1;
+        }
+        let length = GetWindowTextLengthW(hwnd);
+        if length <= 0 {
+            return 1;
+        }
+
+        let mut buffer = vec![0u16; length as usize + 1];
+        let written = GetWindowTextW(hwnd, buffer.as_mut_ptr(), buffer.len() as i32);
+        if written <= 0 {
+            return 1;
+        }
+        let title = String::from_utf16_lossy(&buffer[..written as usize]);
+
+        let mut pid: u32 = 0;
+        GetWindowThreadProcessId(hwnd, &mut pid);
+        if pid == 0 {
+            return 1;
+        }
+
+        // У процесса бывает несколько окон: берём заголовок подлиннее —
+        // короткие обычно принадлежат служебным окнам без содержания.
+        match found.titles.iter_mut().find(|(known, _)| *known == pid) {
+            Some((_, existing)) if existing.chars().count() >= title.chars().count() => {}
+            Some((_, existing)) => *existing = title,
+            None => found.titles.push((pid, title)),
+        }
+        1
+    }
+
+    let mut found = Found { titles: Vec::new() };
+    unsafe {
+        windows_sys::Win32::UI::WindowsAndMessaging::EnumWindows(
+            Some(visit),
+            &mut found as *mut Found as LPARAM,
+        )
+    };
+    found.titles
+}
+
+#[cfg(test)]
+mod title_tests {
+    use super::*;
+
+    #[test]
+    fn window_titles_are_collected_from_the_live_system() {
+        // На работающей машине хоть одно окно с заголовком есть всегда.
+        let titles = window_titles();
+        assert!(!titles.is_empty(), "не найдено ни одного окна с заголовком");
+
+        for (pid, title) in &titles {
+            assert!(*pid > 4, "системный номер процесса: {pid}");
+            assert!(!title.trim().is_empty(), "пустой заголовок у {pid}");
+        }
+    }
+
+    #[test]
+    fn each_process_appears_at_most_once() {
+        let titles = window_titles();
+        let mut pids: Vec<u32> = titles.iter().map(|(pid, _)| *pid).collect();
+        pids.sort_unstable();
+        let before = pids.len();
+        pids.dedup();
+        assert_eq!(before, pids.len(), "процесс попал в список дважды");
+    }
+}

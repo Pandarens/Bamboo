@@ -39,6 +39,9 @@ pub struct ProcessLine {
     /// Чем занят процесс браузера: вкладка, расширение, отрисовка.
     /// `None` — это не браузер либо строку запуска прочитать не вышло.
     pub browser_role: Option<bamboo_sys::BrowserRole>,
+    /// Заголовок окна процесса, если оно у него есть. У вкладок браузера
+    /// его не будет: окно одно на весь браузер.
+    pub window_title: String,
     /// Сколько процесс читает и пишет на диск, байт в секунду.
     /// Именно скорость, а не сумма за интервал: интервал опроса плавает
     /// от секунды до минуты, и сырые дельты нельзя было бы сравнивать
@@ -226,9 +229,11 @@ fn run(sender: Sender<Snapshot>, visible: WidgetVisible) {
             roles_at = Some(std::time::Instant::now());
         }
 
-        // Зависшие окна — один обход на весь тик, а не запрос про каждый
-        // процесс: EnumWindows всё равно обходит все окна системы.
+        // Зависшие окна и заголовки — два обхода на весь тик, а не запрос
+        // про каждый процесс: EnumWindows всё равно перебирает все окна.
         let hung = bamboo_sys::hung_process_ids();
+        let titles: std::collections::HashMap<u32, String> =
+            bamboo_sys::window_titles().into_iter().collect();
 
         // Накопители: счётчики накопительные, поэтому активность считаем
         // по разнице с прошлым тиком, а не отдельной парой замеров — это
@@ -261,6 +266,7 @@ fn run(sender: Sender<Snapshot>, visible: WidgetVisible) {
                 hung: hung.contains(&process.pid()),
                 parent_pid: process.parent_pid,
                 browser_role: roles.get(&process.pid()).copied(),
+                window_title: titles.get(&process.pid()).cloned().unwrap_or_default(),
                 read_per_second: per_second(process.last_point().read_kib, tick.interval_ms),
                 write_per_second: per_second(process.last_point().write_kib, tick.interval_ms),
             })
@@ -588,6 +594,7 @@ mod pressure_tests {
             hung: false,
             parent_pid: 0,
             browser_role: None,
+            window_title: String::new(),
             read_per_second: 0,
             write_per_second: write,
         }

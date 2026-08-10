@@ -60,3 +60,4 @@ pub use startup::{
 pub use storage::{enumerate as enumerate_drives, read_smart, Drive};
 pub use user::{idle_ms, notification_state, NotificationState};
 pub use wake::{wake_history, WakeEvent, WakeSource};
+pub use window::window_titles;
