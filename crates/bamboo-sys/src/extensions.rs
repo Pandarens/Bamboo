@@ -20,6 +20,9 @@ pub struct Extension {
     pub name: String,
     /// Идентификатор — он же имя папки.
     pub id: String,
+    /// В каком браузере стоит: одно и то же расширение бывает в обоих,
+    /// и человеку полезно знать, где именно.
+    pub browser: String,
 }
 
 /// Читает установленные расширения Chrome и Edge.
@@ -34,16 +37,16 @@ pub fn installed() -> Result<Vec<Extension>> {
 
     // Профилей у браузера бывает несколько; смотрим самые обычные.
     let roots = [
-        format!("{local}\\Google\\Chrome\\User Data"),
-        format!("{local}\\Microsoft\\Edge\\User Data"),
+        (format!("{local}\\Google\\Chrome\\User Data"), "Chrome"),
+        (format!("{local}\\Microsoft\\Edge\\User Data"), "Edge"),
     ];
     let profiles = ["Default", "Profile 1", "Profile 2", "Profile 3"];
 
     let mut found: Vec<Extension> = Vec::new();
-    for root in roots {
+    for (root, browser) in roots {
         for profile in profiles {
             let path = std::path::Path::new(&root).join(profile).join("Extensions");
-            collect_from(&path, &mut found);
+            collect_from(&path, browser, &mut found);
         }
     }
 
@@ -51,12 +54,20 @@ pub fn installed() -> Result<Vec<Extension>> {
     // расширение в Chrome и в Edge имеет разные идентификаторы, а человеку
     // оно видится одним — и в списке должно быть одним.
     found.sort_by_key(|extension| extension.name.to_lowercase());
-    found.dedup_by(|a, b| a.name.eq_ignore_ascii_case(&b.name));
+    found.dedup_by(|a, b| {
+        if !a.name.eq_ignore_ascii_case(&b.name) {
+            return false;
+        }
+        if !b.browser.contains(&a.browser) {
+            b.browser = format!("{}, {}", b.browser, a.browser);
+        }
+        true
+    });
     Ok(found)
 }
 
 /// Собирает расширения из папки `Extensions`.
-fn collect_from(path: &std::path::Path, found: &mut Vec<Extension>) {
+fn collect_from(path: &std::path::Path, browser: &str, found: &mut Vec<Extension>) {
     let Ok(entries) = std::fs::read_dir(path) else {
         return;
     };
@@ -76,7 +87,11 @@ fn collect_from(path: &std::path::Path, found: &mut Vec<Extension>) {
         for version in versions.flatten() {
             let manifest = version.path().join("manifest.json");
             if let Some(name) = read_name(&manifest, &version.path()) {
-                found.push(Extension { name, id });
+                found.push(Extension {
+                    name,
+                    id,
+                    browser: browser.to_string(),
+                });
                 break;
             }
         }
@@ -193,6 +208,7 @@ mod tests {
         let list = installed().expect("список расширений");
         for extension in &list {
             assert_eq!(extension.id.len(), 32, "неверный идентификатор");
+            assert!(!extension.browser.is_empty(), "браузер должен быть назван");
             assert!(!extension.name.trim().is_empty());
             // Непереведённое имя показывать нельзя.
             assert!(

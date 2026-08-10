@@ -75,6 +75,12 @@ struct PagefileRow {
 }
 
 // Кто прямо сейчас работает с накопителем.
+// Расширение браузера.
+struct ExtensionRow {
+    name: string,
+    browser: string,
+}
+
 struct DiskUserRow {
     name: string,
     rate: string,
@@ -303,8 +309,19 @@ export component MainWindow inherits Window {
     // Имена виновников через запятую. Пусто — переходить не к кому:
     // у времени в драйверах виновника среди процессов нет.
     in property <string> freeze-culprits: "";
+    // Обновление. Пусто — обновляться не на что, и полоса не показывается:
+    // напоминать не о чем.
+    in property <string> update-version: "";
+    in property <string> update-notes: "";
+    in property <string> update-status: "";
+    in property <bool> update-busy: false;
+    in property <string> app-version: "";
+    callback install-update();
+    callback check-update();
     in property <[DiskUserRow]> disk-users: [];
     in property <string> disk-users-note: "";
+    in property <[ExtensionRow]> extensions: [];
+    in property <string> extensions-note: "";
     in property <bool> autopilot: false;
     in property <string> autopilot-status: "";
     callback toggle-autopilot();
@@ -559,6 +576,11 @@ export component MainWindow inherits Window {
                     chosen => { root.section = 4; root.refresh(); }
                 }
                 NavButton {
+                    label: "Браузер";
+                    active: root.section == 7;
+                    chosen => { root.section = 7; root.refresh(); }
+                }
+                NavButton {
                     label: "Настройки";
                     active: root.section == 5;
                     chosen => { root.section = 5; }
@@ -584,6 +606,36 @@ export component MainWindow inherits Window {
                 spacing: 12px;
 
                 // --- Обзор ---
+                if root.update-version != "": Rectangle {
+                    background: #1d2c38; border-radius: 8px;
+                    height: updbox.preferred-height;
+                    updbox := HorizontalLayout {
+                        padding: 12px; spacing: 12px;
+                        VerticalLayout {
+                            spacing: 3px;
+                            horizontal-stretch: 1;
+                            Text {
+                                text: "Вышла версия " + root.update-version;
+                                font-size: 13px; color: #8fc4f0;
+                            }
+                            Text {
+                                text: root.update-notes;
+                                font-size: 11px; color: #9fb3c4; wrap: word-wrap;
+                            }
+                        }
+                        VerticalLayout {
+                            alignment: center;
+                            RowButton {
+                                label: root.update-busy ? "Качаю…" : "Обновить";
+                                width: 120px;
+                                pressed => {
+                                    if (!root.update-busy) { root.install-update(); }
+                                }
+                            }
+                        }
+                    }
+                }
+
                 if root.section == 0: VerticalLayout {
                     spacing: 10px;
                     Text { text: "Обзор"; font-size: 20px; color: #e8f0ec; }
@@ -1186,6 +1238,43 @@ export component MainWindow inherits Window {
                     Rectangle { vertical-stretch: 1; }
                 }
 
+                // --- Браузер ---
+                if root.section == 7: VerticalLayout {
+                    spacing: 8px;
+                    Text { text: "Расширения браузера"; font-size: 20px; color: #e8f0ec; }
+                    Text {
+                        text: root.extensions-note;
+                        font-size: 11px; color: #7d8f86; wrap: word-wrap;
+                    }
+                    Flickable {
+                        vertical-stretch: 1;
+                        VerticalLayout {
+                            spacing: 3px;
+                            for extension[index] in root.extensions: Rectangle {
+                                height: 30px;
+                                background: Math.mod(index, 2) == 0 ? #1b2521 : #18211d;
+                                border-radius: 5px;
+                                HorizontalLayout {
+                                    padding-left: 10px; padding-right: 10px; spacing: 8px;
+                                    Text {
+                                        text: extension.name;
+                                        font-size: 12px; color: #e8f0ec;
+                                        vertical-alignment: center;
+                                        horizontal-stretch: 1; overflow: elide;
+                                    }
+                                    Text {
+                                        text: extension.browser;
+                                        font-size: 11px; color: #7d8f86;
+                                        vertical-alignment: center;
+                                        width: 120px;
+                                        horizontal-alignment: right;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
                 // --- Питание ---
                 if root.section == 3: VerticalLayout {
                     spacing: 8px;
@@ -1333,6 +1422,51 @@ export component MainWindow inherits Window {
                 if root.section == 5: VerticalLayout {
                     spacing: 10px;
                     Text { text: "Настройки"; font-size: 20px; color: #e8f0ec; }
+
+                    // Версия и обновление. Проверка идёт сама раз в сутки,
+                    // но кнопка нужна: человек, услышавший про новую версию,
+                    // не должен ждать до завтра.
+                    Rectangle {
+                        background: #1e2a24; border-radius: 8px;
+                        height: verbox.preferred-height;
+                        verbox := HorizontalLayout {
+                            padding: 12px; spacing: 12px;
+                            VerticalLayout {
+                                spacing: 3px;
+                                horizontal-stretch: 1;
+                                Text {
+                                    text: "Версия " + root.app-version;
+                                    font-size: 13px; color: #e8f0ec;
+                                }
+                                Text {
+                                    text: root.update-status;
+                                    font-size: 11px; color: #7d8f86; wrap: word-wrap;
+                                }
+                            }
+                            Rectangle {
+                                width: 130px;
+                                VerticalLayout {
+                                    alignment: center;
+                                    RowButton {
+                                        label: root.update-busy
+                                            ? "Проверяю…"
+                                            : (root.update-version != ""
+                                                ? "Обновить"
+                                                : "Проверить");
+                                        width: 130px;
+                                        pressed => {
+                                            if (root.update-busy) { return; }
+                                            if (root.update-version != "") {
+                                                root.install-update();
+                                            } else {
+                                                root.check-update();
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
 
                     Rectangle {
                         background: #1e2a24; border-radius: 8px;

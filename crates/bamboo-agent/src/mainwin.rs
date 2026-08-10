@@ -655,6 +655,57 @@ pub struct DriveRow {
     pub verdict: String,
 }
 
+/// Строка расширения браузера.
+pub struct ExtensionRow {
+    pub name: String,
+    /// В каком браузере стоит.
+    pub browser: String,
+}
+
+/// Установленные расширения браузеров.
+///
+/// Отдельным списком, а не строчкой в объяснении: тридцать расширений —
+/// это заметная часть памяти браузера и заметная часть его медлительности,
+/// и разглядывать их надо целиком, а не в пересказе.
+///
+/// Оговорка остаётся: сказать, какой процесс какому расширению
+/// соответствует, снаружи нельзя. Идентификатора в командной строке нет —
+/// проверено на живых процессах. Поэтому список отвечает на «что у меня
+/// вообще стоит», а не на «кто из них ест память».
+pub fn extension_rows() -> (Vec<ExtensionRow>, String) {
+    let found = match bamboo_sys::installed_extensions() {
+        Ok(found) => found,
+        Err(error) => {
+            return (
+                Vec::new(),
+                format!("Список расширений прочитать не удалось: {error}"),
+            )
+        }
+    };
+
+    if found.is_empty() {
+        return (
+            Vec::new(),
+            "Расширений не нашлось. Bamboo смотрит профили Chrome и Edge —              если вы пользуетесь другим браузером, он их не увидит."
+                .to_string(),
+        );
+    }
+
+    let note = format!(
+        "Установлено расширений: {}. Каждое из них — это отдельный процесс          браузера и его память. Какое из них какому процессу соответствует,          снаружи не видно: браузер этого не сообщает, идентификатора в командной          строке нет.",
+        found.len()
+    );
+
+    let rows = found
+        .into_iter()
+        .map(|extension| ExtensionRow {
+            name: extension.name,
+            browser: extension.browser,
+        })
+        .collect();
+    (rows, note)
+}
+
 /// Строка «кто занимает диск».
 pub struct DiskUserRow {
     pub name: String,
@@ -1492,10 +1543,12 @@ mod explain_tests {
             bamboo_sys::Extension {
                 name: "uBlock Origin".into(),
                 id: "a".repeat(32),
+                browser: "Chrome".into(),
             },
             bamboo_sys::Extension {
                 name: "Tampermonkey".into(),
                 id: "b".repeat(32),
+                browser: "Chrome".into(),
             },
         ];
         let text = explain_group_memory(&snapshot, "chrome.exe", &extensions).unwrap();
@@ -1512,6 +1565,7 @@ mod explain_tests {
             .map(|n| bamboo_sys::Extension {
                 name: format!("Расширение {n}"),
                 id: "c".repeat(32),
+                browser: "Chrome".into(),
             })
             .collect();
         let text = list_extensions(&many);

@@ -26,6 +26,8 @@ mod gamemode;
 mod mainwin;
 #[cfg(windows)]
 mod tray;
+#[cfg(windows)]
+mod update;
 
 #[cfg(not(windows))]
 fn main() {
@@ -60,6 +62,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Утилита, которая учит систему экономить, начинает с себя.
     let _ = bamboo_sys::apply_self_limits();
+
+    // Файл, оставшийся от прошлого обновления. К этому моменту его уже
+    // никто не держит, а раньше убрать было нельзя.
+    update::clean_up_after_update();
 
     let (updates, visible) = collector::spawn();
     let widget = Widget::new()?;
@@ -122,11 +128,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     main_window.set_volumes(ModelRc::new(VecModel::from(Vec::<VolumeRow>::new())));
     main_window.set_suggestions(ModelRc::new(VecModel::from(Vec::<SuggestionRow>::new())));
     main_window.set_autostart(bamboo_sys::is_in_startup());
+    main_window.set_app_version(SharedString::from(update::CURRENT));
+    main_window.set_update_status(SharedString::from("Проверяю обновления…"));
     main_window.set_show_widget_on_start(bamboo_sys::show_widget_on_start());
     main_window.set_processes(main_processes.clone());
     main_window.set_drives(drives_model.clone());
     main_window.set_wakes(wakes_model.clone());
     main_window.set_journal(journal_model.clone());
+    main_window.set_extensions(ModelRc::new(VecModel::from(Vec::<ExtensionRow>::new())));
 
     // Последний снимок держим под рукой: по клику на заголовок столбца
     // таблицу надо пересортировать сразу, а не ждать следующего тика.
@@ -148,6 +157,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let autopilot_holds: std::rc::Rc<
         std::cell::RefCell<std::collections::HashMap<(u32, &'static str), i64>>,
     > = std::rc::Rc::new(std::cell::RefCell::new(std::collections::HashMap::new()));
+
+    // Найденное обновление. Держим здесь, потому что кнопка «Обновить»
+    // ставит именно то, о чём человеку сказали, а не спрашивает GitHub
+    // заново: между сообщением и нажатием выпуск мог смениться.
+    let pending_update: std::sync::Arc<std::sync::Mutex<Option<update::Release>>> =
+        std::sync::Arc::new(std::sync::Mutex::new(None));
 
     // Игровой режим помнит, что и кому менял: без этого вернуть прежние
     // настройки было бы нечем.
@@ -216,6 +231,68 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             };
             win.set_autopilot(pilot.enabled());
             win.set_action_note(SharedString::from(note));
+        });
+    }
+
+    // Проверка обновлений по кнопке. Идёт в отдельном потоке: запрос
+    // к чужому серверу занимает секунды, и всё это время окно не разбирало
+    // бы сообщения — интерфейс замер бы, а нажатия ушли в никуда.
+    {
+        let weak = main_window.as_weak();
+        let found = pending_update.clone();
+        main_window.on_check_update(move || {
+            let Some(win) = weak.upgrade() else {
+                return;
+            };
+            win.set_update_busy(true);
+            win.set_update_status(SharedString::from("Спрашиваю у GitHub…"));
+
+            let back = weak.clone();
+            let found = found.clone();
+            std::thread::spawn(move || {
+                let state = update::check();
+                let _ = slint::invoke_from_event_loop(move || {
+                    if let Some(win) = back.upgrade() {
+                        show_update_state(&win, &found, state);
+                    }
+                });
+            });
+        });
+    }
+
+    // Установка обновления. Тоже в отдельном потоке: качается несколько
+    // мегабайт.
+    {
+        let weak = main_window.as_weak();
+        let found = pending_update.clone();
+        main_window.on_install_update(move || {
+            let Some(win) = weak.upgrade() else {
+                return;
+            };
+            let Some(release) = found.lock().expect("найденный выпуск").clone()
+            else {
+                return;
+            };
+
+            win.set_update_busy(true);
+            win.set_update_status(SharedString::from("Скачиваю…"));
+
+            let back = weak.clone();
+            std::thread::spawn(move || {
+                let (note, installed) = update::install(&release);
+                let _ = slint::invoke_from_event_loop(move || {
+                    if let Some(win) = back.upgrade() {
+                        win.set_update_busy(false);
+                        win.set_update_status(SharedString::from(note.clone()));
+                        win.set_action_note(SharedString::from(note));
+                        if installed {
+                            // Полосу убираем: обновляться больше не на что,
+                            // осталось перезапустить.
+                            win.set_update_version(SharedString::from(""));
+                        }
+                    }
+                });
+            });
         });
     }
 
@@ -715,12 +792,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 2 => "Читаю накопители…",
                 3 => "Читаю журнал пробуждений…",
                 4 => "Открываю журнал действий…",
+                7 => "Читаю профили браузеров…",
                 _ => "",
             };
             match section {
                 2 => win.set_disk_note(SharedString::from(note)),
                 3 => win.set_power_note(SharedString::from(note)),
                 4 => win.set_journal_note(SharedString::from(note)),
+                7 => win.set_extensions_note(SharedString::from(note)),
                 _ => return,
             }
 
@@ -754,6 +833,23 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         }
                     });
                 }
+                7 => {
+                    let (rows, note) = mainwin::extension_rows();
+                    let _ = slint::invoke_from_event_loop(move || {
+                        if let Some(win) = back.upgrade() {
+                            replace(
+                                &win.get_extensions(),
+                                rows.into_iter()
+                                    .map(|row| ExtensionRow {
+                                        name: SharedString::from(row.name),
+                                        browser: SharedString::from(row.browser),
+                                    })
+                                    .collect(),
+                            );
+                            win.set_extensions_note(SharedString::from(note));
+                        }
+                    });
+                }
                 4 => {
                     let (rows, note) = mainwin::journal_rows();
                     let _ = slint::invoke_from_event_loop(move || {
@@ -783,6 +879,25 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let weak = widget.as_weak();
     let main_weak = main_window.as_weak();
+    // Обновления: спрашиваем при запуске и потом раз в сутки. Первый
+    // запрос уходит сразу — человеку, который только что поставил Bamboo,
+    // ждать до завтра незачем.
+    {
+        let weak = main_window.as_weak();
+        let found = pending_update.clone();
+        std::thread::spawn(move || {
+            let state = update::check();
+            let _ = slint::invoke_from_event_loop(move || {
+                if let Some(win) = weak.upgrade() {
+                    show_update_state(&win, &found, state);
+                }
+            });
+        });
+    }
+    let mut checked_at = std::time::Instant::now();
+    let update_weak = main_window.as_weak();
+    let update_found = pending_update.clone();
+
     let tick_pilot = autopilot.clone();
     let tick_holds = autopilot_holds.clone();
     let timer = slint::Timer::default();
@@ -895,6 +1010,23 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let mut latest = None;
             while let Ok(snapshot) = updates.try_recv() {
                 latest = Some(snapshot);
+            }
+
+            // Раз в сутки спрашиваем, не вышло ли новой версии. Чаще
+            // незачем: выпуски выходят не по часам, а лишние запросы
+            // к чужому серверу — это трафик человека.
+            if checked_at.elapsed() >= Duration::from_millis(update::CHECK_EVERY_MS) {
+                checked_at = std::time::Instant::now();
+                let back = update_weak.clone();
+                let found = update_found.clone();
+                std::thread::spawn(move || {
+                    let state = update::check();
+                    let _ = slint::invoke_from_event_loop(move || {
+                        if let Some(win) = back.upgrade() {
+                            show_update_state(&win, &found, state);
+                        }
+                    });
+                });
             }
 
             if let Some(snapshot) = latest {
@@ -1027,6 +1159,32 @@ fn remedy_key(remedy: bamboo_analyze::suggest::Remedy) -> &'static str {
         Remedy::LowerMemory => "память",
         Remedy::ThrottleDisk => "диск",
         Remedy::JustSaying => "ничего",
+    }
+}
+
+/// Показывает в окне то, что вернула проверка обновлений.
+#[cfg(windows)]
+fn show_update_state(
+    main: &MainWindow,
+    found: &std::sync::Mutex<Option<update::Release>>,
+    state: update::UpdateState,
+) {
+    main.set_update_busy(false);
+    main.set_update_status(SharedString::from(state.note));
+
+    match state.available {
+        Some(release) => {
+            main.set_update_version(SharedString::from(release.version.clone()));
+            // Описание выпуска бывает длинным, а полоса должна оставаться
+            // полосой: показываем начало, остальное есть на GitHub.
+            let notes: String = release.notes.lines().take(3).collect::<Vec<_>>().join(" ");
+            main.set_update_notes(SharedString::from(notes));
+            *found.lock().expect("список обновлений") = Some(release);
+        }
+        None => {
+            main.set_update_version(SharedString::from(""));
+            *found.lock().expect("список обновлений") = None;
+        }
     }
 }
 
