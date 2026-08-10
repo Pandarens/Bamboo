@@ -236,6 +236,8 @@ impl AppliedActions {
 #[derive(Default)]
 pub struct IoLimits {
     limited: std::collections::HashMap<u32, bamboo_sys::LimitedProcess>,
+    /// Номера записей журнала: по ним ограничение помечается снятым.
+    journal_ids: std::collections::HashMap<u32, i64>,
 }
 
 impl IoLimits {
@@ -257,6 +259,9 @@ impl IoLimits {
         use bamboo_policy::ProcessFacts;
 
         if self.limited.remove(&pid).is_some() {
+            if let Some(id) = self.journal_ids.remove(&pid) {
+                record_limit_lifted(id);
+            }
             return format!("{image_name}: ограничение диска снято.");
         }
 
@@ -269,10 +274,19 @@ impl IoLimits {
             return format!("{image_name}: придерживать нельзя — {reason}");
         }
 
+        // Запись открываем до попытки: иначе неудачная попытка не оставила бы
+        // следа, и в журнале было бы видно только то, что получилось.
+        // Журнал, показывающий одни успехи, — плохой журнал.
+        let entry = begin_limit_entry(pid, image_name);
+
         let limit = bamboo_sys::IoLimit::Background;
         match bamboo_sys::LimitedProcess::throttle(pid, limit) {
             Ok(limited) => {
                 self.limited.insert(pid, limited);
+                if let Some(id) = entry {
+                    record_limit_applied(id);
+                    self.journal_ids.insert(pid, id);
+                }
                 let held = self.count();
                 let others = if held > 1 {
                     format!(" Сейчас придержано процессов: {held}.")
@@ -284,7 +298,13 @@ impl IoLimits {
                     limit.describe()
                 )
             }
-            Err(error) => format!("{image_name}: придержать не удалось — {error}"),
+            Err(error) => {
+                let reason = error.to_string();
+                if let Some(id) = entry {
+                    record_limit_failed(id, &reason);
+                }
+                format!("{image_name}: придержать не удалось — {reason}")
+            }
         }
     }
 
@@ -630,5 +650,54 @@ mod stop_service_tests {
     fn a_missing_service_reports_the_failure() {
         let note = stop_service(&service("НетТакойСлужбыBamboo"));
         assert!(note.contains("не удалось"), "{note}");
+    }
+}
+
+/// Открывает запись журнала о придержании диска.
+///
+/// Придержание не проходит через исполнитель: ограничение живёт ровно
+/// столько, сколько жив дескриптор job-объекта, а исполнитель не хранит
+/// состояния между вызовами и закрыл бы его сразу. Поэтому запись ведём
+/// здесь — но ведём обязательно: действие, которого нет в журнале, нельзя
+/// ни проверить, ни откатить.
+fn begin_limit_entry(pid: u32, image_name: &str) -> Option<i64> {
+    let journal = open_journal()?;
+    let target = Target {
+        app_key: image_name.to_string(),
+        pid: Some(pid),
+        ..Default::default()
+    };
+
+    journal
+        .begin(&bamboo_journal::NewEntry {
+            at_unix_ms: bamboo_core::SampleTime::wall_clock_now(),
+            actor: Actor::Manual,
+            profile: "обычный",
+            target: &target,
+            action: Action::LimitDiskRate,
+            // Прежнее состояние здесь простое: ограничения не было. Скорость
+            // до придержания не записываем — она меняется каждую секунду
+            // и возвращать её не требуется.
+            prior_state: "io_limit=нет",
+            observation: Some("человек попросил придержать диск"),
+        })
+        .ok()
+}
+
+fn record_limit_applied(journal_id: i64) {
+    if let Some(journal) = open_journal() {
+        let _ = journal.confirm(journal_id);
+    }
+}
+
+fn record_limit_failed(journal_id: i64, reason: &str) {
+    if let Some(journal) = open_journal() {
+        let _ = journal.fail(journal_id, reason);
+    }
+}
+
+fn record_limit_lifted(journal_id: i64) {
+    if let Some(journal) = open_journal() {
+        let _ = journal.mark_reverted(journal_id, "человек снял ограничение");
     }
 }

@@ -637,6 +637,23 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let _ = bamboo_sys::window::begin_resize(main_window_handle(&win), edge);
         });
     }
+    // Переход с виджета к виновникам подвисания. Прочитать имена мало:
+    // искать их потом руками в списке из трёхсот строк — работа, которую
+    // человек делать не должен.
+    {
+        let main_for_culprits = main_window.as_weak();
+        widget.on_show_culprits(move |names| {
+            let Some(main) = main_for_culprits.upgrade() else {
+                return;
+            };
+            main.set_filter(names.clone());
+            main.set_section(1);
+            main.show().ok();
+            main.invoke_apply_filter();
+            main.invoke_refresh();
+        });
+    }
+
     // Виджет тоже без рамки — его тянут за строку состояния.
     {
         let weak = widget.as_weak();
@@ -1109,6 +1126,7 @@ fn apply_overview(
     main.set_freeze(SharedString::from(
         snapshot.freeze.clone().unwrap_or_default(),
     ));
+    main.set_freeze_culprits(SharedString::from(snapshot.freeze_culprits.clone()));
 
     // Кто занимает диск. Считается из того же снимка каждым тиком: список
     // живой, а не снятый в момент открытия раздела.
@@ -1274,6 +1292,13 @@ fn apply_snapshot(
     spark: &ModelRc<f32>,
     spark_cpu: &ModelRc<f32>,
 ) {
+    // Подвисание на виджете, а не только в окне: окна в этот момент
+    // на экране нет, а сказать надо тогда же, когда случилось.
+    widget.set_freeze(SharedString::from(
+        snapshot.freeze.clone().unwrap_or_default(),
+    ));
+    widget.set_freeze_culprits(SharedString::from(snapshot.freeze_culprits.clone()));
+
     widget.set_cpu_value(SharedString::from(format!(
         "{:.0}%",
         snapshot.cpu_busy * 100.0

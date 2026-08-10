@@ -28,6 +28,15 @@ pub enum Action {
     EnableEcoQos,
     /// Понижение приоритета памяти.
     LowerMemoryPriority,
+    /// Ограничение скорости работы с диском.
+    ///
+    /// Исполнитель его не выполняет, и это не упущение: ограничение живёт
+    /// ровно столько, сколько жив дескриптор job-объекта, а исполнитель
+    /// не хранит состояния между вызовами и закрыл бы дескриптор сразу.
+    /// Держит его реестр придержанных процессов, он же и пишет в журнал.
+    /// В перечне действие всё равно нужно: журналу и политике оно известно
+    /// наравне с остальными.
+    LimitDiskRate,
     /// Отложенный автозапуск службы.
     DelayServiceStart,
     /// Отключение элемента автозагрузки.
@@ -48,7 +57,7 @@ impl Action {
     /// Уровень риска, 1..6.
     pub fn risk(self) -> u8 {
         match self {
-            Action::EnableEcoQos | Action::LowerMemoryPriority => 1,
+            Action::EnableEcoQos | Action::LowerMemoryPriority | Action::LimitDiskRate => 1,
             Action::DelayServiceStart | Action::DisableStartupItem => 2,
             Action::DisableWakeTimer | Action::DisableScheduledTask => 3,
             Action::FreezeProcess => 4,
@@ -60,9 +69,10 @@ impl Action {
     pub fn autonomy(self) -> Autonomy {
         match self {
             // Мгновенно и полностью обратимо, побочных эффектов нет.
-            Action::EnableEcoQos | Action::LowerMemoryPriority | Action::DelayServiceStart => {
-                Autonomy::Automatic
-            }
+            Action::EnableEcoQos
+            | Action::LowerMemoryPriority
+            | Action::LimitDiskRate
+            | Action::DelayServiceStart => Autonomy::Automatic,
             Action::DisableStartupItem
             | Action::DisableWakeTimer
             | Action::DisableScheduledTask => Autonomy::WithConfirmation,
@@ -87,6 +97,7 @@ impl Action {
         match self {
             Action::EnableEcoQos => Action::EnableEcoQos,
             Action::LowerMemoryPriority => Action::LowerMemoryPriority,
+            Action::LimitDiskRate => Action::LimitDiskRate,
             Action::DelayServiceStart => Action::DelayServiceStart,
             Action::DisableStartupItem => Action::DisableStartupItem,
             Action::DisableWakeTimer => Action::DisableWakeTimer,
@@ -101,6 +112,7 @@ impl Action {
         match self {
             Action::EnableEcoQos => "включить экономичный режим",
             Action::LowerMemoryPriority => "понизить приоритет памяти",
+            Action::LimitDiskRate => "придержать скорость диска",
             Action::DelayServiceStart => "перевести службу на отложенный запуск",
             Action::DisableStartupItem => "убрать из автозагрузки",
             Action::DisableWakeTimer => "запретить будить компьютер",
@@ -119,7 +131,10 @@ impl Action {
     pub fn targets_process(self) -> bool {
         matches!(
             self,
-            Action::EnableEcoQos | Action::LowerMemoryPriority | Action::FreezeProcess
+            Action::EnableEcoQos
+                | Action::LowerMemoryPriority
+                | Action::LimitDiskRate
+                | Action::FreezeProcess
         )
     }
 }

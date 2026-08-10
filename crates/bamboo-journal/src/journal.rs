@@ -239,9 +239,10 @@ const SELECT: &str = "SELECT id, at_ms, actor, profile, app_key, pid, service_na
 
 /// Восстанавливает действие по его названию.
 fn action_from_name(name: &str) -> Option<Action> {
-    const ALL: [Action; 9] = [
+    const ALL: [Action; 10] = [
         Action::EnableEcoQos,
         Action::LowerMemoryPriority,
+        Action::LimitDiskRate,
         Action::DelayServiceStart,
         Action::DisableStartupItem,
         Action::DisableWakeTimer,

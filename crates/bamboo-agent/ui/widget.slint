@@ -96,8 +96,16 @@ export component Widget inherits Window {
     // Что показывает график: процессор или память.
     in-out property <bool> spark-cpu-mode: false;
     in property <bool> pinned: false;
+    // Последнее подвисание. Виджет — единственное место, где о нём можно
+    // сказать не открывая окна: своих уведомлений у Bamboo нет.
+    in property <string> freeze: "";
+    in property <string> freeze-culprits: "";
 
     callback toggle-pin();
+    // Открыть окно на списке процессов, отфильтрованном на виновников
+    // подвисания. Прочитать имена мало: искать их потом руками в списке
+    // из трёхсот строк — работа, которую делать не должен человек.
+    callback show-culprits(string);
     // Тянуть виджет можно за строку состояния: своей шапки у него нет.
     callback drag-window();
     // Убрать виджет с экрана. Наблюдение при этом продолжается — Bamboo
@@ -201,6 +209,39 @@ export component Widget inherits Window {
                     font-size: 11px;
                     color: #e0a44a;
                     wrap: word-wrap;
+                }
+            }
+        }
+
+        // Система подвисала. Показываем на виджете, а не только в окне:
+        // окна в этот момент на экране нет, а сказать надо тогда же.
+        if root.freeze != "": Rectangle {
+            background: #2e2320;
+            border-radius: 8px;
+            VerticalLayout {
+                padding: 8px;
+                spacing: 6px;
+                Text {
+                    text: root.freeze;
+                    font-size: 11px;
+                    color: #d8c4a8;
+                    wrap: word-wrap;
+                }
+                if root.freeze-culprits != "": Rectangle {
+                    height: 24px;
+                    background: culprits-touch.has-hover ? #3d2f28 : #362a24;
+                    border-radius: 5px;
+                    culprits-touch := TouchArea {
+                        mouse-cursor: pointer;
+                        clicked => { root.show-culprits(root.freeze-culprits); }
+                    }
+                    Text {
+                        text: "Показать их в процессах";
+                        font-size: 11px;
+                        color: #e0a44a;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                    }
                 }
             }
         }

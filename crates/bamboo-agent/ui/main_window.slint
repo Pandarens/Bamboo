@@ -300,6 +300,9 @@ export component MainWindow inherits Window {
     // Объяснение работы ядра с диском: тот самый случай «виноват System».
     in property <string> system-io: "";
     in property <string> freeze: "";
+    // Имена виновников через запятую. Пусто — переходить не к кому:
+    // у времени в драйверах виновника среди процессов нет.
+    in property <string> freeze-culprits: "";
     in property <[DiskUserRow]> disk-users: [];
     in property <string> disk-users-note: "";
     in property <bool> autopilot: false;
@@ -619,15 +622,34 @@ export component MainWindow inherits Window {
                     if root.freeze != "": Rectangle {
                         background: #2e2320; border-radius: 8px;
                         height: freezebox.preferred-height;
-                        freezebox := VerticalLayout {
-                            padding: 12px; spacing: 4px;
-                            Text {
-                                text: "Система подвисала";
-                                font-size: 12px; color: #e0a44a;
+                        freezebox := HorizontalLayout {
+                            padding: 12px; spacing: 12px;
+                            VerticalLayout {
+                                spacing: 4px;
+                                horizontal-stretch: 1;
+                                Text {
+                                    text: "Система подвисала";
+                                    font-size: 12px; color: #e0a44a;
+                                }
+                                Text {
+                                    text: root.freeze;
+                                    font-size: 12px; color: #d8c4a8; wrap: word-wrap;
+                                }
                             }
-                            Text {
-                                text: root.freeze;
-                                font-size: 12px; color: #d8c4a8; wrap: word-wrap;
+                            // Переход к виновникам. Прочитать имена мало:
+                            // человек хочет с ними что-то сделать, а искать
+                            // их в списке из трёхсот строк руками — работа.
+                            if root.freeze-culprits != "": VerticalLayout {
+                                alignment: center;
+                                RowButton {
+                                    label: "Показать их";
+                                    width: 120px;
+                                    pressed => {
+                                        root.filter = root.freeze-culprits;
+                                        root.apply-filter();
+                                        root.section = 1;
+                                    }
+                                }
                             }
                         }
                     }

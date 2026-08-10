@@ -86,6 +86,9 @@ pub struct Snapshot {
     /// Последнее подвисание системы и его причина. `None` — система вела
     /// себя ровно всё время наблюдения.
     pub freeze: Option<String>,
+    /// Имена виновников последнего подвисания через запятую: по ним
+    /// открывается список процессов, отфильтрованный ровно на них.
+    pub freeze_culprits: String,
     /// Сколько Bamboo уже наблюдает за системой. От этого зависит, что он
     /// вправе сказать про рост памяти: выводы требуют часов.
     pub watching_ms: u64,
@@ -326,6 +329,7 @@ fn run(sender: Sender<Snapshot>, visible: WidgetVisible) {
             now_ms,
         );
         let freeze = freezes.summary(now_ms);
+        let freeze_culprits = freezes.last_culprits().join(", ");
 
         // Считаем до сборки снимка: дальше список процессов уедет в него.
         let disk_pressure = explain_disk_pressure(&disks, &top);
@@ -351,6 +355,7 @@ fn run(sender: Sender<Snapshot>, visible: WidgetVisible) {
             user_idle_ms: bamboo_sys::idle_ms().unwrap_or(0),
             system_io,
             freeze,
+            freeze_culprits,
             watching_ms: started.elapsed().as_millis() as u64,
         };
 

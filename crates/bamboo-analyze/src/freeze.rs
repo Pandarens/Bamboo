@@ -113,6 +113,10 @@ pub struct Freeze {
     pub detail: String,
     /// Кто был рядом в этот момент. Пусто, если виновника назвать нельзя.
     pub culprits: String,
+    /// Их имена по отдельности: по ним открывается список процессов,
+    /// отфильтрованный ровно на этих виновников. Пересказ словами для
+    /// перехода не годится — в нём есть числа и знаки препинания.
+    pub culprit_names: Vec<String>,
 }
 
 /// Определяет, было ли подвисание, и из-за чего.
@@ -136,6 +140,7 @@ pub fn detect_with(moment: Moment, who: Bystanders<'_>) -> Option<Freeze> {
                 moment.memory_used_share * 100.0
             ),
             culprits: name_them("Больше всех памяти держали", who.memory, &bytes),
+            culprit_names: names_of(who.memory),
         });
     }
 
@@ -151,6 +156,7 @@ pub fn detect_with(moment: Moment, who: Bystanders<'_>) -> Option<Freeze> {
             // Виновника здесь нет и быть не может: это время не принадлежит
             // ни одному процессу. Называть кого-то было бы враньём.
             culprits: String::new(),
+            culprit_names: Vec::new(),
         });
     }
 
@@ -165,11 +171,17 @@ pub fn detect_with(moment: Moment, who: Bystanders<'_>) -> Option<Freeze> {
                 moment.disk_busy * 100.0
             ),
             culprits: name_them("В этот момент диск занимали", who.disk, &per_second),
+            culprit_names: names_of(who.disk),
         });
     }
 
     None
 }
+
+/// Сколько виновников называем. Больше трёх человек не удержит в голове,
+/// а виновник почти всегда первый. Число общее для пересказа и для перехода
+/// в список: разойтись им нельзя, иначе отфильтруются не те, кого назвали.
+const SHOW: usize = 3;
 
 /// Перечисляет тех, кто был рядом в момент подвисания.
 ///
@@ -177,10 +189,6 @@ pub fn detect_with(moment: Moment, who: Bystanders<'_>) -> Option<Freeze> {
 /// что диск занят самим накопителем или драйвером, и среди процессов
 /// виновника попросту нет.
 fn name_them(lead: &str, who: &[(String, u64)], show_value: &dyn Fn(u64) -> String) -> String {
-    // Больше трёх имён человек не удержит в голове, а виновник почти
-    // всегда первый.
-    const SHOW: usize = 3;
-
     let named: Vec<String> = who
         .iter()
         .take(SHOW)
@@ -191,6 +199,14 @@ fn name_them(lead: &str, who: &[(String, u64)], show_value: &dyn Fn(u64) -> Stri
         return String::new();
     }
     format!(" {lead}: {}.", named.join(", "))
+}
+
+/// Имена виновников по отдельности — столько же, сколько названо словами.
+fn names_of(who: &[(String, u64)]) -> Vec<String> {
+    who.iter()
+        .take(SHOW)
+        .map(|(name, _)| name.clone())
+        .collect()
 }
 
 fn bytes(value: u64) -> String {
@@ -205,7 +221,7 @@ fn per_second(value: u64) -> String {
 #[derive(Default)]
 pub struct FreezeLog {
     /// Причина, момент по монотонным часам, подробности и виновники.
-    entries: Vec<(FreezeCause, u64, String, String)>,
+    entries: Vec<(FreezeCause, u64, String, String, Vec<String>)>,
 }
 
 /// Сколько подвисаний помним. Больше десятка не нужно: важна свежая
@@ -227,7 +243,7 @@ impl FreezeLog {
 
         let freeze = detect_with(moment, who)?;
 
-        if let Some((cause, when, _, _)) = self.entries.last() {
+        if let Some((cause, when, _, _, _)) = self.entries.last() {
             if *cause == freeze.cause && at_ms.saturating_sub(*when) < SAME_EVENT_MS {
                 return None;
             }
@@ -238,11 +254,22 @@ impl FreezeLog {
             at_ms,
             freeze.detail.clone(),
             freeze.culprits.clone(),
+            freeze.culprit_names.clone(),
         ));
         if self.entries.len() > REMEMBER {
             self.entries.remove(0);
         }
         None
+    }
+
+    /// Имена виновников последнего подвисания.
+    ///
+    /// Пусто, когда виновника назвать нельзя: у времени в драйверах его нет.
+    pub fn last_culprits(&self) -> Vec<String> {
+        self.entries
+            .last()
+            .map(|(_, _, _, _, names)| names.clone())
+            .unwrap_or_default()
     }
 
     /// Сколько подвисаний записано.
@@ -255,7 +282,7 @@ impl FreezeLog {
     /// Пусто — значит система вела себя ровно всё время наблюдения, и это
     /// стоит сказать: отсутствие жалоб тоже сведения.
     pub fn summary(&self, now_ms: u64) -> Option<String> {
-        let (cause, when, detail, culprits) = self.entries.last()?;
+        let (cause, when, detail, culprits, _) = self.entries.last()?;
 
         let ago = now_ms.saturating_sub(*when);
         let ago = if ago < 60_000 {
@@ -268,7 +295,7 @@ impl FreezeLog {
         let same = self
             .entries
             .iter()
-            .filter(|(other, _, _, _)| other == cause)
+            .filter(|(other, _, _, _, _)| other == cause)
             .count();
         let repeats = if same > 1 {
             format!(" Такое повторялось {same} раз за время наблюдения.")
@@ -557,6 +584,56 @@ mod tests {
 
         let text = log.summary(400_000).unwrap();
         assert!(text.contains("повторялось 3 раз"), "{text}");
+    }
+
+    #[test]
+    fn the_named_culprits_match_the_ones_offered_for_filtering() {
+        // Расхождение между тем, кого назвали словами, и тем, на кого
+        // отфильтруется список, — прямой обман: человек нажимает «показать
+        // этих» и видит других.
+        let many: Vec<(String, u64)> = (0..10)
+            .map(|n| (format!("процесс{n}.exe"), 10 << 20))
+            .collect();
+        let freeze = detect_with(
+            Moment {
+                disk_queue: 20,
+                ..Default::default()
+            },
+            Bystanders {
+                disk: &many,
+                memory: &[],
+            },
+        )
+        .unwrap();
+
+        assert_eq!(freeze.culprit_names.len(), SHOW);
+        for name in &freeze.culprit_names {
+            assert!(freeze.culprits.contains(name.as_str()), "{freeze:?}");
+        }
+    }
+
+    #[test]
+    fn the_log_hands_over_the_last_culprits_by_name() {
+        let mut log = FreezeLog::new();
+        let hogs = [("MsMpEng.exe".to_string(), 40 << 20)];
+        log.observe(
+            Moment {
+                disk_queue: 20,
+                ..Default::default()
+            },
+            Bystanders {
+                disk: &hogs,
+                memory: &[],
+            },
+            0,
+        );
+
+        assert_eq!(log.last_culprits(), vec!["MsMpEng.exe".to_string()]);
+    }
+
+    #[test]
+    fn there_is_nothing_to_filter_on_before_any_freeze() {
+        assert!(FreezeLog::new().last_culprits().is_empty());
     }
 
     #[test]

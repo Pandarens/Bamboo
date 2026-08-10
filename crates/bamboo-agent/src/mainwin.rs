@@ -399,7 +399,16 @@ fn matches_filter(name: &str, filter: &str) -> bool {
     if filter.is_empty() {
         return true;
     }
-    name.to_lowercase().contains(&filter.to_lowercase())
+
+    // Несколько имён через запятую. Так переход из отчёта о подвисании
+    // показывает разом всех виновников, а не первого: их обычно двое-трое,
+    // и смотреть их поодиночке значит потерять картину.
+    let name = name.to_lowercase();
+    filter
+        .split(',')
+        .map(str::trim)
+        .filter(|part| !part.is_empty())
+        .any(|part| name.contains(&part.to_lowercase()))
 }
 
 /// Сколько строк показываем в таблице.
@@ -1531,6 +1540,27 @@ mod explain_tests {
         assert!(text.contains("На вкладку в среднем"), "{text}");
         // И главное: чистить нечего, есть что закрыть.
         assert!(text.contains("есть что закрыть"), "{text}");
+    }
+
+    #[test]
+    fn a_filter_of_several_names_shows_all_of_them() {
+        // Виновников подвисания обычно двое-трое, и смотреть их
+        // поодиночке значит потерять картину.
+        assert!(matches_filter("MsMpEng.exe", "msmpeng, searchindexer"));
+        assert!(matches_filter(
+            "SearchIndexer.exe",
+            "msmpeng, searchindexer"
+        ));
+        assert!(!matches_filter("chrome.exe", "msmpeng, searchindexer"));
+    }
+
+    #[test]
+    fn an_empty_filter_shows_everything() {
+        assert!(matches_filter("chrome.exe", ""));
+        assert!(matches_filter("chrome.exe", "   "));
+        // Пустые куски между запятыми ничего не значат и не должны
+        // превращать фильтр в «показать всё».
+        assert!(!matches_filter("chrome.exe", " , , "));
     }
 
     #[test]
