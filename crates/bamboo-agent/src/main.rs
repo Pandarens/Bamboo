@@ -102,6 +102,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     main_window.set_disk_load(ModelRc::new(VecModel::from(Vec::<DiskLoadRow>::new())));
     main_window.set_pagefiles(ModelRc::new(VecModel::from(Vec::<PagefileRow>::new())));
     main_window.set_volumes(ModelRc::new(VecModel::from(Vec::<VolumeRow>::new())));
+    main_window.set_suggestions(ModelRc::new(VecModel::from(Vec::<SuggestionRow>::new())));
     main_window.set_processes(main_processes.clone());
     main_window.set_drives(drives_model.clone());
     main_window.set_wakes(wakes_model.clone());
@@ -346,6 +347,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // запросы, держать их в фоне незачем.
     {
         let weak = main_window.as_weak();
+        let refresh_snapshot = last_snapshot.clone();
+        let refresh_limits = io_limits.clone();
+        let refresh_rows = main_processes.clone();
         main_window.on_refresh(move || {
             let Some(win) = weak.upgrade() else {
                 return;
@@ -358,6 +362,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             // из этих чтений занимает от долей секунды до нескольких секунд,
             // и всё это время окно не разбирало бы сообщения: интерфейс
             // замирал бы, а нажатия уходили в никуда.
+            // Предложения считаются из снимка мгновенно — фонового чтения
+            // им не нужно, поэтому обновляем прямо здесь.
+            if section == 6 {
+                if let Some(snapshot) = refresh_snapshot.borrow().as_ref() {
+                    apply_overview(&win, snapshot, &refresh_rows, &refresh_limits.borrow());
+                }
+                return;
+            }
+
             let note = match section {
                 2 => "Читаю накопители…",
                 3 => "Читаю журнал пробуждений…",
@@ -614,6 +627,26 @@ fn apply_overview(
         })
         .collect();
     replace(&main.get_volumes(), volumes);
+
+    // Предложения считаем из того же снимка. Уже применённое исключаем:
+    // предлагать второй раз то же самое — назойливость.
+    let applied = actions::AppliedActions::load();
+    let (suggestions, note) = mainwin::suggestion_rows(snapshot, &|pid| {
+        limits.is_limited(pid) || !applied.marks(pid, false).is_empty()
+    });
+    let rows: Vec<SuggestionRow> = suggestions
+        .into_iter()
+        .map(|row| SuggestionRow {
+            pid: SharedString::from(row.pid),
+            title: SharedString::from(row.title),
+            reason: SharedString::from(row.reason),
+            effect: SharedString::from(row.effect),
+            button: SharedString::from(row.button),
+            action: row.action,
+        })
+        .collect();
+    replace(&main.get_suggestions(), rows);
+    main.set_suggestions_note(SharedString::from(note));
     main.set_disk_pressure(SharedString::from(
         snapshot.disk_pressure.clone().unwrap_or_default(),
     ));

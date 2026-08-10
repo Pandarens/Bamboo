@@ -70,6 +70,9 @@ pub struct Snapshot {
     pub disk_pressure: Option<String>,
     /// Разделы: сколько места и сколько осталось.
     pub volumes: Vec<VolumeLine>,
+    /// Сколько человек не трогал мышь и клавиатуру. От этого зависит,
+    /// можно ли называть чужую работу фоновой.
+    pub user_idle_ms: u64,
 }
 
 /// Раздел в снимке.
@@ -255,6 +258,7 @@ fn run(sender: Sender<Snapshot>, visible: WidgetVisible) {
             disks,
             pagefiles: pagefiles.clone(),
             volumes: volumes.clone(),
+            user_idle_ms: bamboo_sys::idle_ms().unwrap_or(0),
         };
 
         // Интерфейс закрылся — поток должен закончиться вместе с ним.

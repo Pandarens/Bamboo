@@ -38,6 +38,17 @@ struct DiskLoadRow {
     fill: float,
 }
 
+// Предложение по оптимизации.
+struct SuggestionRow {
+    pid: string,
+    title: string,
+    reason: string,
+    effect: string,
+    // Пусто — предложение без действия, только наблюдение.
+    button: string,
+    action: int,
+}
+
 // Раздел диска в обзоре.
 struct VolumeRow {
     title: string,
@@ -220,6 +231,8 @@ export component MainWindow inherits Window {
     in property <[DiskLoadRow]> disk-load: [];
     in property <[PagefileRow]> pagefiles: [];
     in property <[VolumeRow]> volumes: [];
+    in property <[SuggestionRow]> suggestions: [];
+    in property <string> suggestions-note: "";
     in property <string> disk-pressure: "";
     in property <string> disk-note: "";
     in property <string> power-note: "";
@@ -339,6 +352,11 @@ export component MainWindow inherits Window {
                     label: "Питание";
                     active: root.section == 3;
                     chosen => { root.section = 3; root.refresh(); }
+                }
+                NavButton {
+                    label: "Оптимизация";
+                    active: root.section == 6;
+                    chosen => { root.section = 6; root.refresh(); }
                 }
                 NavButton {
                     label: "Журнал";
@@ -757,6 +775,84 @@ export component MainWindow inherits Window {
                     }
                     Text { text: root.journal-note; font-size: 11px; color: #62736a; wrap: word-wrap; }
                     Rectangle { vertical-stretch: 1; }
+                }
+
+                // --- Оптимизация ---
+                if root.section == 6: VerticalLayout {
+                    spacing: 8px;
+                    Text { text: "Что можно улучшить"; font-size: 20px; color: #e8f0ec; }
+                    Text {
+                        text: "Bamboo предлагает только то, что видит своими глазами, "
+                            + "и объясняет причину каждого предложения. Всё применяется "
+                            + "по вашему решению и записывается в журнал — откатить можно "
+                            + "в любой момент.";
+                        font-size: 11px; color: #62736a; wrap: word-wrap;
+                    }
+
+                    if root.suggestions-note != "": Rectangle {
+                        background: #1e2a24; border-radius: 8px;
+                        height: note.preferred-height;
+                        note := VerticalLayout {
+                            padding: 12px;
+                            Text {
+                                text: root.suggestions-note;
+                                font-size: 12px; color: #7d8f86; wrap: word-wrap;
+                            }
+                        }
+                    }
+                    Rectangle { vertical-stretch: 1; }
+
+                    Flickable {
+                        vertical-stretch: 1;
+                        VerticalLayout {
+                            spacing: 6px;
+                            for item in root.suggestions: Rectangle {
+                                background: #1e2a24; border-radius: 8px;
+                                height: card.preferred-height;
+                                card := HorizontalLayout {
+                                    padding: 12px; spacing: 10px;
+                                    VerticalLayout {
+                                        spacing: 3px;
+                                        horizontal-stretch: 1;
+                                        Text {
+                                            text: item.title;
+                                            font-size: 13px; color: #e8f0ec; wrap: word-wrap;
+                                        }
+                                        Text {
+                                            text: item.reason;
+                                            font-size: 11px; color: #e0a44a; wrap: word-wrap;
+                                        }
+                                        Text {
+                                            text: item.effect;
+                                            font-size: 11px; color: #7d8f86; wrap: word-wrap;
+                                        }
+                                    }
+                                    if item.button != "": Rectangle {
+                                        width: 100px;
+                                        VerticalLayout {
+                                            alignment: center;
+                                            RowButton {
+                                                label: item.button;
+                                                width: 100px;
+                                                pressed => {
+                                                    if (item.action == 2) {
+                                                        root.toggle-io-limit(item.pid);
+                                                    } else {
+                                                        root.apply-action(item.pid, item.action);
+                                                    }
+                                                    root.refresh();
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    Text {
+                        text: root.action-note;
+                        font-size: 11px; color: #9fb3a8; wrap: word-wrap;
+                    }
                 }
 
                 // --- Ещё ---

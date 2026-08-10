@@ -711,3 +711,98 @@ mod grouping_tests {
         assert!(group_by_app(&Snapshot::default()).is_empty());
     }
 }
+
+/// Строка предложения для раздела «Оптимизация».
+pub struct SuggestionRow {
+    pub pid: String,
+    pub title: String,
+    pub reason: String,
+    pub effect: String,
+    /// Подпись кнопки. Пусто — предложение без действия.
+    pub button: String,
+    /// Код действия для `apply-action`; -1 у наблюдений без действия.
+    pub action: i32,
+}
+
+/// Собирает предложения по снимку.
+///
+/// Пустой список — обычный исход: значит, прямо сейчас улучшать нечего.
+/// Показывать в этом случае что-нибудь ради заполнения экрана мы не будем.
+pub fn suggestion_rows(
+    snapshot: &Snapshot,
+    handled: &dyn Fn(u32) -> bool,
+) -> (Vec<SuggestionRow>, String) {
+    use bamboo_analyze::suggest::{ProcessFacts, Remedy, Situation};
+
+    let facts: Vec<ProcessFacts<'_>> = snapshot
+        .top
+        .iter()
+        .map(|line| {
+            let protected = bamboo_policy::immutable_reason(&bamboo_policy::ProcessFacts {
+                image_name: &line.name,
+                session_id: 1,
+                ..Default::default()
+            })
+            .is_some();
+
+            ProcessFacts {
+                pid: line.pid,
+                name: &line.name,
+                cpu_percent: line.cpu_percent,
+                memory: line.memory,
+                disk_per_second: line.read_per_second.saturating_add(line.write_per_second),
+                // Сессию процесса в снимке не держим, а системные всё равно
+                // отсекает неизменяемый список. Ставим пользовательскую.
+                session_id: 1,
+                hung: line.hung,
+                leaking: line.memory_growth.is_some_and(|trend| trend.suspected_leak),
+                already_handled: handled(line.pid),
+                protected,
+            }
+        })
+        .collect();
+
+    let situation = Situation {
+        user_idle_ms: snapshot.user_idle_ms,
+        disk_saturated: snapshot.disks.iter().any(|disk| disk.saturated),
+    };
+
+    let suggestions = bamboo_analyze::suggest(&facts, situation);
+
+    let note = if suggestions.is_empty() {
+        if snapshot.user_idle_ms < bamboo_analyze::suggest::IDLE_BEFORE_SUGGESTING_MS {
+            "Пока вы за компьютером, Bamboo не предлагает придерживать программы: \
+             любая из них может понадобиться вам сию секунду. Предложения появятся, \
+             если система будет чем-то занята в ваше отсутствие."
+                .to_string()
+        } else {
+            "Улучшать нечего: никто не шумит в фоне. Это нормальный исход, \
+             а не признак того, что Bamboo плохо посмотрел."
+                .to_string()
+        }
+    } else {
+        String::new()
+    };
+
+    let rows = suggestions
+        .into_iter()
+        .map(|suggestion| {
+            let (button, action) = match suggestion.remedy {
+                Remedy::EcoQos => ("Включить", 0),
+                Remedy::LowerMemory => ("Понизить", 1),
+                Remedy::ThrottleDisk => ("Придержать", 2),
+                Remedy::JustSaying => ("", -1),
+            };
+            SuggestionRow {
+                pid: suggestion.pid.to_string(),
+                title: format!("{} — {}", suggestion.process_name, suggestion.remedy.name()),
+                reason: suggestion.reason,
+                effect: suggestion.effect,
+                button: button.to_string(),
+                action,
+            }
+        })
+        .collect();
+
+    (rows, note)
+}
