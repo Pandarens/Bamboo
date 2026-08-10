@@ -32,6 +32,8 @@ pub struct ProcessLine {
     /// Растёт ли память процесса и как быстро. `None` — не растёт или
     /// наблюдений пока мало; это нормальный и самый частый случай.
     pub memory_growth: Option<bamboo_analyze::MemoryTrend>,
+    /// Есть ли у процесса окно, которое перестало разбирать сообщения.
+    pub hung: bool,
 }
 
 /// Снимок для интерфейса.
@@ -118,6 +120,10 @@ fn run(sender: Sender<Snapshot>, visible: WidgetVisible) {
             growth_at = Some(std::time::Instant::now());
         }
 
+        // Зависшие окна — один обход на весь тик, а не запрос про каждый
+        // процесс: EnumWindows всё равно обходит все окна системы.
+        let hung = bamboo_sys::hung_process_ids();
+
         // Берём все процессы, а не только топ по процессору: главное окно
         // сортирует их само, и по памяти в том числе. Обрежь мы список по
         // CPU, самый прожорливый по памяти процесс мог бы в него не попасть
@@ -133,6 +139,7 @@ fn run(sender: Sender<Snapshot>, visible: WidgetVisible) {
                 memory: Bytes::from_kib(process.last_point().private_kib as u64),
                 badge: badge_for(process),
                 memory_growth: growth.get(&process.pid()).copied(),
+                hung: hung.contains(&process.pid()),
             })
             .collect();
 

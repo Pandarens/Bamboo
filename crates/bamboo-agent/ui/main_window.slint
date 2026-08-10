@@ -15,6 +15,9 @@ struct MainProcessRow {
     growth: string,
     // Рост дотянул до подозрения на утечку — красим строку.
     leak: bool,
+    // «не отвечает» или пусто.
+    state: string,
+    hung: bool,
 }
 
 struct DriveRow {
@@ -91,13 +94,13 @@ component ColumnHeader inherits Rectangle {
 // Маленькая кнопка действия в строке процесса.
 component RowButton inherits Rectangle {
     in property <string> label;
-    in property <string> hint;
+    in property <bool> danger;
     callback pressed();
 
     width: 78px;
     height: 22px;
     border-radius: 4px;
-    background: touch.has-hover ? #2f6f4f : #24312b;
+    background: touch.has-hover ? (root.danger ? #8f3b3b : #2f6f4f) : #24312b;
 
     touch := TouchArea {
         clicked => { root.pressed(); }
@@ -109,6 +112,25 @@ component RowButton inherits Rectangle {
         horizontal-alignment: center;
         vertical-alignment: center;
         width: 100%;
+    }
+}
+
+// Невидимая полоса по краю окна: за неё Windows меняет размер.
+// Своей рамки у окна нет, значит и границ для растягивания нет —
+// возвращаем их руками.
+component ResizeGrip inherits Rectangle {
+    in property <int> edge;
+    in property <MouseCursor> shape;
+    callback grabbed(int);
+
+    background: transparent;
+    TouchArea {
+        mouse-cursor: root.shape;
+        pointer-event(event) => {
+            if (event.button == PointerEventButton.left && event.kind == PointerEventKind.down) {
+                root.grabbed(root.edge);
+            }
+        }
     }
 }
 
@@ -178,11 +200,21 @@ export component MainWindow inherits Window {
     // Применить действие к процессу: PID и код действия (0 экономичный
     // режим, 1 понизить приоритет памяти).
     callback apply-action(string, int);
+    // Завершить процесс. Спрашиваем дважды: операция необратима.
+    callback terminate-process(string);
+    // PID, для которого сейчас показан вопрос «точно завершить?».
+    in-out property <string> confirming: "";
 
     callback minimize-window();
     callback close-window();
     // Начать перетаскивание окна за шапку.
     callback drag-window();
+    // Начать растягивание окна за край. Номер края: 0 левый, 1 правый,
+    // 2 верх, 3 верх-лево, 4 верх-право, 5 низ, 6 низ-лево, 7 низ-право.
+    callback resize-window(int);
+
+    // Всё содержимое лежит внутри, а полосы захвата — поверх него по краям.
+    Rectangle {
 
     VerticalLayout {
 
@@ -343,8 +375,10 @@ export component MainWindow inherits Window {
                             + "Щёлкните по заголовку столбца, чтобы отсортировать. "
                             + "«Эконом» уводит процесс на энергоэффективные ядра, «Память ↓» "
                             + "понижает приоритет его памяти — оба действия записываются в журнал "
-                            + "и обратимы. Показаны первые 80 строк: сортировка идёт по всем "
-                            + "процессам, обрезается уже результат.";
+                            + "и обратимы. «Завершить» — единственное необратимое действие: "
+                            + "несохранённые данные пропадут, поэтому кнопка спрашивает второй раз. "
+                            + "Показаны первые 80 строк: сортировка идёт по всем процессам, "
+                            + "обрезается уже результат.";
                         font-size: 11px; color: #62736a; wrap: word-wrap;
                     }
                     HorizontalLayout {
@@ -379,7 +413,12 @@ export component MainWindow inherits Window {
                             active: root.sort-column == 5; descending: root.sort-descending;
                             chosen => { root.sort-by(5); }
                         }
-                        Rectangle { width: 164px; }
+                        ColumnHeader {
+                            label: "Состояние"; width: 92px;
+                            active: root.sort-column == 6; descending: root.sort-descending;
+                            chosen => { root.sort-by(6); }
+                        }
+                        Rectangle { width: 250px; }
                     }
                     Flickable {
                         VerticalLayout {
@@ -410,8 +449,16 @@ export component MainWindow inherits Window {
                                     // всё равно что не существует. Оба действия
                                     // настоящие и обратимые — никакой «очистки
                                     // памяти», это placebo и его тут не будет.
+                                    // Зависшее окно — единственное состояние,
+                                    // о котором стоит сообщать; «отвечает»
+                                    // у всех подряд было бы шумом.
+                                    Text {
+                                        text: process.state;
+                                        color: #e0724a;
+                                        font-size: 11px; vertical-alignment: center; width: 92px;
+                                    }
                                     Rectangle {
-                                        width: 164px;
+                                        width: 250px;
                                         HorizontalLayout {
                                             spacing: 4px;
                                             alignment: end;
@@ -422,6 +469,22 @@ export component MainWindow inherits Window {
                                             RowButton {
                                                 label: "Память ↓";
                                                 pressed => { root.apply-action(process.pid, 1); }
+                                            }
+                                            // Завершение необратимо, поэтому
+                                            // спрашиваем второй раз прямо на
+                                            // кнопке — модальное окно тут
+                                            // только мешало бы.
+                                            RowButton {
+                                                label: root.confirming == process.pid ? "Точно?" : "Завершить";
+                                                danger: true;
+                                                pressed => {
+                                                    if (root.confirming == process.pid) {
+                                                        root.confirming = "";
+                                                        root.terminate-process(process.pid);
+                                                    } else {
+                                                        root.confirming = process.pid;
+                                                    }
+                                                }
                                             }
                                         }
                                     }
@@ -500,6 +563,52 @@ export component MainWindow inherits Window {
                 }
             }
         }
+    }
+
+    }
+
+    // Полосы захвата по периметру. Ширина в четыре пиксела — как у обычной
+    // рамки Windows: достаточно, чтобы попасть мышью, и не настолько много,
+    // чтобы мешать нажимать на содержимое у края.
+    ResizeGrip {
+        edge: 0; shape: MouseCursor.ew-resize;
+        x: 0; y: 4px; width: 4px; height: parent.height - 8px;
+        grabbed(edge) => { root.resize-window(edge); }
+    }
+    ResizeGrip {
+        edge: 1; shape: MouseCursor.ew-resize;
+        x: parent.width - 4px; y: 4px; width: 4px; height: parent.height - 8px;
+        grabbed(edge) => { root.resize-window(edge); }
+    }
+    ResizeGrip {
+        edge: 2; shape: MouseCursor.ns-resize;
+        x: 4px; y: 0; width: parent.width - 8px; height: 4px;
+        grabbed(edge) => { root.resize-window(edge); }
+    }
+    ResizeGrip {
+        edge: 5; shape: MouseCursor.ns-resize;
+        x: 4px; y: parent.height - 4px; width: parent.width - 8px; height: 4px;
+        grabbed(edge) => { root.resize-window(edge); }
+    }
+    ResizeGrip {
+        edge: 3; shape: MouseCursor.nwse-resize;
+        x: 0; y: 0; width: 8px; height: 8px;
+        grabbed(edge) => { root.resize-window(edge); }
+    }
+    ResizeGrip {
+        edge: 4; shape: MouseCursor.nesw-resize;
+        x: parent.width - 8px; y: 0; width: 8px; height: 8px;
+        grabbed(edge) => { root.resize-window(edge); }
+    }
+    ResizeGrip {
+        edge: 6; shape: MouseCursor.nesw-resize;
+        x: 0; y: parent.height - 8px; width: 8px; height: 8px;
+        grabbed(edge) => { root.resize-window(edge); }
+    }
+    ResizeGrip {
+        edge: 7; shape: MouseCursor.nwse-resize;
+        x: parent.width - 8px; y: parent.height - 8px; width: 8px; height: 8px;
+        grabbed(edge) => { root.resize-window(edge); }
     }
 
     }

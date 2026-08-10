@@ -337,3 +337,130 @@ mod tests {
         );
     }
 }
+
+/// Процессы, у которых есть видимое зависшее окно.
+///
+/// «Не отвечает» в диспетчере задач — это про окна, а не про процесс:
+/// Windows считает окно зависшим, если оно больше пяти секунд не забирает
+/// сообщения из своей очереди. Процесс при этом жив и может честно считать
+/// что-то в фоне — поэтому формулировка «окно не отвечает», а не «завис».
+///
+/// Возвращаем сразу все зависшие процессы за один обход. Спрашивать про
+/// каждый процесс отдельно нельзя: `EnumWindows` в любом случае обходит все
+/// окна системы, и на трёхстах процессах это превратилось бы в трёхсоткратно
+/// лишнюю работу каждый тик.
+pub fn hung_process_ids() -> Vec<u32> {
+    use windows_sys::Win32::Foundation::{HWND, LPARAM};
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        EnumWindows, GetWindowThreadProcessId, IsHungAppWindow, IsWindowVisible,
+    };
+
+    // SAFETY: вызывается только из EnumWindows ниже, куда передан указатель
+    // на живой Vec, лежащий на стеке этой функции.
+    unsafe extern "system" fn visit(hwnd: HWND, param: LPARAM) -> i32 {
+        let found = &mut *(param as *mut Vec<u32>);
+
+        // Невидимые окна пользователю не показываются, и их зависание
+        // ему ни о чём не говорит.
+        if IsWindowVisible(hwnd) == 0 || IsHungAppWindow(hwnd) == 0 {
+            return 1;
+        }
+
+        let mut pid: u32 = 0;
+        GetWindowThreadProcessId(hwnd, &mut pid);
+        if pid != 0 && !found.contains(&pid) {
+            found.push(pid);
+        }
+        1
+    }
+
+    let mut found: Vec<u32> = Vec::new();
+    unsafe { EnumWindows(Some(visit), &mut found as *mut Vec<u32> as LPARAM) };
+    found
+}
+
+/// Есть ли зависшее окно у одного процесса.
+pub fn has_hung_window(pid: u32) -> bool {
+    hung_process_ids().contains(&pid)
+}
+
+/// Завершает процесс.
+///
+/// Единственная необратимая операция во всём Bamboo, и потому стоит особняком
+/// от механизма действий: у действия по определению есть обратный рецепт,
+/// а поднять завершённый процесс нельзя. Несохранённые данные пропадут —
+/// ровно как при завершении из диспетчера задач.
+///
+/// Поэтому вызывающий обязан спросить человека, а политика — не пустить
+/// сюда системные процессы.
+pub fn terminate(pid: u32) -> Result<()> {
+    use windows_sys::Win32::Foundation::CloseHandle;
+    use windows_sys::Win32::System::Threading::{OpenProcess, TerminateProcess, PROCESS_TERMINATE};
+
+    if pid == 0 {
+        return Err(Error::Unsupported("процесс Idle завершить нельзя"));
+    }
+
+    let handle = unsafe { OpenProcess(PROCESS_TERMINATE, 0, pid) };
+    if handle.is_null() {
+        return Err(Error::Win32 {
+            call: "OpenProcess(завершение)",
+            code: unsafe { windows_sys::Win32::Foundation::GetLastError() },
+        });
+    }
+
+    // Код выхода 1: тот же, что ставит диспетчер задач при завершении.
+    let ok = unsafe { TerminateProcess(handle, 1) };
+    let code = unsafe { windows_sys::Win32::Foundation::GetLastError() };
+    unsafe { CloseHandle(handle) };
+
+    if ok == 0 {
+        return Err(Error::Win32 {
+            call: "TerminateProcess",
+            code,
+        });
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod liveness_tests {
+    use super::*;
+
+    #[test]
+    fn our_own_process_is_not_hung() {
+        // Мы прямо сейчас работаем, значит зависших окон у нас нет.
+        assert!(!has_hung_window(std::process::id()));
+    }
+
+    #[test]
+    fn a_process_without_windows_is_not_hung() {
+        // System (PID 4) окон не имеет — зависать нечему.
+        assert!(!has_hung_window(4));
+    }
+
+    #[test]
+    fn a_missing_process_is_not_reported_as_hung() {
+        // Несуществующий PID: окон нет, значит и зависания нет.
+        assert!(!has_hung_window(0xFFFF_FFF0));
+    }
+
+    #[test]
+    fn idle_cannot_be_terminated() {
+        // Явная защита от нуля: OpenProcess(0) вернул бы дескриптор
+        // системного процесса, а не ошибку.
+        assert!(terminate(0).is_err());
+    }
+
+    #[test]
+    fn terminating_a_missing_process_fails_cleanly() {
+        assert!(terminate(0xFFFF_FFF0).is_err());
+    }
+
+    #[test]
+    fn terminating_a_protected_process_is_refused_by_windows() {
+        // System завершить нельзя даже администратору: ядро не даст.
+        // Проверяем, что мы возвращаем ошибку, а не делаем вид, что вышло.
+        assert!(terminate(4).is_err());
+    }
+}

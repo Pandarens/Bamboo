@@ -137,6 +137,70 @@ pub fn begin_drag(hwnd: isize) -> Result<()> {
     Ok(())
 }
 
+/// За какой край тянут окно.
+///
+/// Значения совпадают с кодами зон окна из Windows (`HTLEFT` и соседние):
+/// мы их прямо и передаём системе, поэтому переводить ничего не нужно.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ResizeEdge {
+    Left,
+    Right,
+    Top,
+    TopLeft,
+    TopRight,
+    Bottom,
+    BottomLeft,
+    BottomRight,
+}
+
+impl ResizeEdge {
+    /// Код края по номеру из интерфейса.
+    pub fn from_index(index: i32) -> Option<ResizeEdge> {
+        match index {
+            0 => Some(ResizeEdge::Left),
+            1 => Some(ResizeEdge::Right),
+            2 => Some(ResizeEdge::Top),
+            3 => Some(ResizeEdge::TopLeft),
+            4 => Some(ResizeEdge::TopRight),
+            5 => Some(ResizeEdge::Bottom),
+            6 => Some(ResizeEdge::BottomLeft),
+            7 => Some(ResizeEdge::BottomRight),
+            _ => None,
+        }
+    }
+
+    fn hit_code(self) -> usize {
+        // Значения из WinUser.h: HTLEFT = 10 и далее по порядку.
+        match self {
+            ResizeEdge::Left => 10,
+            ResizeEdge::Right => 11,
+            ResizeEdge::Top => 12,
+            ResizeEdge::TopLeft => 13,
+            ResizeEdge::TopRight => 14,
+            ResizeEdge::Bottom => 15,
+            ResizeEdge::BottomLeft => 16,
+            ResizeEdge::BottomRight => 17,
+        }
+    }
+}
+
+/// Начинает изменение размера окна за указанный край.
+///
+/// У окна без системной рамки нет и системных границ, за которые его тянут.
+/// Возвращаем их тем же приёмом, что и перетаскивание за шапку: говорим
+/// Windows, что нажатие пришлось на край окна, и дальше размер меняет сама
+/// система — с правильным курсором, привязкой к краям экрана и всем прочим.
+pub fn begin_resize(hwnd: isize, edge: ResizeEdge) -> Result<()> {
+    if hwnd == 0 {
+        return Err(Error::Unsupported("окно ещё не создано"));
+    }
+    unsafe {
+        ReleaseCapture();
+        SendMessageW(hwnd as HWND, WM_NCLBUTTONDOWN, edge.hit_code(), 0);
+    }
+    Ok(())
+}
+
 const fn size_of_i32() -> u32 {
     core::mem::size_of::<i32>() as u32
 }
@@ -150,5 +214,43 @@ mod tests {
         assert!(apply_widget_styles(0).is_err());
         assert!(apply_windows11_look(0).is_err());
         assert!(set_topmost(0, true).is_err());
+    }
+}
+
+#[cfg(test)]
+mod resize_tests {
+    use super::*;
+
+    #[test]
+    fn edge_codes_match_windows_hit_test_zones() {
+        // Коды должны совпадать с WinUser.h: HTLEFT = 10 и далее подряд.
+        assert_eq!(ResizeEdge::Left.hit_code(), 10);
+        assert_eq!(ResizeEdge::Right.hit_code(), 11);
+        assert_eq!(ResizeEdge::Top.hit_code(), 12);
+        assert_eq!(ResizeEdge::BottomRight.hit_code(), 17);
+    }
+
+    #[test]
+    fn every_index_maps_to_a_distinct_edge() {
+        let mut codes: Vec<usize> = (0..8)
+            .map(|index| {
+                ResizeEdge::from_index(index)
+                    .expect("край должен разбираться")
+                    .hit_code()
+            })
+            .collect();
+        codes.sort_unstable();
+        codes.dedup();
+        assert_eq!(codes.len(), 8, "два края получили один код");
+    }
+
+    #[test]
+    fn an_unknown_index_is_rejected() {
+        assert_eq!(ResizeEdge::from_index(99), None);
+    }
+
+    #[test]
+    fn resizing_a_missing_window_is_refused() {
+        assert!(begin_resize(0, ResizeEdge::Right).is_err());
     }
 }

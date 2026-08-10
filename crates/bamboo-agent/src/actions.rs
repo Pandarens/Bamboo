@@ -103,9 +103,49 @@ pub fn apply(pid: u32, image_name: &str, what: RowAction) -> String {
     }
 }
 
+/// Завершает процесс по требованию пользователя.
+///
+/// Стоит особняком от `apply` и намеренно не идёт через журнал действий:
+/// журнал существует ради отката, а поднять завершённый процесс нельзя.
+/// Это единственная необратимая операция в Bamboo, и подаётся она именно
+/// так — с подтверждением в интерфейсе и предупреждением о потере
+/// несохранённых данных.
+///
+/// Системные процессы защищены тем же неизменяемым списком, что и все
+/// остальные действия: убить `lsass.exe` через Bamboo не выйдет.
+pub fn terminate(pid: u32, image_name: &str) -> String {
+    let facts = ProcessFacts {
+        image_name,
+        session_id: 1,
+        ..Default::default()
+    };
+    if let Some(reason) = bamboo_policy::immutable_reason(&facts) {
+        return format!("{image_name}: завершать нельзя — {reason}");
+    }
+
+    match bamboo_sys::terminate_process(pid) {
+        Ok(()) => format!("{image_name} (PID {pid}) завершён. Это действие необратимо."),
+        Err(error) => format!("{image_name}: завершить не удалось — {error}"),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_system_process_cannot_be_terminated() {
+        // Неизменяемый список обязан отсечь запрос до системного вызова.
+        let note = terminate(4, "lsass.exe");
+        assert!(note.contains("завершать нельзя"), "получили: {note}");
+    }
+
+    #[test]
+    fn terminating_reports_failure_instead_of_pretending() {
+        // Процесса с таким PID нет — операция обязана честно не удаться.
+        let note = terminate(0xFFFF_FFF0, "нет-такого.exe");
+        assert!(note.contains("не удалось"), "получили: {note}");
+    }
 
     #[test]
     fn action_codes_map_to_real_actions() {

@@ -38,7 +38,10 @@ pub use cpu::CpuTimesBuffer;
 pub use eventlog::daily_error_count;
 pub use memory::{memory_stat, system_counts, SystemCounts};
 pub use power::{power_status, PowerSource, PowerStatus};
-pub use process::{ProcessBuffer, ProcessIter, RawProcess};
+pub use process::{
+    has_hung_window, hung_process_ids, terminate as terminate_process, ProcessBuffer, ProcessIter,
+    RawProcess,
+};
 pub use service::{
     install as install_service, service_start, set_service_start, uninstall as uninstall_service,
     ServiceStart, StopSignal,

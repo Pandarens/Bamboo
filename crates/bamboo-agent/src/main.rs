@@ -90,6 +90,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let drives_model: ModelRc<DriveRow> = ModelRc::new(VecModel::from(Vec::new()));
     let wakes_model: ModelRc<WakeRow> = ModelRc::new(VecModel::from(Vec::new()));
     let journal_model: ModelRc<JournalRow> = ModelRc::new(VecModel::from(Vec::new()));
+    // Размер задаём явно: у окна без системной рамки Slint берёт минимальный,
+    // а не предпочтительный, и таблица процессов оказывается сжатой.
+    main_window
+        .window()
+        .set_size(slint::PhysicalSize::new(1080, 640));
     main_window.set_processes(main_processes.clone());
     main_window.set_drives(drives_model.clone());
     main_window.set_wakes(wakes_model.clone());
@@ -162,6 +167,49 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         });
     }
 
+    // Завершение процесса. Необратимо, поэтому интерфейс спрашивает дважды,
+    // а сама операция идёт мимо журнала действий: откатывать тут нечего.
+    {
+        let weak = main_window.as_weak();
+        let snapshot = last_snapshot.clone();
+        let rows = main_processes.clone();
+        main_window.on_terminate_process(move |pid| {
+            let Some(win) = weak.upgrade() else {
+                return;
+            };
+            let Ok(pid) = pid.parse::<u32>() else {
+                return;
+            };
+
+            let name = snapshot
+                .borrow()
+                .as_ref()
+                .and_then(|snapshot| {
+                    snapshot
+                        .top
+                        .iter()
+                        .find(|line| line.pid == pid)
+                        .map(|line| line.name.clone())
+                })
+                .unwrap_or_default();
+            if name.is_empty() {
+                win.set_action_note(SharedString::from("Процесс уже завершился."));
+                return;
+            }
+
+            win.set_action_note(SharedString::from(actions::terminate(pid, &name)));
+
+            // Список сразу перестраиваем: строки завершённого процесса
+            // в таблице быть не должно, а следующего тика ждать секунду.
+            if let Some(snapshot) = snapshot.borrow_mut().as_mut() {
+                snapshot.top.retain(|line| line.pid != pid);
+            }
+            if let Some(snapshot) = snapshot.borrow().as_ref() {
+                fill_processes(&win, snapshot, &rows);
+            }
+        });
+    }
+
     // Своя рамка окна: сворачивание, закрытие и перетаскивание за шапку.
     {
         let weak = main_window.as_weak();
@@ -186,6 +234,27 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         main_window.on_drag_window(move || {
             if let Some(win) = weak.upgrade() {
                 let _ = bamboo_sys::window::begin_drag(main_window_handle(&win));
+            }
+        });
+    }
+    {
+        let weak = main_window.as_weak();
+        main_window.on_resize_window(move |edge| {
+            let Some(win) = weak.upgrade() else {
+                return;
+            };
+            let Some(edge) = bamboo_sys::window::ResizeEdge::from_index(edge) else {
+                return;
+            };
+            let _ = bamboo_sys::window::begin_resize(main_window_handle(&win), edge);
+        });
+    }
+    // Виджет тоже без рамки — его тянут за строку состояния.
+    {
+        let weak = widget.as_weak();
+        widget.on_drag_window(move || {
+            if let Some(widget) = weak.upgrade() {
+                let _ = bamboo_sys::window::begin_drag(window_handle(&widget));
             }
         });
     }
@@ -354,6 +423,8 @@ fn fill_processes(
                 badge: SharedString::from(row.badge),
                 growth: SharedString::from(row.growth),
                 leak: row.leak,
+                state: SharedString::from(row.state),
+                hung: row.hung,
             })
             .collect();
     replace(processes, rows);

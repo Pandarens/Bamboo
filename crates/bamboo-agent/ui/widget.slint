@@ -46,6 +46,9 @@ component Card inherits Rectangle {
 
 export component Widget inherits Window {
     title: "Bamboo";
+    // Без системной рамки: виджет — не приложение, и заголовок Windows
+    // с кнопками ему не нужен. Закрывается он через меню в трее.
+    no-frame: true;
     width: 340px;
     height: 420px;
     background: #141b18;
@@ -62,21 +65,34 @@ export component Widget inherits Window {
     in property <bool> pinned: false;
 
     callback toggle-pin();
+    // Тянуть виджет можно за строку состояния: своей шапки у него нет.
+    callback drag-window();
 
     VerticalLayout {
         padding: 12px;
         spacing: 10px;
 
-        // Строка состояния
+        // Строка состояния. Она же ручка для перетаскивания.
         HorizontalLayout {
             spacing: 8px;
 
-            Text {
-                text: root.status;
-                font-size: 11px;
-                color: #7d8f86;
-                vertical-alignment: center;
+            Rectangle {
                 horizontal-stretch: 1;
+                TouchArea {
+                    pointer-event(event) => {
+                        if (event.button == PointerEventButton.left
+                            && event.kind == PointerEventKind.down) {
+                            root.drag-window();
+                        }
+                    }
+                }
+                Text {
+                    text: root.status;
+                    font-size: 11px;
+                    color: #7d8f86;
+                    vertical-alignment: center;
+                    width: 100%;
+                }
             }
 
             Rectangle {

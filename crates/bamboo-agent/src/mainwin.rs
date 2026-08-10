@@ -31,6 +31,10 @@ pub struct ProcessRow {
     /// Достаточно ли наблюдений, чтобы называть рост подозрением на утечку.
     /// От этого зависит только цвет строки — текст честен в обоих случаях.
     pub leak: bool,
+    /// «Не отвечает», если окно процесса перестало разбирать сообщения.
+    /// У процессов без окон пусто: зависать там нечему.
+    pub state: String,
+    pub hung: bool,
 }
 
 /// По какому столбцу сортировать таблицу процессов.
@@ -42,6 +46,9 @@ pub enum SortColumn {
     Memory,
     Threads,
     Growth,
+    /// Зависшие окна — наверх: если что-то не отвечает, это первое,
+    /// что человек хочет увидеть.
+    State,
 }
 
 impl SortColumn {
@@ -54,6 +61,7 @@ impl SortColumn {
             3 => SortColumn::Memory,
             4 => SortColumn::Threads,
             5 => SortColumn::Growth,
+            6 => SortColumn::State,
             _ => SortColumn::Cpu,
         }
     }
@@ -85,6 +93,7 @@ pub fn process_rows(snapshot: &Snapshot, sort: SortColumn, descending: bool) -> 
         SortColumn::Threads => lines.sort_by_key(|line| line.threads),
         // Процессы без роста идут как нули и остаются в конце при убывании.
         SortColumn::Growth => lines.sort_by(|a, b| growth_rate(a).total_cmp(&growth_rate(b))),
+        SortColumn::State => lines.sort_by_key(|line| line.hung),
     }
     if descending {
         lines.reverse();
@@ -102,6 +111,14 @@ pub fn process_rows(snapshot: &Snapshot, sort: SortColumn, descending: bool) -> 
             badge: line.badge.clone(),
             growth: describe_growth(line),
             leak: line.memory_growth.is_some_and(|trend| trend.suspected_leak),
+            // Про отвечающий процесс не пишем ничего: строка «отвечает»
+            // у восьмидесяти процессов — это шум, а не сведения.
+            state: if line.hung {
+                "не отвечает".to_string()
+            } else {
+                String::new()
+            },
+            hung: line.hung,
         })
         .collect()
 }
@@ -310,6 +327,7 @@ mod tests {
             memory: Bytes::from_mib(mib),
             badge: String::new(),
             memory_growth: None,
+            hung: false,
         }
     }
 
@@ -388,6 +406,22 @@ mod tests {
         assert_eq!(rows.len(), VISIBLE_ROWS, "список не обрезан");
         // Первым обязан быть самый прожорливый из всех, а не из первых.
         assert_eq!(rows[0].name, format!("p{}.exe", VISIBLE_ROWS + 39));
+    }
+
+    #[test]
+    fn hung_processes_can_be_brought_to_the_top() {
+        let mut snapshot = snapshot();
+        snapshot.top[1].hung = true; // Alpha.exe не отвечает
+
+        let rows = process_rows(&snapshot, SortColumn::State, true);
+        assert_eq!(
+            rows[0].name, "Alpha.exe",
+            "зависший процесс должен быть первым"
+        );
+        assert_eq!(rows[0].state, "не отвечает");
+        assert!(rows[0].hung);
+        // Про отвечающие процессы ничего не пишем — это был бы шум.
+        assert!(rows[1].state.is_empty());
     }
 
     #[test]
