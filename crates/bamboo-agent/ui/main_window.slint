@@ -119,6 +119,8 @@ component ColumnHeader inherits Rectangle {
     in property <string> label;
     in property <bool> active;
     in property <bool> descending;
+    // Числовые столбцы прижимаем вправо — как и сами числа под ними.
+    in property <bool> align-right;
     callback chosen();
 
     height: 20px;
@@ -130,6 +132,7 @@ component ColumnHeader inherits Rectangle {
     }
     HorizontalLayout {
         padding-left: 4px; padding-right: 4px; spacing: 3px;
+        alignment: root.align-right ? end : start;
         Text {
             text: root.label;
             font-size: 11px;
@@ -724,48 +727,48 @@ export component MainWindow inherits Window {
                         font-size: 11px; color: #62736a; wrap: word-wrap;
                     }
                     HorizontalLayout {
-                        padding-left: 4px; padding-right: 4px; spacing: 4px;
+                        padding-left: 10px; padding-right: 6px; spacing: 6px;
                         ColumnHeader {
-                            label: "Процесс"; horizontal-stretch: 1; min-width: 150px;
+                            label: "Процесс"; horizontal-stretch: 1; min-width: 160px;
                             active: root.sort-column == 0; descending: root.sort-descending;
                             chosen => { root.sort-by(0); }
                         }
                         ColumnHeader {
-                            label: "PID"; width: 64px;
+                            label: "PID"; width: 60px;
                             active: root.sort-column == 1; descending: root.sort-descending;
                             chosen => { root.sort-by(1); }
                         }
                         ColumnHeader {
-                            label: "CPU"; width: 64px;
+                            label: "CPU"; width: 58px; align-right: true;
                             active: root.sort-column == 2; descending: root.sort-descending;
                             chosen => { root.sort-by(2); }
                         }
                         ColumnHeader {
-                            label: "Память"; width: 90px;
+                            label: "Память"; width: 86px; align-right: true;
                             active: root.sort-column == 3; descending: root.sort-descending;
                             chosen => { root.sort-by(3); }
                         }
                         ColumnHeader {
-                            label: root.grouped ? "Процессов" : "Потоки"; width: 74px;
+                            label: root.grouped ? "Процессов" : "Потоки"; width: 72px; align-right: true;
                             active: root.sort-column == 4; descending: root.sort-descending;
                             chosen => { root.sort-by(4); }
                         }
                         ColumnHeader {
-                            label: "Рост памяти"; width: 110px;
+                            label: "Рост памяти"; width: 104px; align-right: true;
                             active: root.sort-column == 5; descending: root.sort-descending;
                             chosen => { root.sort-by(5); }
                         }
                         ColumnHeader {
-                            label: "Диск"; width: 92px;
+                            label: "Диск"; width: 88px; align-right: true;
                             active: root.sort-column == 7; descending: root.sort-descending;
                             chosen => { root.sort-by(7); }
                         }
                         Text {
-                            text: "Изменения"; width: 118px;
+                            text: "Изменения"; width: 112px;
                             font-size: 11px; color: #7d8f86; vertical-alignment: center;
                         }
                         ColumnHeader {
-                            label: "Состояние"; width: 92px;
+                            label: "Состояние"; width: 88px;
                             active: root.sort-column == 6; descending: root.sort-descending;
                             chosen => { root.sort-by(6); }
                         }
@@ -774,101 +777,123 @@ export component MainWindow inherits Window {
                     Flickable {
                         VerticalLayout {
                             spacing: 2px;
-                            for process in root.processes: Rectangle {
-                                height: 30px;
-                                // Процесс внутри группы отличаем фоном и полоской
-                                // слева, а не отступом: отступ читался как
-                                // «подпроцесс», хотя это равноправный процесс
-                                // той же программы.
-                                background: row-touch.has-hover
-                                    ? (process.is-member ? #1b262f : #22302a)
-                                    : (process.is-member ? #161f26 : #1a231f);
+                            for process[index] in root.processes: Rectangle {
+                                height: 32px;
+                                // Подсветку строки НЕ завязываем на её TouchArea.
+                                // Стоит навести мышь на кнопку, как та перехватывает
+                                // наведение, строка его теряет и гаснет прямо под
+                                // курсором. Поэтому фон ровный, а читаемость даёт
+                                // чередование строк.
+                                background: process.is-member
+                                    ? #16202a
+                                    : (Math.mod(index, 2) == 0 ? #1b2521 : #18211d);
                                 border-radius: 5px;
 
-                                row-touch := TouchArea { }
-
-                                // Полоска слева у процессов группы: видно,
-                                // что строка относится к программе выше.
+                                // Процесс внутри группы отмечаем полоской слева.
                                 if process.is-member: Rectangle {
-                                    x: 0; y: 4px;
+                                    x: 0; y: 5px;
                                     width: 3px;
-                                    height: parent.height - 8px;
-                                    background: #3f6f8f;
+                                    height: parent.height - 10px;
+                                    background: #4a86c9;
                                     border-radius: 2px;
                                 }
 
                                 HorizontalLayout {
-                                    padding-left: 8px; padding-right: 8px; spacing: 4px;
+                                    padding-left: 10px; padding-right: 6px; spacing: 6px;
+
+                                    // Имя. У группы оно же и кнопка разворота,
+                                    // поэтому подсвечивается при наведении — видно,
+                                    // что по нему можно щёлкнуть.
                                     Rectangle {
                                         horizontal-stretch: 1;
-                                        min-width: 150px;
-                                        // Щелчок по имени группы разворачивает её.
-                                        // У одиночного процесса разворачивать нечего.
-                                        if process.is-group: TouchArea {
-                                            mouse-cursor: MouseCursor.pointer;
+                                        min-width: 160px;
+                                        background: (process.is-group && name-touch.has-hover)
+                                            ? #24332c : transparent;
+                                        border-radius: 4px;
+
+                                        name-touch := TouchArea {
+                                            enabled: process.is-group;
+                                            mouse-cursor: process.is-group
+                                                ? MouseCursor.pointer
+                                                : MouseCursor.default;
                                             clicked => { root.toggle-group(process.name); }
                                         }
-                                        Text {
-                                            // Стрелка и отступ — дело интерфейса:
-                                            // процессы внутри группы сдвигаем вправо,
-                                            // группе показываем её состояние.
-                                            // У процесса группы имя то же самое,
-                                            // повторять его двадцать раз незачем —
-                                            // полезнее номер процесса.
-                                            text: process.is-member
-                                                ? "процесс " + process.pid
-                                                : (process.is-group
-                                                    ? (process.expanded ? "▾ " : "▸ ") + process.name
-                                                    : process.name);
-                                            color: process.is-member ? #b6c6bd : #e8f0ec;
-                                            font-size: 12px;
-                                            vertical-alignment: center;
-                                            width: 100%;
-                                            overflow: elide;
+                                        HorizontalLayout {
+                                            padding-left: 4px; spacing: 5px;
+                                            // Стрелка отдельным элементом: у неё своя
+                                            // ширина, и имена не разъезжаются.
+                                            Text {
+                                                text: process.is-group
+                                                    ? (process.expanded ? "\u{25bc}" : "\u{25b6}")
+                                                    : "";
+                                                font-size: 10px;
+                                                color: name-touch.has-hover ? #ffffff : #7d8f86;
+                                                vertical-alignment: center;
+                                                width: 10px;
+                                            }
+                                            Text {
+                                                text: process.is-member
+                                                    ? "PID " + process.pid
+                                                    : process.name;
+                                                color: process.is-member ? #9fb3c8 : #e8f0ec;
+                                                font-size: 12px;
+                                                font-weight: process.is-group ? 700 : 400;
+                                                vertical-alignment: center;
+                                                horizontal-stretch: 1;
+                                                overflow: elide;
+                                            }
                                         }
                                     }
-                                    Text { text: process.pid; color: #b6c6bd; font-size: 12px; vertical-alignment: center; width: 64px; }
-                                    Text { text: process.cpu; color: #b6c6bd; font-size: 12px; vertical-alignment: center; width: 64px; }
-                                    Text { text: process.memory; color: #b6c6bd; font-size: 12px; vertical-alignment: center; width: 90px; }
+
+                                    Text {
+                                        text: process.is-member ? "" : process.pid;
+                                        color: #8a9b92; font-size: 12px;
+                                        vertical-alignment: center; width: 60px;
+                                    }
+                                    // Числа по правому краю: разряды встают под
+                                    // разрядами, и колонку можно читать сверху вниз.
+                                    Text {
+                                        text: process.cpu;
+                                        color: #d5e2da; font-size: 12px;
+                                        vertical-alignment: center;
+                                        horizontal-alignment: right; width: 58px;
+                                    }
+                                    Text {
+                                        text: process.memory;
+                                        color: #d5e2da; font-size: 12px;
+                                        vertical-alignment: center;
+                                        horizontal-alignment: right; width: 86px;
+                                    }
                                     Text {
                                         text: process.threads;
-                                        color: #b6c6bd; font-size: 12px;
-                                        vertical-alignment: center; width: 74px;
+                                        color: #8a9b92; font-size: 12px;
+                                        vertical-alignment: center;
+                                        horizontal-alignment: right; width: 72px;
                                     }
-                                    // Подозрение на утечку выделяем цветом; измеренная
-                                    // скорость без вердикта остаётся нейтральной.
                                     Text {
                                         text: process.growth;
-                                        color: process.leak ? #e0a44a : #7d8f86;
-                                        font-size: 11px; vertical-alignment: center; width: 110px;
+                                        color: process.leak ? #e0a44a : #8a9b92;
+                                        font-size: 11px; vertical-alignment: center;
+                                        horizontal-alignment: right; width: 104px;
                                     }
-                                    // Действия видны всегда, а не по наведению:
-                                    // кнопку, которую надо сперва найти мышью,
-                                    // всё равно что не существует. Оба действия
-                                    // настоящие и обратимые — никакой «очистки
-                                    // памяти», это placebo и его тут не будет.
                                     Text {
                                         text: process.disk;
                                         color: #7fb0d8;
-                                        font-size: 11px; vertical-alignment: center; width: 92px;
+                                        font-size: 11px; vertical-alignment: center;
+                                        horizontal-alignment: right; width: 88px;
                                     }
-                                    // Что уже применено к процессу: чтобы человек
-                                    // видел свои прошлые нажатия, а не применял
-                                    // экономичный режим второй раз.
                                     Text {
                                         text: process.applied;
                                         color: #6fb58a;
-                                        font-size: 11px; vertical-alignment: center; width: 118px;
-                                        overflow: elide;
+                                        font-size: 11px; vertical-alignment: center;
+                                        width: 112px; overflow: elide;
                                     }
-                                    // Зависшее окно — единственное состояние,
-                                    // о котором стоит сообщать; «отвечает»
-                                    // у всех подряд было бы шумом.
                                     Text {
                                         text: process.state;
                                         color: #e0724a;
-                                        font-size: 11px; vertical-alignment: center; width: 92px;
+                                        font-size: 11px; vertical-alignment: center; width: 88px;
                                     }
+
                                     Rectangle {
                                         width: 316px;
                                         HorizontalLayout {
@@ -880,24 +905,24 @@ export component MainWindow inherits Window {
                                                 pressed => { root.apply-action(process.pid, 0); }
                                             }
                                             RowButton {
-                                                label: "Память ↓";
+                                                label: "Память \u{2193}";
                                                 pressed => { root.apply-action(process.pid, 1); }
                                             }
                                             RowButton {
-                                                label: process.throttled ? "Диск ✓" : "Диск ↓";
+                                                label: process.throttled
+                                                    ? "Диск \u{2713}"
+                                                    : "Диск \u{2193}";
                                                 pressed => { root.toggle-io-limit(process.pid); }
                                             }
-                                            // Завершение необратимо, поэтому
-                                            // спрашиваем второй раз прямо на
-                                            // кнопке — модальное окно тут
-                                            // только мешало бы.
+                                            // Завершение необратимо, поэтому кнопка
+                                            // спрашивает второй раз прямо на себе:
+                                            // модальное окно тут только мешало бы.
                                             RowButton {
-                                                // У группы кнопка завершает все её процессы
-                                                // разом: закрывать двадцать вкладок по одной
-                                                // никто не станет.
                                                 label: root.confirming == process.pid
                                                     ? "Точно?"
-                                                    : (process.is-group ? "Завершить все" : "Завершить");
+                                                    : (process.is-group
+                                                        ? "Завершить все"
+                                                        : "Завершить");
                                                 danger: true;
                                                 pressed => {
                                                     if (root.confirming == process.pid) {
@@ -918,6 +943,7 @@ export component MainWindow inherits Window {
                             }
                         }
                     }
+
                     // Сообщение о последнем действии. Если процесс вернулся
                     // из-за службы, рядом появляется кнопка остановки: без
                     // неё совет «разберитесь со службой» остаётся советом.
