@@ -37,6 +37,16 @@ pub struct ProcessRow {
     pub hung: bool,
     /// Нагрузка на диск: «12.4 МБ/с». Пусто, если процесс диск не трогает.
     pub disk: String,
+    /// Строка — группа из нескольких процессов.
+    pub is_group: bool,
+    /// Группа развёрнута. Стрелку рисует интерфейс: данные не должны
+    /// нести в себе оформление.
+    pub expanded: bool,
+    /// Строка — процесс внутри развёрнутой группы.
+    pub is_member: bool,
+    /// Номера всех процессов группы через запятую: по ним завершается
+    /// вся группа разом.
+    pub member_pids: String,
 }
 
 /// По какому столбцу сортировать таблицу процессов.
@@ -94,6 +104,19 @@ pub struct AppGroup {
     pub leak: bool,
     /// Память ведущего процесса — по ней он и выбирается.
     lead_memory: u64,
+    /// Все процессы группы: нужны, чтобы группу можно было развернуть
+    /// и разобраться с ней по одному.
+    pub members: Vec<GroupMember>,
+}
+
+/// Один процесс внутри группы.
+#[derive(Clone, Debug)]
+pub struct GroupMember {
+    pub pid: u32,
+    pub cpu_percent: f32,
+    pub memory: bamboo_core::Bytes,
+    pub disk_per_second: u64,
+    pub hung: bool,
 }
 
 /// Группирует процессы по имени образа.
@@ -113,6 +136,13 @@ pub fn group_by_app(snapshot: &Snapshot) -> Vec<AppGroup> {
         match groups.get_mut(&key) {
             Some(group) => {
                 group.count += 1;
+                group.members.push(GroupMember {
+                    pid: line.pid,
+                    cpu_percent: line.cpu_percent,
+                    memory: line.memory,
+                    disk_per_second: disk,
+                    hung: line.hung,
+                });
                 group.cpu_percent += line.cpu_percent;
                 group.memory = bamboo_core::Bytes(group.memory.as_u64() + line.memory.as_u64());
                 group.disk_per_second = group.disk_per_second.saturating_add(disk);
@@ -137,6 +167,13 @@ pub fn group_by_app(snapshot: &Snapshot) -> Vec<AppGroup> {
                         disk_per_second: disk,
                         lead_pid: line.pid,
                         lead_memory: line.memory.as_u64(),
+                        members: vec![GroupMember {
+                            pid: line.pid,
+                            cpu_percent: line.cpu_percent,
+                            memory: line.memory,
+                            disk_per_second: disk,
+                            hung: line.hung,
+                        }],
                         hung: line.hung,
                         leak: line.memory_growth.is_some_and(|trend| trend.suspected_leak),
                     },
@@ -162,7 +199,12 @@ pub const VISIBLE_ROWS: usize = 80;
 /// Возвращает те же `ProcessRow`, что и обычный список, чтобы таблица
 /// не знала о двух разных режимах: в поле `pid` уезжает ведущий процесс,
 /// к нему и применяются действия.
-pub fn grouped_rows(snapshot: &Snapshot, sort: SortColumn, descending: bool) -> Vec<ProcessRow> {
+pub fn grouped_rows(
+    snapshot: &Snapshot,
+    sort: SortColumn,
+    descending: bool,
+    expanded: &dyn Fn(&str) -> bool,
+) -> Vec<ProcessRow> {
     let mut groups = group_by_app(snapshot);
 
     match sort {
@@ -180,21 +222,18 @@ pub fn grouped_rows(snapshot: &Snapshot, sort: SortColumn, descending: bool) -> 
         groups.reverse();
     }
 
-    groups
-        .into_iter()
-        .take(VISIBLE_ROWS)
-        .map(|group| ProcessRow {
-            name: group.name,
+    let mut rows = Vec::new();
+    for group in groups.into_iter().take(VISIBLE_ROWS) {
+        let open = group.count > 1 && expanded(&group.name);
+
+        rows.push(ProcessRow {
+            name: group.name.clone(),
             pid: group.lead_pid.to_string(),
             cpu: format!("{:.1}%", group.cpu_percent),
             memory: group.memory.to_string(),
             // В режиме групп в колонке потоков полезнее число процессов:
             // сумма потоков у двадцати вкладок ничего не объясняет.
-            threads: if group.count > 1 {
-                format!("{} проц.", group.count)
-            } else {
-                "1 проц.".to_string()
-            },
+            threads: format!("{} проц.", group.count),
             badge: String::new(),
             growth: if group.leak {
                 "утечка?".to_string()
@@ -213,8 +252,56 @@ pub fn grouped_rows(snapshot: &Snapshot, sort: SortColumn, descending: bool) -> 
             } else {
                 String::new()
             },
-        })
-        .collect()
+            is_group: group.count > 1,
+            expanded: open,
+            is_member: false,
+            member_pids: group
+                .members
+                .iter()
+                .map(|member| member.pid.to_string())
+                .collect::<Vec<_>>()
+                .join(","),
+        });
+
+        if !open {
+            continue;
+        }
+
+        // Разворачиваем: внутри группы порядок по памяти, от крупного —
+        // именно крупный процесс обычно и ищут.
+        let mut members = group.members;
+        members.sort_by_key(|member| core::cmp::Reverse(member.memory.as_u64()));
+
+        for member in members {
+            rows.push(ProcessRow {
+                name: group.name.clone(),
+                pid: member.pid.to_string(),
+                cpu: format!("{:.1}%", member.cpu_percent),
+                memory: member.memory.to_string(),
+                threads: String::new(),
+                badge: String::new(),
+                growth: String::new(),
+                leak: false,
+                state: if member.hung {
+                    "не отвечает".to_string()
+                } else {
+                    String::new()
+                },
+                hung: member.hung,
+                disk: if member.disk_per_second >= 1024 {
+                    format!("{}/с", bamboo_core::Bytes(member.disk_per_second))
+                } else {
+                    String::new()
+                },
+                is_group: false,
+                expanded: false,
+                is_member: true,
+                member_pids: String::new(),
+            });
+        }
+    }
+
+    rows
 }
 
 /// Готовит строки процессов из снимка, отсортированные по столбцу.
@@ -262,6 +349,10 @@ pub fn process_rows(snapshot: &Snapshot, sort: SortColumn, descending: bool) -> 
             },
             hung: line.hung,
             disk: describe_disk(line),
+            is_group: false,
+            expanded: false,
+            is_member: false,
+            member_pids: String::new(),
         })
         .collect()
 }
@@ -690,7 +781,7 @@ mod grouping_tests {
 
     #[test]
     fn grouped_rows_sort_by_total_memory() {
-        let rows = grouped_rows(&snapshot(), SortColumn::Memory, true);
+        let rows = grouped_rows(&snapshot(), SortColumn::Memory, true, &|_| false);
         assert_eq!(rows[0].name, "chrome.exe");
         assert_eq!(rows[0].threads, "3 проц.");
         assert_eq!(rows[1].name, "notepad.exe");
@@ -699,7 +790,7 @@ mod grouping_tests {
 
     #[test]
     fn grouped_rows_sort_by_disk() {
-        let rows = grouped_rows(&snapshot(), SortColumn::Disk, true);
+        let rows = grouped_rows(&snapshot(), SortColumn::Disk, true, &|_| false);
         // У Chrome суммарно 3 МБ/с, у блокнота ничего.
         assert_eq!(rows[0].name, "chrome.exe");
         assert!(rows[0].disk.contains("МБ/с"), "{}", rows[0].disk);
@@ -805,4 +896,92 @@ pub fn suggestion_rows(
         .collect();
 
     (rows, note)
+}
+
+#[cfg(test)]
+mod expansion_tests {
+    use super::*;
+    use crate::collector::ProcessLine;
+    use bamboo_core::Bytes;
+
+    fn line(name: &str, pid: u32, mib: u64) -> ProcessLine {
+        ProcessLine {
+            name: name.to_string(),
+            pid,
+            threads: 4,
+            cpu_percent: 1.0,
+            memory: Bytes::from_mib(mib),
+            badge: String::new(),
+            memory_growth: None,
+            hung: false,
+            read_per_second: 0,
+            write_per_second: 0,
+        }
+    }
+
+    fn snapshot() -> Snapshot {
+        Snapshot {
+            top: vec![
+                line("chrome.exe", 100, 100),
+                line("chrome.exe", 101, 300),
+                line("chrome.exe", 102, 200),
+                line("notepad.exe", 200, 50),
+            ],
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn a_collapsed_group_is_one_row() {
+        let rows = grouped_rows(&snapshot(), SortColumn::Memory, true, &|_| false);
+        assert_eq!(rows.len(), 2, "свёрнутыми должны быть две строки");
+        assert!(rows[0].is_group, "chrome — группа");
+        assert!(!rows[1].is_group, "блокнот — одиночка");
+    }
+
+    #[test]
+    fn an_expanded_group_lists_its_processes() {
+        let rows = grouped_rows(&snapshot(), SortColumn::Memory, true, &|name| {
+            name == "chrome.exe"
+        });
+        // Строка группы плюс три её процесса плюс блокнот.
+        assert_eq!(rows.len(), 5);
+        assert_eq!(rows[0].name, "chrome.exe");
+        assert!(rows[0].expanded, "группа должна быть помечена развёрнутой");
+        assert!(rows[1].is_member, "следом должны идти процессы группы");
+
+        // Внутри группы порядок по памяти: крупный процесс ищут первым.
+        assert_eq!(rows[1].pid, "101");
+        assert_eq!(rows[2].pid, "102");
+        assert_eq!(rows[3].pid, "100");
+    }
+
+    #[test]
+    fn a_group_carries_all_its_pids_for_bulk_termination() {
+        let rows = grouped_rows(&snapshot(), SortColumn::Memory, true, &|_| false);
+        let chrome = rows.iter().find(|row| row.is_group).unwrap();
+
+        let pids: Vec<&str> = chrome.member_pids.split(',').collect();
+        assert_eq!(
+            pids.len(),
+            3,
+            "в группе три процесса: {}",
+            chrome.member_pids
+        );
+        for pid in ["100", "101", "102"] {
+            assert!(pids.contains(&pid), "потерян {pid}");
+        }
+    }
+
+    #[test]
+    fn a_lone_process_is_never_marked_as_a_group() {
+        // Разворачивать одиночку нечего, и стрелку рисовать незачем.
+        let rows = grouped_rows(&snapshot(), SortColumn::Memory, true, &|_| true);
+        let notepad = rows
+            .iter()
+            .find(|row| row.name.contains("notepad"))
+            .unwrap();
+        assert!(!notepad.is_group);
+        assert!(notepad.member_pids.contains("200"));
+    }
 }

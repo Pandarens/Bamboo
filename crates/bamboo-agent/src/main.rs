@@ -41,6 +41,13 @@ use std::time::Duration;
 #[cfg(windows)]
 use slint::{ComponentHandle, Model, ModelRc, SharedString, VecModel};
 
+/// Разделитель имён развёрнутых групп.
+///
+/// Символ с кодом 1 в именах процессов не встречается, поэтому годится
+/// как разделитель и не требует экранирования.
+#[cfg(windows)]
+const GROUP_SEPARATOR: char = '\u{1}';
+
 #[cfg(windows)]
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Программный рендерер: GPU-контекст не создаётся вообще (ТЗ, раздел 4.1).
@@ -218,6 +225,98 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             // в таблице быть не должно, а следующего тика ждать секунду.
             if let Some(snapshot) = snapshot.borrow_mut().as_mut() {
                 snapshot.top.retain(|line| line.pid != pid);
+            }
+            if let Some(snapshot) = snapshot.borrow().as_ref() {
+                fill_processes(&win, snapshot, &rows, &limits.borrow());
+            }
+        });
+    }
+
+    // Развернуть или свернуть группу.
+    {
+        let weak = main_window.as_weak();
+        let snapshot = last_snapshot.clone();
+        let limits = io_limits.clone();
+        let rows = main_processes.clone();
+        main_window.on_toggle_group(move |name| {
+            let Some(win) = weak.upgrade() else {
+                return;
+            };
+            // Имя приходит чистым: стрелку и отступ рисует интерфейс.
+            let name = name.to_string();
+
+            let current = win.get_expanded_groups().to_string();
+            let mut open: Vec<String> = current
+                .split(GROUP_SEPARATOR)
+                .filter(|entry| !entry.is_empty())
+                .map(str::to_string)
+                .collect();
+
+            match open.iter().position(|entry| *entry == name) {
+                Some(at) => {
+                    open.remove(at);
+                }
+                None => open.push(name),
+            }
+            win.set_expanded_groups(SharedString::from(open.join(&GROUP_SEPARATOR.to_string())));
+
+            if let Some(snapshot) = snapshot.borrow().as_ref() {
+                fill_processes(&win, snapshot, &rows, &limits.borrow());
+            }
+        });
+    }
+
+    // Завершить всю группу процессов разом.
+    {
+        let weak = main_window.as_weak();
+        let snapshot = last_snapshot.clone();
+        let limits = io_limits.clone();
+        let rows = main_processes.clone();
+        main_window.on_terminate_group(move |pids| {
+            let Some(win) = weak.upgrade() else {
+                return;
+            };
+
+            let wanted: Vec<u32> = pids
+                .split(',')
+                .filter_map(|pid| pid.trim().parse::<u32>().ok())
+                .collect();
+            if wanted.is_empty() {
+                return;
+            }
+
+            // Имя берём у первого найденного: у всех в группе оно одно.
+            let name = snapshot
+                .borrow()
+                .as_ref()
+                .and_then(|snapshot| {
+                    snapshot
+                        .top
+                        .iter()
+                        .find(|line| wanted.contains(&line.pid))
+                        .map(|line| line.name.clone())
+                })
+                .unwrap_or_default();
+
+            let mut done = 0usize;
+            let mut first_failure: Option<String> = None;
+            for pid in &wanted {
+                let note = actions::terminate(*pid, &name);
+                if note.contains("завершён") {
+                    done += 1;
+                } else if first_failure.is_none() {
+                    first_failure = Some(note);
+                }
+            }
+
+            let note = match first_failure {
+                None => format!("{name}: завершено процессов — {done}. Это необратимо."),
+                Some(failure) => format!("{name}: завершено {done} из {}. {failure}", wanted.len()),
+            };
+            win.set_action_note(SharedString::from(note));
+
+            if let Some(snapshot) = snapshot.borrow_mut().as_mut() {
+                snapshot.top.retain(|line| !wanted.contains(&line.pid));
             }
             if let Some(snapshot) = snapshot.borrow().as_ref() {
                 fill_processes(&win, snapshot, &rows, &limits.borrow());
@@ -669,7 +768,12 @@ fn fill_processes(
     // а не на каждую строку: это обращение к базе журнала.
     let applied = actions::AppliedActions::load();
     let prepared = if main.get_grouped() {
-        mainwin::grouped_rows(snapshot, sort, main.get_sort_descending())
+        // Развёрнутые группы держим одной строкой имён: список короткий,
+        // а заводить ради него отдельную модель в окне Slint неудобно.
+        let open = main.get_expanded_groups().to_string();
+        mainwin::grouped_rows(snapshot, sort, main.get_sort_descending(), &|name| {
+            open.split(GROUP_SEPARATOR).any(|entry| entry == name)
+        })
     } else {
         mainwin::process_rows(snapshot, sort, main.get_sort_descending())
     };
@@ -694,6 +798,10 @@ fn fill_processes(
                 disk: SharedString::from(row.disk),
                 throttled,
                 applied: SharedString::from(marks),
+                is_group: row.is_group,
+                expanded: row.expanded,
+                is_member: row.is_member,
+                member_pids: SharedString::from(row.member_pids),
                 pid: SharedString::from(row.pid),
             }
         })

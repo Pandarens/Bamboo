@@ -22,6 +22,14 @@ struct MainProcessRow {
     disk: string,
     // Диску этого процесса мы придержали скорость.
     throttled: bool,
+    // Группа из нескольких процессов.
+    is-group: bool,
+    // Группа развёрнута.
+    expanded: bool,
+    // Процесс внутри развёрнутой группы.
+    is-member: bool,
+    // Номера процессов группы через запятую.
+    member-pids: string,
     // Что Bamboo уже применил: «эконом, память ↓».
     applied: string,
 }
@@ -245,6 +253,9 @@ export component MainWindow inherits Window {
     // Схлопывать процессы одной программы в строку. По умолчанию да:
     // двадцать вкладок Chrome по отдельности мало о чём говорят.
     in-out property <bool> grouped: true;
+    // Имена развёрнутых групп, разделённые символом с кодом 1: он не
+    // встречается в именах процессов, поэтому подойдёт как разделитель.
+    in-out property <string> expanded-groups: "";
     // Что случилось с последним действием — показываем под таблицей.
     in property <string> action-note: "";
 
@@ -261,6 +272,10 @@ export component MainWindow inherits Window {
     callback toggle-io-limit(string);
     // Переключить режим «по программам» / «по процессам».
     callback toggle-grouping();
+    // Развернуть или свернуть группу по имени программы.
+    callback toggle-group(string);
+    // Завершить все процессы группы. Спрашиваем дважды, как и для одного.
+    callback terminate-group(string);
     // PID, для которого сейчас показан вопрос «точно завершить?».
     in-out property <string> confirming: "";
 
@@ -574,7 +589,8 @@ export component MainWindow inherits Window {
                             + "Щёлкните по заголовку столбца, чтобы отсортировать. "
                             + "«Эконом» уводит процесс на энергоэффективные ядра, «Память ↓» "
                             + "понижает приоритет его памяти — оба действия записываются в журнал "
-                            + "и обратимы. «Диск ↓» придерживает скорость диска: полного "
+                            + "и обратимы. Щелчок по имени программы разворачивает её процессы — "
+                            + "тогда их можно завершать по одному. «Диск ↓» придерживает скорость диска: полного "
                             + "запрета не бывает — процесс, которому отказали в чтении, упал бы. "
                             + "«Завершить» — единственное необратимое действие: "
                             + "несохранённые данные пропадут, поэтому кнопка спрашивает второй раз. "
@@ -642,7 +658,31 @@ export component MainWindow inherits Window {
 
                                 HorizontalLayout {
                                     padding-left: 8px; padding-right: 8px; spacing: 4px;
-                                    Text { text: process.name; color: #e8f0ec; font-size: 12px; vertical-alignment: center; horizontal-stretch: 1; min-width: 150px; overflow: elide; }
+                                    Rectangle {
+                                        horizontal-stretch: 1;
+                                        min-width: 150px;
+                                        // Щелчок по имени группы разворачивает её.
+                                        // У одиночного процесса разворачивать нечего.
+                                        if process.is-group: TouchArea {
+                                            mouse-cursor: MouseCursor.pointer;
+                                            clicked => { root.toggle-group(process.name); }
+                                        }
+                                        Text {
+                                            // Стрелка и отступ — дело интерфейса:
+                                            // процессы внутри группы сдвигаем вправо,
+                                            // группе показываем её состояние.
+                                            text: process.is-member
+                                                ? "      " + process.name
+                                                : (process.is-group
+                                                    ? (process.expanded ? "▾ " : "▸ ") + process.name
+                                                    : process.name);
+                                            color: process.is-member ? #b6c6bd : #e8f0ec;
+                                            font-size: 12px;
+                                            vertical-alignment: center;
+                                            width: 100%;
+                                            overflow: elide;
+                                        }
+                                    }
                                     Text { text: process.pid; color: #b6c6bd; font-size: 12px; vertical-alignment: center; width: 64px; }
                                     Text { text: process.cpu; color: #b6c6bd; font-size: 12px; vertical-alignment: center; width: 64px; }
                                     Text { text: process.memory; color: #b6c6bd; font-size: 12px; vertical-alignment: center; width: 90px; }
@@ -703,12 +743,21 @@ export component MainWindow inherits Window {
                                             // кнопке — модальное окно тут
                                             // только мешало бы.
                                             RowButton {
-                                                label: root.confirming == process.pid ? "Точно?" : "Завершить";
+                                                // У группы кнопка завершает все её процессы
+                                                // разом: закрывать двадцать вкладок по одной
+                                                // никто не станет.
+                                                label: root.confirming == process.pid
+                                                    ? "Точно?"
+                                                    : (process.is-group ? "Завершить все" : "Завершить");
                                                 danger: true;
                                                 pressed => {
                                                     if (root.confirming == process.pid) {
                                                         root.confirming = "";
-                                                        root.terminate-process(process.pid);
+                                                        if (process.is-group) {
+                                                            root.terminate-group(process.member-pids);
+                                                        } else {
+                                                            root.terminate-process(process.pid);
+                                                        }
                                                     } else {
                                                         root.confirming = process.pid;
                                                     }
