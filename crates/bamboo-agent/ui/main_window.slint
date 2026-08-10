@@ -244,6 +244,8 @@ export component MainWindow inherits Window {
     in property <string> disk-pressure: "";
     // Объяснение работы ядра с диском: тот самый случай «виноват System».
     in property <string> system-io: "";
+    // Игровой режим включён.
+    in-out property <bool> game-mode: false;
     in property <string> disk-note: "";
     in property <string> power-note: "";
     in property <string> journal-note: "";
@@ -276,6 +278,8 @@ export component MainWindow inherits Window {
     callback toggle-grouping();
     // Развернуть или свернуть группу по имени программы.
     callback toggle-group(string);
+    // Включить или выключить игровой режим.
+    callback toggle-game-mode();
     // Завершить все процессы группы. Спрашиваем дважды, как и для одного.
     callback terminate-group(string);
     // PID, для которого сейчас показан вопрос «точно завершить?».
@@ -434,6 +438,45 @@ export component MainWindow inherits Window {
                                 padding: 12px;
                                 Text { text: "Процессов"; font-size: 11px; color: #7d8f86; }
                                 Text { text: root.process-summary; font-size: 22px; color: #e8f0ec; }
+                            }
+                        }
+                    }
+
+                    // --- Игровой режим ---
+                    Rectangle {
+                        background: root.game-mode ? #23372c : #1e2a24;
+                        border-radius: 8px;
+                        height: game.preferred-height;
+                        game := HorizontalLayout {
+                            padding: 12px; spacing: 12px;
+                            VerticalLayout {
+                                spacing: 3px;
+                                horizontal-stretch: 1;
+                                Text {
+                                    text: root.game-mode
+                                        ? "Игровой режим включён"
+                                        : "Игровой режим";
+                                    font-size: 13px; color: #e8f0ec;
+                                }
+                                Text {
+                                    text: "Игре на переднем плане — процессорное время и приоритет "
+                                        + "памяти, фоновой мелочи — экономичный режим. Голосовые чаты "
+                                        + "и Steam не трогаю. Сеть не регулирую: Windows не даёт делить "
+                                        + "полосу между программами, и обещать этого я не буду. "
+                                        + "Выключение возвращает всё как было.";
+                                    font-size: 11px; color: #7d8f86; wrap: word-wrap;
+                                }
+                            }
+                            Rectangle {
+                                width: 110px;
+                                VerticalLayout {
+                                    alignment: center;
+                                    RowButton {
+                                        label: root.game-mode ? "Выключить" : "Включить";
+                                        width: 110px;
+                                        pressed => { root.toggle-game-mode(); }
+                                    }
+                                }
                             }
                         }
                     }

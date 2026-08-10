@@ -368,3 +368,38 @@ mod icon_tests {
         assert!(set_icon(1, &rgba, 32).is_err());
     }
 }
+
+/// Номер процесса, чьё окно сейчас на переднем плане.
+///
+/// Нужно игровому режиму: программа, занимающая экран, и есть та, чем
+/// человек сейчас занят. Ноль означает, что переднего окна нет — так
+/// бывает на пустом рабочем столе и на экране блокировки.
+pub fn foreground_pid() -> u32 {
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        GetForegroundWindow, GetWindowThreadProcessId,
+    };
+
+    let hwnd = unsafe { GetForegroundWindow() };
+    if hwnd.is_null() {
+        return 0;
+    }
+
+    let mut pid: u32 = 0;
+    unsafe { GetWindowThreadProcessId(hwnd, &mut pid) };
+    pid
+}
+
+#[cfg(test)]
+mod foreground_tests {
+    use super::*;
+
+    #[test]
+    fn the_foreground_process_is_a_real_one_or_none() {
+        // На живой машине переднее окно обычно есть, но его может и не быть.
+        // Главное, чтобы вызов не падал и не выдумывал номер.
+        let pid = foreground_pid();
+        if pid != 0 {
+            assert!(pid > 4, "системные номера сюда попадать не должны: {pid}");
+        }
+    }
+}

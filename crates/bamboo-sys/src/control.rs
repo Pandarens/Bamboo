@@ -276,3 +276,121 @@ mod tests {
         assert!(eco_qos(0x7FFF_FFF0).is_err());
     }
 }
+
+/// Класс приоритета процесса.
+///
+/// Это грубая ручка: она говорит планировщику, кому отдавать процессорное
+/// время при нехватке. Поднимать выше «выше обычного» не станем никогда:
+/// класс реального времени вытесняет системные потоки, включая обработку
+/// ввода, и машина перестаёт слушаться мыши.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PriorityClass(pub u32);
+
+impl PriorityClass {
+    /// Ниже обычного: фоновые программы во время игры.
+    pub const BELOW_NORMAL: PriorityClass = PriorityClass(0x0000_4000);
+    pub const NORMAL: PriorityClass = PriorityClass(0x0000_0020);
+    /// Выше обычного: игра и то, что должно оставаться отзывчивым.
+    pub const ABOVE_NORMAL: PriorityClass = PriorityClass(0x0000_8000);
+
+    /// Разрешён ли класс к применению.
+    ///
+    /// Высокий и реального времени сюда не входят намеренно: ими легко
+    /// подвесить машину, а выигрыш в играх недоказуем.
+    pub fn is_allowed(self) -> bool {
+        self == Self::BELOW_NORMAL || self == Self::NORMAL || self == Self::ABOVE_NORMAL
+    }
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::BELOW_NORMAL => "ниже обычного",
+            Self::NORMAL => "обычный",
+            Self::ABOVE_NORMAL => "выше обычного",
+            _ => "неизвестный",
+        }
+    }
+}
+
+/// Читает класс приоритета процесса.
+pub fn priority_class(pid: u32) -> Result<PriorityClass> {
+    use windows_sys::Win32::System::Threading::GetPriorityClass;
+
+    let handle = ProcessHandle::open(pid, PROCESS_QUERY_LIMITED_INFORMATION)?;
+    let class = unsafe { GetPriorityClass(handle.0) };
+    if class == 0 {
+        return Err(Error::Win32 {
+            call: "GetPriorityClass",
+            code: unsafe { windows_sys::Win32::Foundation::GetLastError() },
+        });
+    }
+    Ok(PriorityClass(class))
+}
+
+/// Меняет класс приоритета процесса.
+pub fn set_priority_class(pid: u32, class: PriorityClass) -> Result<()> {
+    use windows_sys::Win32::System::Threading::SetPriorityClass;
+
+    if !class.is_allowed() {
+        return Err(Error::Unsupported(
+            "такой класс приоритета Bamboo не выставляет: им можно подвесить машину",
+        ));
+    }
+
+    let handle = ProcessHandle::open(pid, PROCESS_SET_INFORMATION)?;
+    let ok = unsafe { SetPriorityClass(handle.0, class.0) };
+    if ok == 0 {
+        return Err(Error::Win32 {
+            call: "SetPriorityClass",
+            code: unsafe { windows_sys::Win32::Foundation::GetLastError() },
+        });
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod priority_tests {
+    use super::*;
+
+    #[test]
+    fn only_safe_classes_are_allowed() {
+        assert!(PriorityClass::BELOW_NORMAL.is_allowed());
+        assert!(PriorityClass::NORMAL.is_allowed());
+        assert!(PriorityClass::ABOVE_NORMAL.is_allowed());
+
+        // Высокий (0x80) и реального времени (0x100) — нет. Ими вытесняются
+        // системные потоки, включая обработку ввода: машина перестаёт
+        // слушаться мыши, а выигрыш в играх недоказуем.
+        assert!(!PriorityClass(0x0000_0080).is_allowed());
+        assert!(!PriorityClass(0x0000_0100).is_allowed());
+    }
+
+    #[test]
+    fn a_forbidden_class_is_refused_before_touching_the_process() {
+        let error = set_priority_class(std::process::id(), PriorityClass(0x0000_0100));
+        assert!(error.is_err());
+    }
+
+    #[test]
+    fn our_own_priority_is_readable_and_restorable() {
+        let me = std::process::id();
+        let before = priority_class(me).expect("свой приоритет должен читаться");
+
+        set_priority_class(me, PriorityClass::BELOW_NORMAL).expect("понижение не удалось");
+        assert_eq!(priority_class(me).unwrap(), PriorityClass::BELOW_NORMAL);
+
+        set_priority_class(me, before).expect("возврат не удался");
+        assert_eq!(priority_class(me).unwrap(), before);
+    }
+
+    #[test]
+    fn every_allowed_class_has_a_name() {
+        for class in [
+            PriorityClass::BELOW_NORMAL,
+            PriorityClass::NORMAL,
+            PriorityClass::ABOVE_NORMAL,
+        ] {
+            assert!(!class.name().is_empty());
+            assert_ne!(class.name(), "неизвестный");
+        }
+    }
+}

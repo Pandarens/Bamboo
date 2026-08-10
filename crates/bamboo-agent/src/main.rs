@@ -20,6 +20,8 @@ mod actions;
 #[cfg(windows)]
 mod collector;
 #[cfg(windows)]
+mod gamemode;
+#[cfg(windows)]
 mod mainwin;
 #[cfg(windows)]
 mod tray;
@@ -125,6 +127,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let io_limits: std::rc::Rc<std::cell::RefCell<actions::IoLimits>> =
         std::rc::Rc::new(std::cell::RefCell::new(actions::IoLimits::new()));
 
+    // Игровой режим помнит, что и кому менял: без этого вернуть прежние
+    // настройки было бы нечем.
+    let game_mode: std::rc::Rc<std::cell::RefCell<gamemode::GameMode>> =
+        std::rc::Rc::new(std::cell::RefCell::new(gamemode::GameMode::new()));
+
     // Сортировка по столбцу. Повторный щелчок по тому же столбцу
     // разворачивает порядок — привычное поведение любой таблицы.
     {
@@ -229,6 +236,50 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             if let Some(snapshot) = snapshot.borrow().as_ref() {
                 fill_processes(&win, snapshot, &rows, &limits.borrow());
             }
+        });
+    }
+
+    // Игровой режим.
+    {
+        let weak = main_window.as_weak();
+        let snapshot = last_snapshot.clone();
+        let mode = game_mode.clone();
+        main_window.on_toggle_game_mode(move || {
+            let Some(win) = weak.upgrade() else {
+                return;
+            };
+
+            let note = if mode.borrow().is_on() {
+                mode.borrow_mut().turn_off()
+            } else {
+                let borrowed = snapshot.borrow();
+                let Some(snapshot) = borrowed.as_ref() else {
+                    return;
+                };
+                // Игру ищем по переднему окну: программа, занимающая экран,
+                // и есть та, чем человек сейчас занят.
+                let foreground = bamboo_sys::window::foreground_pid();
+                let candidates: Vec<gamemode::Candidate<'_>> = snapshot
+                    .top
+                    .iter()
+                    .map(|line| gamemode::Candidate {
+                        pid: line.pid,
+                        name: &line.name,
+                        cpu_percent: line.cpu_percent,
+                        is_foreground: line.pid == foreground,
+                        protected: bamboo_policy::immutable_reason(&bamboo_policy::ProcessFacts {
+                            image_name: &line.name,
+                            session_id: 1,
+                            ..Default::default()
+                        })
+                        .is_some(),
+                    })
+                    .collect();
+                mode.borrow_mut().turn_on(&candidates)
+            };
+
+            win.set_game_mode(mode.borrow().is_on());
+            win.set_action_note(SharedString::from(note));
         });
     }
 
