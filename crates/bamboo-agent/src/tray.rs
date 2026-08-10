@@ -78,41 +78,85 @@ impl Tray {
     }
 }
 
-/// Рисует иконку кодом.
+/// Рисует иконку кодом: морда панды и стебель бамбука сбоку.
 ///
-/// Стебель бамбука с перемычками: узнаваемо и не тянет за собой ни файл
-/// ресурса, ни библиотеку разбора изображений ради одной картинки 32x32.
+/// Рисуем, а не подключаем файл: ради одной картинки 32x32 тащить ресурс
+/// и библиотеку разбора изображений незачем, а так иконка живёт вместе
+/// с кодом и правится в одном месте.
+///
+/// Всё построено на кругах: голова, уши, пятна вокруг глаз, глаза, нос.
+/// Отсюда и вспомогательная `disc` — она отвечает на единственный вопрос,
+/// который тут вообще возникает: попала ли точка в круг.
 fn bamboo_icon() -> Icon {
     const SIZE: u32 = 32;
     let mut rgba = vec![0u8; (SIZE * SIZE * 4) as usize];
 
-    let stalk = (10u32, 22u32);
-    let joints = [8u32, 16, 24];
+    // Цвета: панда чёрно-белая, бамбук в тон интерфейсу.
+    const WHITE: (u8, u8, u8) = (240, 244, 241);
+    const BLACK: (u8, u8, u8) = (26, 32, 29);
+    const BAMBOO: (u8, u8, u8) = (63, 143, 102);
+    const JOINT: (u8, u8, u8) = (36, 84, 58);
 
     for y in 0..SIZE {
         for x in 0..SIZE {
-            let index = ((y * SIZE + x) * 4) as usize;
+            let mut colour: Option<(u8, u8, u8)> = None;
 
-            let inside = x >= stalk.0 && x < stalk.1 && (2..30).contains(&y);
-            if !inside {
-                continue;
+            // Стебель бамбука по правому краю, с перемычками.
+            if (25..29).contains(&x) && (3..30).contains(&y) {
+                let on_joint = [8u32, 16, 24].iter().any(|joint| y.abs_diff(*joint) < 2);
+                colour = Some(if on_joint { JOINT } else { BAMBOO });
             }
 
-            let on_joint = joints.iter().any(|joint| y.abs_diff(*joint) < 2);
-            let (r, g, b) = if on_joint {
-                (36, 84, 58)
-            } else {
-                (63, 143, 102)
-            };
+            // Уши — раньше головы: голова накроет их края и получится
+            // привычный силуэт.
+            if disc(x, y, 5, 8, 4) || disc(x, y, 18, 8, 4) {
+                colour = Some(BLACK);
+            }
 
-            rgba[index] = r;
-            rgba[index + 1] = g;
-            rgba[index + 2] = b;
-            rgba[index + 3] = 255;
+            // Голова.
+            if disc(x, y, 11, 17, 9) {
+                colour = Some(WHITE);
+            }
+
+            // Пятна вокруг глаз — то, по чему панду и узнают.
+            if disc(x, y, 7, 15, 3) || disc(x, y, 15, 15, 3) {
+                colour = Some(BLACK);
+            }
+            // Зрачки и нос рисуем прямоугольниками, а не кругами: на такой
+            // мелочи круг радиусом в пиксель вырождается в ромб, и морда
+            // выходит колючей вместо круглой.
+            if box_(x, y, 6, 14, 2, 2) || box_(x, y, 14, 14, 2, 2) {
+                colour = Some(WHITE);
+            }
+            if box_(x, y, 10, 20, 3, 2) {
+                colour = Some(BLACK);
+            }
+
+            if let Some((r, g, b)) = colour {
+                let index = ((y * SIZE + x) * 4) as usize;
+                rgba[index] = r;
+                rgba[index + 1] = g;
+                rgba[index + 2] = b;
+                rgba[index + 3] = 255;
+            }
         }
     }
 
     Icon::from_rgba(rgba, SIZE, SIZE).expect("иконка собрана неверно")
+}
+
+/// Попадает ли точка в круг с центром `(cx, cy)` и радиусом `r`.
+///
+/// Считаем в целых числах и без корня: сравниваем квадраты расстояний.
+fn disc(x: u32, y: u32, cx: i32, cy: i32, r: i32) -> bool {
+    let dx = x as i32 - cx;
+    let dy = y as i32 - cy;
+    dx * dx + dy * dy <= r * r
+}
+
+/// Попадает ли точка в прямоугольник с левым верхним углом `(left, top)`.
+fn box_(x: u32, y: u32, left: u32, top: u32, width: u32, height: u32) -> bool {
+    (left..left + width).contains(&x) && (top..top + height).contains(&y)
 }
 
 #[cfg(test)]
