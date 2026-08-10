@@ -199,6 +199,63 @@ component RowButton inherits Rectangle {
 // Невидимая полоса по краю окна: за неё Windows меняет размер.
 // Своей рамки у окна нет, значит и границ для растягивания нет —
 // возвращаем их руками.
+// График записи: столбики по времени слева направо.
+//
+// Столбиками, а не линией: линию в Slint пришлось бы рисовать через Path
+// с построением строки пути, а столбики — обычные прямоугольники, которые
+// программный рендерер отрисует дёшево. Читаются они не хуже.
+component Chart inherits Rectangle {
+    in property <string> title;
+    in property <string> scale;
+    in property <[float]> points: [];
+    in property <color> tint: #6fb58a;
+
+    background: #1a231f;
+    border-radius: 8px;
+    height: 118px;
+
+    VerticalLayout {
+        padding: 10px;
+        spacing: 6px;
+
+        HorizontalLayout {
+            spacing: 8px;
+            Text {
+                text: root.title;
+                font-size: 12px; color: #e8f0ec;
+                horizontal-stretch: 1;
+            }
+            Text {
+                text: root.scale;
+                font-size: 10px; color: #62736a;
+                vertical-alignment: center;
+            }
+        }
+
+        plot := Rectangle {
+            background: #141b18;
+            border-radius: 4px;
+            vertical-stretch: 1;
+            clip: true;
+
+            // Столбики ставим по координатам, а не раскладкой. Раскладка
+            // считает свою ширину по детям, а ширина столбика считается
+            // от неё — выходит петля, и Slint такое не собирает.
+            for value[index] in root.points: Rectangle {
+                property <length> step: plot.width / max(root.points.length, 1);
+                x: index * self.step;
+                width: max(1px, self.step - 1px);
+                // Ноль всё равно рисуем полоской в пиксель: пустое место
+                // читалось бы как «данных нет», а данные есть и в них ноль.
+                height: max(1px, (plot.height - 4px) * value);
+                y: plot.height - 2px - self.height;
+                background: root.tint;
+                border-radius: 1px;
+            }
+        }
+    }
+}
+
 component ResizeGrip inherits Rectangle {
     in property <int> edge;
     in property <MouseCursor> shape;
@@ -321,6 +378,20 @@ export component MainWindow inherits Window {
     in property <[DiskUserRow]> disk-users: [];
     in property <string> disk-users-note: "";
     in property <[ExtensionRow]> extensions: [];
+    // Запись наблюдения за программой.
+    in-out property <string> record-app: "";
+    in property <bool> recording: false;
+    in property <string> record-status: "";
+    in property <string> record-verdict: "";
+    in property <[float]> record-cpu: [];
+    in property <[float]> record-memory: [];
+    in property <[float]> record-gpu: [];
+    in property <[float]> record-disk: [];
+    in property <bool> record-has-gpu: false;
+    in property <string> record-scale-cpu: "";
+    in property <string> record-scale-memory: "";
+    in property <string> record-scale-disk: "";
+    callback toggle-recording(string);
     in property <string> extensions-note: "";
     in property <bool> autopilot: false;
     in property <string> autopilot-status: "";
@@ -574,6 +645,11 @@ export component MainWindow inherits Window {
                     label: "Журнал";
                     active: root.section == 4;
                     chosen => { root.section = 4; root.refresh(); }
+                }
+                NavButton {
+                    label: "Анализ";
+                    active: root.section == 8;
+                    chosen => { root.section = 8; root.refresh(); }
                 }
                 NavButton {
                     label: "Браузер";
@@ -1236,6 +1312,101 @@ export component MainWindow inherits Window {
                     }
                     Text { text: root.disk-note; font-size: 11px; color: #62736a; wrap: word-wrap; }
                     Rectangle { vertical-stretch: 1; }
+                }
+
+                // --- Анализ программы ---
+                if root.section == 8: VerticalLayout {
+                    spacing: 10px;
+                    Text { text: "Анализ программы"; font-size: 20px; color: #e8f0ec; }
+                    Text {
+                        text: "Выберите программу, запишите сеанс и посмотрите, что "
+                            + "упиралось в потолок. Мгновенные числа тут бесполезны: "
+                            + "просадка длится секунду, и к моменту, когда вы "
+                            + "переключитесь, всё уже прошло.";
+                        font-size: 11px; color: #62736a; wrap: word-wrap;
+                    }
+
+                    Rectangle {
+                        background: root.recording ? #23372c : #1e2a24;
+                        border-radius: 8px;
+                        height: recbox.preferred-height;
+                        recbox := HorizontalLayout {
+                            padding: 12px; spacing: 10px;
+                            Rectangle {
+                                background: #141b18; border-radius: 6px;
+                                horizontal-stretch: 1;
+                                height: 32px;
+                                app-input := TextInput {
+                                    x: 10px; width: parent.width - 20px;
+                                    vertical-alignment: center;
+                                    color: #e8f0ec; font-size: 12px;
+                                    text <=> root.record-app;
+                                    single-line: true;
+                                    enabled: !root.recording;
+                                }
+                                if root.record-app == "": Text {
+                                    x: 10px;
+                                    text: "имя программы, например game.exe";
+                                    color: #4d5b53; font-size: 12px;
+                                    vertical-alignment: center;
+                                }
+                            }
+                            RowButton {
+                                label: root.recording ? "Остановить" : "Записать";
+                                width: 130px;
+                                pressed => { root.toggle-recording(root.record-app); }
+                            }
+                        }
+                    }
+
+                    Text {
+                        text: root.record-status;
+                        font-size: 12px; color: #9fb3a8; wrap: word-wrap;
+                    }
+
+                    if root.record-cpu.length > 0: Flickable {
+                        vertical-stretch: 1;
+                        VerticalLayout {
+                            spacing: 10px;
+                            Chart {
+                                title: "Процессор";
+                                scale: root.record-scale-cpu;
+                                points: root.record-cpu;
+                                tint: #6fb58a;
+                            }
+                            Chart {
+                                title: "Память";
+                                scale: root.record-scale-memory;
+                                points: root.record-memory;
+                                tint: #7fb0d8;
+                            }
+                            if root.record-has-gpu: Chart {
+                                title: "Видеокарта";
+                                scale: "0-100%";
+                                points: root.record-gpu;
+                                tint: #c08fd8;
+                            }
+                            Chart {
+                                title: "Диск";
+                                scale: root.record-scale-disk;
+                                points: root.record-disk;
+                                tint: #e0a44a;
+                            }
+                        }
+                    }
+                    if root.record-cpu.length == 0: Rectangle { vertical-stretch: 1; }
+
+                    if root.record-verdict != "": Rectangle {
+                        background: #1d2c38; border-radius: 8px;
+                        height: verdictbox.preferred-height;
+                        verdictbox := VerticalLayout {
+                            padding: 12px;
+                            Text {
+                                text: root.record-verdict;
+                                font-size: 12px; color: #b6c6bd; wrap: word-wrap;
+                            }
+                        }
+                    }
                 }
 
                 // --- Браузер ---

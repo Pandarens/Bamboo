@@ -25,6 +25,8 @@ mod gamemode;
 #[cfg(windows)]
 mod mainwin;
 #[cfg(windows)]
+mod session;
+#[cfg(windows)]
 mod tray;
 #[cfg(windows)]
 mod update;
@@ -136,6 +138,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     main_window.set_wakes(wakes_model.clone());
     main_window.set_journal(journal_model.clone());
     main_window.set_extensions(ModelRc::new(VecModel::from(Vec::<ExtensionRow>::new())));
+    main_window.set_record_cpu(ModelRc::new(VecModel::from(Vec::<f32>::new())));
+    main_window.set_record_memory(ModelRc::new(VecModel::from(Vec::<f32>::new())));
+    main_window.set_record_gpu(ModelRc::new(VecModel::from(Vec::<f32>::new())));
+    main_window.set_record_disk(ModelRc::new(VecModel::from(Vec::<f32>::new())));
 
     // Последний снимок держим под рукой: по клику на заголовок столбца
     // таблицу надо пересортировать сразу, а не ждать следующего тика.
@@ -157,6 +163,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let autopilot_holds: std::rc::Rc<
         std::cell::RefCell<std::collections::HashMap<(u32, &'static str), i64>>,
     > = std::rc::Rc::new(std::cell::RefCell::new(std::collections::HashMap::new()));
+
+    // Идущая запись наблюдения за программой.
+    let recording: std::rc::Rc<std::cell::RefCell<Option<session::Session>>> =
+        std::rc::Rc::new(std::cell::RefCell::new(None));
 
     // Найденное обновление. Держим здесь, потому что кнопка «Обновить»
     // ставит именно то, о чём человеку сказали, а не спрашивает GitHub
@@ -231,6 +241,44 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             };
             win.set_autopilot(pilot.enabled());
             win.set_action_note(SharedString::from(note));
+        });
+    }
+
+    // Запись наблюдения: начать и остановить.
+    {
+        let weak = main_window.as_weak();
+        let recording = recording.clone();
+        main_window.on_toggle_recording(move |app| {
+            let Some(win) = weak.upgrade() else {
+                return;
+            };
+
+            let mut recording = recording.borrow_mut();
+            if recording.is_some() {
+                // Остановка: запись остаётся на экране. Стирать её сразу
+                // значило бы выбросить то, ради чего человек и записывал.
+                *recording = None;
+                win.set_recording(false);
+                win.set_record_status(SharedString::from(
+                    "Запись остановлена. График и разбор ниже — они никуда                      не денутся, пока вы не начнёте новую запись.",
+                ));
+                return;
+            }
+
+            let app = app.trim().to_string();
+            if app.is_empty() {
+                win.set_record_status(SharedString::from(
+                    "Впишите имя программы — так, как оно стоит в списке процессов:                      например, game.exe.",
+                ));
+                return;
+            }
+
+            *recording = Some(session::Session::start(&app));
+            win.set_recording(true);
+            win.set_record_verdict(SharedString::from(""));
+            win.set_record_status(SharedString::from(format!(
+                "Записываю {app}. Переключайтесь в программу и работайте как                  обычно — Bamboo замеряет раз в секунду. Разбор появится примерно                  через десять секунд: на меньшем отрезке любой вывод был бы                  гаданием."
+            )));
         });
     }
 
@@ -898,6 +946,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let update_weak = main_window.as_weak();
     let update_found = pending_update.clone();
 
+    let tick_recording = recording.clone();
+    let started = std::time::Instant::now();
     let tick_pilot = autopilot.clone();
     let tick_holds = autopilot_holds.clone();
     let timer = slint::Timer::default();
@@ -1032,6 +1082,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             if let Some(snapshot) = latest {
                 apply_snapshot(&widget, &snapshot, &processes, &spark, &spark_cpu);
 
+                // Запись наблюдения кормится из того же снимка: отдельного
+                // опроса системы ей не нужно, данные уже есть.
+                if let Some(recording) = tick_recording.borrow_mut().as_mut() {
+                    recording.observe(&snapshot, started.elapsed().as_millis() as u64);
+                    if let Some(main) = main_weak.upgrade() {
+                        if main.window().is_visible() {
+                            show_recording(&main, recording);
+                        }
+                    }
+                }
+
                 // Автоматика работает независимо от окна: когда человека
                 // нет, окна тоже нет, а придерживать фоновую работу надо
                 // именно тогда.
@@ -1159,6 +1220,87 @@ fn remedy_key(remedy: bamboo_analyze::suggest::Remedy) -> &'static str {
         Remedy::LowerMemory => "память",
         Remedy::ThrottleDisk => "диск",
         Remedy::JustSaying => "ничего",
+    }
+}
+
+/// Рисует запись наблюдения: графики и разбор.
+#[cfg(windows)]
+fn show_recording(main: &MainWindow, recording: &session::Session) {
+    use bamboo_analyze::record::to_chart;
+
+    /// Сколько столбиков помещается в график, чтобы они оставались
+    /// различимыми. Точек в записи бывают тысячи.
+    const POINTS: usize = 120;
+
+    let samples = recording.samples();
+    let cpu: Vec<f64> = samples
+        .iter()
+        .map(|sample| f64::from(sample.cpu_percent))
+        .collect();
+    let memory: Vec<f64> = samples
+        .iter()
+        .map(|sample| sample.memory.as_u64() as f64)
+        .collect();
+    let disk: Vec<f64> = samples
+        .iter()
+        .map(|sample| sample.disk_per_second as f64)
+        .collect();
+    let gpu: Vec<f64> = samples
+        .iter()
+        .filter_map(|sample| sample.gpu_percent.map(f64::from))
+        .collect();
+
+    // Шкалу берём по своему же пику, а не по ста процентам: программа,
+    // которая держится на пяти процентах, на шкале до ста выглядела бы
+    // ровной чертой, и просадка в ней потерялась бы.
+    let cpu_top = cpu.iter().copied().fold(1.0_f64, f64::max);
+    let memory_top = memory.iter().copied().fold(1.0_f64, f64::max);
+    let disk_top = disk.iter().copied().fold(1.0_f64, f64::max);
+
+    replace_floats(&main.get_record_cpu(), to_chart(&cpu, POINTS, cpu_top));
+    replace_floats(
+        &main.get_record_memory(),
+        to_chart(&memory, POINTS, memory_top),
+    );
+    replace_floats(&main.get_record_disk(), to_chart(&disk, POINTS, disk_top));
+    replace_floats(&main.get_record_gpu(), to_chart(&gpu, POINTS, 100.0));
+    main.set_record_has_gpu(!gpu.is_empty());
+
+    main.set_record_scale_cpu(SharedString::from(format!("пик {cpu_top:.0}%")));
+    main.set_record_scale_memory(SharedString::from(format!(
+        "пик {}",
+        bamboo_core::Bytes(memory_top as u64)
+    )));
+    main.set_record_scale_disk(SharedString::from(format!(
+        "пик {}/с",
+        bamboo_core::Bytes(disk_top as u64)
+    )));
+
+    main.set_record_status(SharedString::from(format!(
+        "Записываю {} — {} наблюдения, {} замеров.",
+        recording.app(),
+        recording.spell_length(),
+        recording.len(),
+    )));
+
+    match bamboo_analyze::analyse_recording(samples) {
+        Some(verdict) => main.set_record_verdict(SharedString::from(format!(
+            "{}: {}",
+            verdict.bottleneck.name(),
+            verdict.summary
+        ))),
+        // Меньше десяти секунд — вывода ещё нет, и выдумывать его нельзя.
+        None => main.set_record_verdict(SharedString::from(
+            "Наблюдений пока мало. Вывод появится, когда наберётся десять             секунд: на меньшем отрезке он был бы гаданием.",
+        )),
+    }
+}
+
+/// Заменяет содержимое списка чисел в модели окна.
+#[cfg(windows)]
+fn replace_floats(model: &ModelRc<f32>, values: Vec<f32>) {
+    if let Some(list) = model.as_any().downcast_ref::<VecModel<f32>>() {
+        list.set_vec(values);
     }
 }
 

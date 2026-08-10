@@ -20,7 +20,7 @@ pub const SPARK_POINTS: usize = 48;
 /// Числа держим сырыми, а не отформатированными: по ним сортирует главное
 /// окно. Строку «12.3%» пришлось бы разбирать обратно, и сортировка по
 /// памяти сломалась бы на первом же «1.2 ГБ» против «900 МБ».
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 pub struct ProcessLine {
     pub name: String,
     pub pid: u32,
@@ -89,6 +89,9 @@ pub struct Snapshot {
     /// Имена виновников последнего подвисания через запятую: по ним
     /// открывается список процессов, отфильтрованный ровно на них.
     pub freeze_culprits: String,
+    /// Загрузка видеокарты по процессам. Пусто, если счётчиков в системе
+    /// нет — тогда график видеокарты не рисуется, а не показывает нули.
+    pub gpu: Vec<(u32, f32)>,
     /// Сколько Bamboo уже наблюдает за системой. От этого зависит, что он
     /// вправе сказать про рост памяти: выводы требуют часов.
     pub watching_ms: u64,
@@ -117,6 +120,19 @@ pub struct DiskLine {
     pub queue_depth: u32,
     /// Занят настолько, что это уже мешает.
     pub saturated: bool,
+}
+
+impl Snapshot {
+    /// Доля занятой памяти всей машины, 0..1.
+    ///
+    /// Просадки от нехватки памяти видны только по системе целиком:
+    /// у самой программы память при этом может выглядеть скромно.
+    pub fn memory_pressure(&self) -> f64 {
+        if self.memory_total.as_u64() == 0 {
+            return 0.0;
+        }
+        self.memory_used.as_u64() as f64 / self.memory_total.as_u64() as f64
+    }
 }
 
 /// Файл подкачки в снимке.
@@ -192,6 +208,10 @@ fn run(sender: Sender<Snapshot>, visible: WidgetVisible) {
     // Подвисания: копим их непрерывно. Смотреть надо в момент подвисания,
     // а он короткий — пока человек откроет окно, всё уже прошло.
     let mut freezes = bamboo_analyze::FreezeLog::new();
+    // Счётчик видеокарты держим открытым: он считает долю времени между
+    // двумя опросами, и разовый замер обязан был бы ждать между ними
+    // секунду — секунда блокировки на каждый тик.
+    let mut gpu_counter = bamboo_sys::GpuCounter::open().ok();
 
     loop {
         collector.set_widget_open(visible.load(Ordering::Relaxed));
@@ -331,6 +351,17 @@ fn run(sender: Sender<Snapshot>, visible: WidgetVisible) {
         let freeze = freezes.summary(now_ms);
         let freeze_culprits = freezes.last_culprits().join(", ");
 
+        let gpu: Vec<(u32, f32)> = gpu_counter
+            .as_mut()
+            .and_then(|counter| counter.read().ok())
+            .map(|loads| {
+                loads
+                    .into_iter()
+                    .map(|load| (load.pid, load.percent as f32))
+                    .collect()
+            })
+            .unwrap_or_default();
+
         // Считаем до сборки снимка: дальше список процессов уедет в него.
         let disk_pressure = explain_disk_pressure(&disks, &top);
         let system_io = explain_system(&top, used, tick.system.memory.physical_total);
@@ -356,6 +387,7 @@ fn run(sender: Sender<Snapshot>, visible: WidgetVisible) {
             system_io,
             freeze,
             freeze_culprits,
+            gpu,
             watching_ms: started.elapsed().as_millis() as u64,
         };
 
