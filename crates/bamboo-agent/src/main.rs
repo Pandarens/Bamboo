@@ -749,6 +749,9 @@ fn apply_overview(
     main.set_disk_pressure(SharedString::from(
         snapshot.disk_pressure.clone().unwrap_or_default(),
     ));
+    main.set_system_io(SharedString::from(
+        snapshot.system_io.clone().unwrap_or_default(),
+    ));
 
     fill_processes(main, snapshot, processes, limits);
 }

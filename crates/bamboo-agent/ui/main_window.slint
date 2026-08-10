@@ -242,6 +242,8 @@ export component MainWindow inherits Window {
     in property <[SuggestionRow]> suggestions: [];
     in property <string> suggestions-note: "";
     in property <string> disk-pressure: "";
+    // Объяснение работы ядра с диском: тот самый случай «виноват System».
+    in property <string> system-io: "";
     in property <string> disk-note: "";
     in property <string> power-note: "";
     in property <string> journal-note: "";
@@ -440,11 +442,25 @@ export component MainWindow inherits Window {
                     Text { text: "Накопители"; font-size: 14px; color: #e8f0ec; }
                     if root.disk-pressure != "": Rectangle {
                         background: #2a211c; border-radius: 8px;
-                        VerticalLayout {
+                        height: pressure.preferred-height;
+                        pressure := VerticalLayout {
                             padding: 10px;
                             Text {
                                 text: root.disk-pressure;
                                 font-size: 12px; color: #e0a44a; wrap: word-wrap;
+                            }
+                        }
+                    }
+                    // Ядро само по себе виновником не бывает: объясняем,
+                    // по чьему поручению оно работает с диском.
+                    if root.system-io != "": Rectangle {
+                        background: #1c2530; border-radius: 8px;
+                        height: sysio.preferred-height;
+                        sysio := VerticalLayout {
+                            padding: 10px;
+                            Text {
+                                text: root.system-io;
+                                font-size: 12px; color: #8fb4d8; wrap: word-wrap;
                             }
                         }
                     }

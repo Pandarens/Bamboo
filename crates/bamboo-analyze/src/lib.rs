@@ -20,6 +20,7 @@ pub mod report;
 pub mod spike;
 pub mod suggest;
 pub mod sysdiff;
+pub mod systemio;
 pub mod tbw;
 pub mod wear;
 
@@ -35,5 +36,6 @@ pub use report::{weekly_html, weekly_json, weekly_markdown, ActionEffect, Weekly
 pub use spike::SpikeInput;
 pub use suggest::{suggest, Remedy, Situation, Suggestion};
 pub use sysdiff::{diff as system_diff, SystemDiff, SystemSnapshot};
+pub use systemio::{explain as explain_system_io, Bystanders, SystemIoCause, SystemIoVerdict};
 pub use tbw::{rating_for, TbwRating};
 pub use wear::{WearInput, WearVerdict};

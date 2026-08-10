@@ -73,6 +73,8 @@ pub struct Snapshot {
     /// Сколько человек не трогал мышь и клавиатуру. От этого зависит,
     /// можно ли называть чужую работу фоновой.
     pub user_idle_ms: u64,
+    /// Объяснение дисковой активности ядра, если оно грузит накопитель.
+    pub system_io: Option<String>,
 }
 
 /// Раздел в снимке.
@@ -240,6 +242,7 @@ fn run(sender: Sender<Snapshot>, visible: WidgetVisible) {
 
         // Считаем до сборки снимка: дальше список процессов уедет в него.
         let disk_pressure = explain_disk_pressure(&disks, &top);
+        let system_io = explain_system(&top, used, tick.system.memory.physical_total);
 
         let snapshot = Snapshot {
             cpu_busy: tick.cpu_busy(),
@@ -259,6 +262,7 @@ fn run(sender: Sender<Snapshot>, visible: WidgetVisible) {
             pagefiles: pagefiles.clone(),
             volumes: volumes.clone(),
             user_idle_ms: bamboo_sys::idle_ms().unwrap_or(0),
+            system_io,
         };
 
         // Интерфейс закрылся — поток должен закончиться вместе с ним.
@@ -420,6 +424,72 @@ fn read_pagefiles() -> Vec<PagefileLine> {
 /// Насколько активно процесс должен работать с диском, чтобы называть его
 /// виновником. Ниже мегабайта в секунду это фон, а не нагрузка.
 const CULPRIT_FLOOR: u64 = 1024 * 1024;
+
+/// Номер процесса ядра. Своих дел у него нет: он работает с диском
+/// по поручению других, и в списке виновных выглядит бессмысленно.
+const SYSTEM_PID: u32 = 4;
+
+/// Объясняет работу ядра с диском, если именно оно грузит накопитель.
+///
+/// Тот самый случай «диск на сто процентов, а виноват System»: диспетчер
+/// задач показывает это и молчит. Мы ищем рядом с ядром спутников —
+/// антивирус, индексатор, обновление, сжатие памяти — и по ним называем
+/// вероятную причину. Не нашли спутников — так и говорим.
+fn explain_system(processes: &[ProcessLine], used: Bytes, total: Bytes) -> Option<String> {
+    use bamboo_analyze::systemio::{classify, Bystander, Bystanders};
+
+    let system = processes.iter().find(|line| line.pid == SYSTEM_PID)?;
+    let system_io = system
+        .read_per_second
+        .saturating_add(system.write_per_second);
+    if system_io < CULPRIT_FLOOR {
+        return None;
+    }
+
+    let mut bystanders = Bystanders {
+        memory_used_share: if total.as_u64() == 0 {
+            0.0
+        } else {
+            used.as_u64() as f64 / total.as_u64() as f64
+        },
+        ..Default::default()
+    };
+
+    for line in processes {
+        // Спутником считаем только того, кто сам чем-то занят: сама
+        // по себе запущенная служба ничего не объясняет.
+        let busy = line.cpu_percent >= 1.0
+            || line.read_per_second.saturating_add(line.write_per_second) >= 512 * 1024;
+
+        match classify(&line.name) {
+            Some(Bystander::Antivirus) if busy => bystanders.antivirus_busy = true,
+            Some(Bystander::Indexer) if busy => bystanders.indexer_busy = true,
+            Some(Bystander::Update) if busy => bystanders.update_busy = true,
+            Some(Bystander::Defrag) if busy => bystanders.defrag_busy = true,
+            // Сжатие памяти живёт всегда, поэтому важно не «работает ли»,
+            // а сколько памяти оно набрало.
+            Some(Bystander::MemoryCompression) => {
+                bystanders.memory_compression_busy = line.memory.as_u64() > 128 * 1024 * 1024
+            }
+            _ => {}
+        }
+
+        if line.pid != SYSTEM_PID
+            && line.read_per_second.saturating_add(line.write_per_second) >= 20 * 1024 * 1024
+        {
+            bystanders.user_bulk_io = true;
+        }
+    }
+
+    let verdict = bamboo_analyze::explain_system_io(bystanders);
+    Some(format!(
+        "Ядро Windows работает с диском на {}/с. Похоже на «{}»: {}. {}",
+        Bytes(system_io),
+        verdict.cause.name(),
+        verdict.because,
+        verdict.cause.advice()
+    ))
+}
 
 /// Объясняет, почему диск занят, и называет виновника, если он очевиден.
 ///
