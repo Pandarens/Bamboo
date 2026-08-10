@@ -45,8 +45,13 @@ pub struct Snapshot {
     pub memory_total: Bytes,
     pub process_count: usize,
     pub top: Vec<ProcessLine>,
-    /// История использования памяти, доли от максимума, 0..1.
+    /// История использования памяти, доли от максимума за окно, 0..1.
+    /// Память меняется в узком диапазоне, поэтому её растягиваем по окну —
+    /// иначе график был бы прямой на восьмидесяти процентах.
     pub spark: Vec<f32>,
+    /// История загрузки процессора, доли от целой машины, 0..1.
+    /// Здесь шкала абсолютная: сто процентов должны выглядеть как сто.
+    pub spark_cpu: Vec<f32>,
     /// Собственное потребление Bamboo.
     pub own_memory: Bytes,
     pub cadence: String,
@@ -81,6 +86,7 @@ const GROWTH_EVERY: std::time::Duration = std::time::Duration::from_secs(60);
 fn run(sender: Sender<Snapshot>, visible: WidgetVisible) {
     let mut collector = Collector::new();
     let mut memory_history: Vec<u64> = Vec::with_capacity(SPARK_POINTS);
+    let mut cpu_history: Vec<f32> = Vec::with_capacity(SPARK_POINTS);
     // Кэш трендов по процессам между пересчётами.
     let mut growth: std::collections::HashMap<u32, bamboo_analyze::MemoryTrend> =
         std::collections::HashMap::new();
@@ -103,6 +109,11 @@ fn run(sender: Sender<Snapshot>, visible: WidgetVisible) {
         memory_history.push(used.as_u64());
         if memory_history.len() > SPARK_POINTS {
             memory_history.remove(0);
+        }
+
+        cpu_history.push(tick.cpu_busy() as f32);
+        if cpu_history.len() > SPARK_POINTS {
+            cpu_history.remove(0);
         }
 
         // Тренды роста пересчитываем редко: это самая дорогая часть тика.
@@ -155,6 +166,7 @@ fn run(sender: Sender<Snapshot>, visible: WidgetVisible) {
             process_count: tick.process_count,
             top,
             spark: normalise(&memory_history),
+            spark_cpu: cpu_history.iter().map(|v| v.clamp(0.0, 1.0)).collect(),
             own_memory: bamboo_sys::own_memory()
                 .map(|m| m.working_set)
                 .unwrap_or(Bytes::ZERO),

@@ -80,8 +80,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let processes: ModelRc<ProcessRow> = ModelRc::new(VecModel::from(Vec::<ProcessRow>::new()));
     let spark: ModelRc<f32> = ModelRc::new(VecModel::from(Vec::<f32>::new()));
+    let spark_cpu: ModelRc<f32> = ModelRc::new(VecModel::from(Vec::<f32>::new()));
     widget.set_processes(processes.clone());
     widget.set_spark(spark.clone());
+    widget.set_spark_cpu(spark_cpu.clone());
 
     // Главное окно создаётся заранее и держится скрытым: открытие из трея
     // должно быть мгновенным. Его секции наполняются по требованию.
@@ -258,36 +260,92 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         });
     }
+    // Крестик на виджете. Прячет окно и снижает частоту опроса, но Bamboo
+    // продолжает работать: вернуть виджет можно из трея, выйти — оттуда же.
+    {
+        let weak = widget.as_weak();
+        let visible = visible.clone();
+        widget.on_close_widget(move || {
+            if let Some(widget) = weak.upgrade() {
+                widget.window().hide().ok();
+                visible.store(false, Ordering::Relaxed);
+            }
+        });
+    }
 
     // Загрузка разделов по требованию: диск, питание и журнал — разовые
     // запросы, держать их в фоне незачем.
     {
         let weak = main_window.as_weak();
-        let drives = drives_model.clone();
-        let wakes = wakes_model.clone();
-        let journal = journal_model.clone();
         main_window.on_refresh(move || {
             let Some(win) = weak.upgrade() else {
                 return;
             };
-            match win.get_section() {
+            let section = win.get_section();
+
+            // Раздел грузим в фоне, а не здесь. Чтение SMART идёт через IOCTL
+            // к накопителю, история пробуждений — запросом к журналу событий,
+            // журнал действий — обращением к базе. На живой машине любое
+            // из этих чтений занимает от долей секунды до нескольких секунд,
+            // и всё это время окно не разбирало бы сообщения: интерфейс
+            // замирал бы, а нажатия уходили в никуда.
+            let note = match section {
+                2 => "Читаю накопители…",
+                3 => "Читаю журнал пробуждений…",
+                4 => "Открываю журнал действий…",
+                _ => "",
+            };
+            match section {
+                2 => win.set_disk_note(SharedString::from(note)),
+                3 => win.set_power_note(SharedString::from(note)),
+                4 => win.set_journal_note(SharedString::from(note)),
+                _ => return,
+            }
+
+            // В поток уходит только слабая ссылка на окно: модели Slint
+            // живут в потоке интерфейса и через границу потока не проходят.
+            // Забираем их из самого окна, уже вернувшись в его поток.
+            let back = weak.clone();
+
+            std::thread::spawn(move || match section {
                 2 => {
                     let (rows, note) = mainwin::drive_rows();
-                    replace(&drives, rows.into_iter().map(to_drive_row).collect());
-                    win.set_disk_note(SharedString::from(note));
+                    let _ = slint::invoke_from_event_loop(move || {
+                        if let Some(win) = back.upgrade() {
+                            replace(
+                                &win.get_drives(),
+                                rows.into_iter().map(to_drive_row).collect(),
+                            );
+                            win.set_disk_note(SharedString::from(note));
+                        }
+                    });
                 }
                 3 => {
                     let (rows, note) = mainwin::wake_rows();
-                    replace(&wakes, rows.into_iter().map(to_wake_row).collect());
-                    win.set_power_note(SharedString::from(note));
+                    let _ = slint::invoke_from_event_loop(move || {
+                        if let Some(win) = back.upgrade() {
+                            replace(
+                                &win.get_wakes(),
+                                rows.into_iter().map(to_wake_row).collect(),
+                            );
+                            win.set_power_note(SharedString::from(note));
+                        }
+                    });
                 }
                 4 => {
                     let (rows, note) = mainwin::journal_rows();
-                    replace(&journal, rows.into_iter().map(to_journal_row).collect());
-                    win.set_journal_note(SharedString::from(note));
+                    let _ = slint::invoke_from_event_loop(move || {
+                        if let Some(win) = back.upgrade() {
+                            replace(
+                                &win.get_journal(),
+                                rows.into_iter().map(to_journal_row).collect(),
+                            );
+                            win.set_journal_note(SharedString::from(note));
+                        }
+                    });
                 }
                 _ => {}
-            }
+            });
         });
     }
 
@@ -370,7 +428,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
 
             if let Some(snapshot) = latest {
-                apply_snapshot(&widget, &snapshot, &processes, &spark);
+                apply_snapshot(&widget, &snapshot, &processes, &spark, &spark_cpu);
                 // Обновляем главное окно, только если оно на экране.
                 if let Some(main) = main_weak.upgrade() {
                     if main.window().is_visible() {
@@ -514,6 +572,7 @@ fn apply_snapshot(
     snapshot: &collector::Snapshot,
     processes: &ModelRc<ProcessRow>,
     spark: &ModelRc<f32>,
+    spark_cpu: &ModelRc<f32>,
 ) {
     widget.set_cpu_value(SharedString::from(format!(
         "{:.0}%",
@@ -554,6 +613,7 @@ fn apply_snapshot(
 
     replace(processes, rows);
     replace(spark, snapshot.spark.clone());
+    replace(spark_cpu, snapshot.spark_cpu.clone());
 }
 
 /// Заменяет содержимое модели целиком.

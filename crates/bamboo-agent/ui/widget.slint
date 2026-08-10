@@ -44,6 +44,31 @@ component Card inherits Rectangle {
     }
 }
 
+// Переключатель графика: ЦП или ОЗУ.
+component SparkTab inherits Rectangle {
+    in property <string> label;
+    in property <bool> active;
+    callback chosen();
+
+    width: 34px;
+    height: 18px;
+    border-radius: 4px;
+    background: root.active ? #2f6f4f : (touch.has-hover ? #24312b : transparent);
+
+    touch := TouchArea {
+        clicked => { root.chosen(); }
+    }
+    Text {
+        text: root.label;
+        font-size: 10px;
+        color: root.active ? #ffffff : #7d8f86;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+        width: 100%;
+        height: 100%;
+    }
+}
+
 export component Widget inherits Window {
     title: "Bamboo";
     // Без системной рамки: виджет — не приложение, и заголовок Windows
@@ -62,11 +87,18 @@ export component Widget inherits Window {
     in property <[ProcessRow]> processes: [];
     // Спарклайн памяти: доли от максимума за окно наблюдения, 0..1.
     in property <[float]> spark: [];
+    // Спарклайн процессора: доли от целой машины, 0..1.
+    in property <[float]> spark-cpu: [];
+    // Что показывает график: процессор или память.
+    in-out property <bool> spark-cpu-mode: false;
     in property <bool> pinned: false;
 
     callback toggle-pin();
     // Тянуть виджет можно за строку состояния: своей шапки у него нет.
     callback drag-window();
+    // Убрать виджет с экрана. Наблюдение при этом продолжается — Bamboo
+    // остаётся в трее, оттуда виджет и возвращается.
+    callback close-widget();
 
     VerticalLayout {
         padding: 12px;
@@ -109,6 +141,24 @@ export component Widget inherits Window {
                     font-size: 11px;
                 }
             }
+
+            // Крестик убирает виджет с экрана, но Bamboo не выключает:
+            // наблюдение продолжается, вернуть виджет можно из трея.
+            Rectangle {
+                width: 28px;
+                height: 20px;
+                border-radius: 5px;
+                background: close-touch.has-hover ? #8f3b3b : #1e2a24;
+
+                close-touch := TouchArea {
+                    clicked => { root.close-widget(); }
+                }
+                Text {
+                    text: "×";
+                    font-size: 13px;
+                    color: #b6c6bd;
+                }
+            }
         }
 
         // Две карточки
@@ -128,27 +178,57 @@ export component Widget inherits Window {
             }
         }
 
-        // Спарклайн памяти за последнее время
-        Rectangle {
-            height: 52px;
-            background: #1e2a24;
-            border-radius: 8px;
+        // График за последнее время: память или процессор на выбор.
+        VerticalLayout {
+            spacing: 4px;
 
             HorizontalLayout {
-                padding: 6px;
-                spacing: 1px;
-                alignment: end;
+                spacing: 6px;
+                Text {
+                    // У памяти шкала растянута по окну наблюдения, у процессора
+                    // абсолютная — об этом честно написано прямо здесь, иначе
+                    // два графика в одном месте читались бы одинаково.
+                    text: root.spark-cpu-mode
+                        ? "Процессор, 0–100%"
+                        : "Память, размах за последние минуты";
+                    font-size: 10px;
+                    color: #62736a;
+                    vertical-alignment: center;
+                    horizontal-stretch: 1;
+                }
+                SparkTab {
+                    label: "ЦП";
+                    active: root.spark-cpu-mode;
+                    chosen => { root.spark-cpu-mode = true; }
+                }
+                SparkTab {
+                    label: "ОЗУ";
+                    active: !root.spark-cpu-mode;
+                    chosen => { root.spark-cpu-mode = false; }
+                }
+            }
 
-                for value in root.spark: Rectangle {
-                    width: 4px;
-                    background: transparent;
+            Rectangle {
+                height: 52px;
+                background: #1e2a24;
+                border-radius: 8px;
 
-                    VerticalLayout {
-                        alignment: end;
-                        Rectangle {
-                            height: max(2px, 40px * value);
-                            background: #3f8f66;
-                            border-radius: 1px;
+                HorizontalLayout {
+                    padding: 6px;
+                    spacing: 1px;
+                    alignment: end;
+
+                    for value in root.spark-cpu-mode ? root.spark-cpu : root.spark: Rectangle {
+                        width: 4px;
+                        background: transparent;
+
+                        VerticalLayout {
+                            alignment: end;
+                            Rectangle {
+                                height: max(2px, 40px * value);
+                                background: root.spark-cpu-mode ? #4a86c9 : #3f8f66;
+                                border-radius: 1px;
+                            }
                         }
                     }
                 }
