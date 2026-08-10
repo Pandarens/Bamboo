@@ -55,8 +55,10 @@ impl FreezeCause {
         match self {
             FreezeCause::DiskQueue => {
                 "Запросы к диску встали в очередь, и всё, что ждёт диска, замирает. \
-                 Посмотрите в разделе «Диск», кто его занимает: обычно это \
-                 обновление, антивирус или копирование. Виновника можно придержать."
+                 Если виновник назван выше, его можно придержать: правая кнопка \
+                 на строке процесса, «Придержать диск». Если не назван, диск занят \
+                 изнутри — антивирусом, индексатором поиска или самим накопителем, \
+                 и остаётся только переждать."
             }
             FreezeCause::DriverTime => {
                 "Процессор ушёл в обработку прерываний — это работа драйверов, \
@@ -89,12 +91,28 @@ pub struct Moment {
     pub compressing_memory: bool,
 }
 
+/// Кто чем занимался в этот момент.
+///
+/// Ради этого всё и затевалось. Совет «посмотрите, кто занимает диск»
+/// бесполезен: пока человек откроет раздел, подвисание кончится и виновник
+/// разойдётся. Поэтому список снимается в тот же миг, что и само
+/// подвисание, и хранится вместе с ним.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Bystanders<'a> {
+    /// Кто работал с диском: имя и байт в секунду.
+    pub disk: &'a [(String, u64)],
+    /// Кто держал память: имя и байты.
+    pub memory: &'a [(String, u64)],
+}
+
 /// Зафиксированное подвисание.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Freeze {
     pub cause: FreezeCause,
     /// Что именно намерили — теми же числами, что и человеку показываем.
     pub detail: String,
+    /// Кто был рядом в этот момент. Пусто, если виновника назвать нельзя.
+    pub culprits: String,
 }
 
 /// Определяет, было ли подвисание, и из-за чего.
@@ -103,6 +121,11 @@ pub struct Freeze {
 /// Порядок проверки важен: причины перечислены от самой заметной для
 /// человека к менее заметной, и первая же объясняет остальные.
 pub fn detect(moment: Moment) -> Option<Freeze> {
+    detect_with(moment, Bystanders::default())
+}
+
+/// То же, но с обстановкой вокруг: кто чем был занят в этот миг.
+pub fn detect_with(moment: Moment, who: Bystanders<'_>) -> Option<Freeze> {
     // Нехватка памяти идёт первой: она порождает и очередь к диску, и
     // время в драйверах, и лечится совсем не там, где видна.
     if moment.memory_used_share >= MEMORY_TIGHT && moment.compressing_memory {
@@ -112,6 +135,7 @@ pub fn detect(moment: Moment) -> Option<Freeze> {
                 "занято {:.0}% памяти, идёт вытеснение в подкачку",
                 moment.memory_used_share * 100.0
             ),
+            culprits: name_them("Больше всех памяти держали", who.memory, &bytes),
         });
     }
 
@@ -124,6 +148,9 @@ pub fn detect(moment: Moment) -> Option<Freeze> {
                 "{:.0}% процессорного времени ушло в прерывания и отложенные вызовы",
                 moment.driver_ratio * 100.0
             ),
+            // Виновника здесь нет и быть не может: это время не принадлежит
+            // ни одному процессу. Называть кого-то было бы враньём.
+            culprits: String::new(),
         });
     }
 
@@ -137,17 +164,48 @@ pub fn detect(moment: Moment) -> Option<Freeze> {
                 moment.disk_queue,
                 moment.disk_busy * 100.0
             ),
+            culprits: name_them("В этот момент диск занимали", who.disk, &per_second),
         });
     }
 
     None
 }
 
+/// Перечисляет тех, кто был рядом в момент подвисания.
+///
+/// Пустая строка — обычный исход, и молчание здесь честнее выдумки: бывает,
+/// что диск занят самим накопителем или драйвером, и среди процессов
+/// виновника попросту нет.
+fn name_them(lead: &str, who: &[(String, u64)], show_value: &dyn Fn(u64) -> String) -> String {
+    // Больше трёх имён человек не удержит в голове, а виновник почти
+    // всегда первый.
+    const SHOW: usize = 3;
+
+    let named: Vec<String> = who
+        .iter()
+        .take(SHOW)
+        .map(|(name, value)| format!("{name} ({})", show_value(*value)))
+        .collect();
+
+    if named.is_empty() {
+        return String::new();
+    }
+    format!(" {lead}: {}.", named.join(", "))
+}
+
+fn bytes(value: u64) -> String {
+    bamboo_core::Bytes(value).to_string()
+}
+
+fn per_second(value: u64) -> String {
+    format!("{}/с", bamboo_core::Bytes(value))
+}
+
 /// Память подвисаний: копит зафиксированное и умеет пересказать.
 #[derive(Default)]
 pub struct FreezeLog {
-    /// Причина, момент по монотонным часам и подробности.
-    entries: Vec<(FreezeCause, u64, String)>,
+    /// Причина, момент по монотонным часам, подробности и виновники.
+    entries: Vec<(FreezeCause, u64, String, String)>,
 }
 
 /// Сколько подвисаний помним. Больше десятка не нужно: важна свежая
@@ -164,19 +222,23 @@ impl FreezeLog {
     /// Одно и то же подвисание длится несколько замеров подряд, и писать
     /// каждый из них незачем: считаем это одним событием, пока причина
     /// не сменилась и не прошло время.
-    pub fn observe(&mut self, moment: Moment, at_ms: u64) -> Option<&Freeze> {
+    pub fn observe(&mut self, moment: Moment, who: Bystanders<'_>, at_ms: u64) -> Option<&Freeze> {
         const SAME_EVENT_MS: u64 = 30_000;
 
-        let freeze = detect(moment)?;
+        let freeze = detect_with(moment, who)?;
 
-        if let Some((cause, when, _)) = self.entries.last() {
+        if let Some((cause, when, _, _)) = self.entries.last() {
             if *cause == freeze.cause && at_ms.saturating_sub(*when) < SAME_EVENT_MS {
                 return None;
             }
         }
 
-        self.entries
-            .push((freeze.cause, at_ms, freeze.detail.clone()));
+        self.entries.push((
+            freeze.cause,
+            at_ms,
+            freeze.detail.clone(),
+            freeze.culprits.clone(),
+        ));
         if self.entries.len() > REMEMBER {
             self.entries.remove(0);
         }
@@ -193,7 +255,7 @@ impl FreezeLog {
     /// Пусто — значит система вела себя ровно всё время наблюдения, и это
     /// стоит сказать: отсутствие жалоб тоже сведения.
     pub fn summary(&self, now_ms: u64) -> Option<String> {
-        let (cause, when, detail) = self.entries.last()?;
+        let (cause, when, detail, culprits) = self.entries.last()?;
 
         let ago = now_ms.saturating_sub(*when);
         let ago = if ago < 60_000 {
@@ -206,7 +268,7 @@ impl FreezeLog {
         let same = self
             .entries
             .iter()
-            .filter(|(other, _, _)| other == cause)
+            .filter(|(other, _, _, _)| other == cause)
             .count();
         let repeats = if same > 1 {
             format!(" Такое повторялось {same} раз за время наблюдения.")
@@ -215,7 +277,7 @@ impl FreezeLog {
         };
 
         Some(format!(
-            "Подвисание {ago}: {} — {detail}.{repeats} {}",
+            "Подвисание {ago}: {} — {detail}.{culprits}{repeats} {}",
             cause.name(),
             cause.advice()
         ))
@@ -336,7 +398,7 @@ mod tests {
         };
 
         for tick in 0..5 {
-            log.observe(stuck, tick * 1000);
+            log.observe(stuck, Bystanders::default(), tick * 1000);
         }
         assert_eq!(log.count(), 1);
     }
@@ -349,8 +411,8 @@ mod tests {
             ..Default::default()
         };
 
-        log.observe(stuck, 0);
-        log.observe(stuck, 120_000);
+        log.observe(stuck, Bystanders::default(), 0);
+        log.observe(stuck, Bystanders::default(), 120_000);
         assert_eq!(log.count(), 2);
     }
 
@@ -363,13 +425,123 @@ mod tests {
                 disk_busy: 0.95,
                 ..Default::default()
             },
+            Bystanders::default(),
             0,
         );
 
         let text = log.summary(45_000).unwrap();
         assert!(text.contains("45 с назад"), "{text}");
         assert!(text.contains("накопитель не успевает"), "{text}");
-        assert!(text.contains("Диск"), "должен быть совет: {text}");
+        assert!(
+            text.contains("Придержать диск"),
+            "должен быть совет: {text}"
+        );
+    }
+
+    #[test]
+    fn the_culprit_is_captured_at_the_moment_not_looked_up_later() {
+        // Ради этого всё и затевалось. Отправлять человека смотреть, кто
+        // занимает диск, бесполезно: пока он откроет раздел, подвисание
+        // кончится и виновник разойдётся.
+        let hogs = [
+            ("MsMpEng.exe".to_string(), 40 << 20),
+            ("SearchIndexer.exe".to_string(), 12 << 20),
+        ];
+        let freeze = detect_with(
+            Moment {
+                disk_queue: 20,
+                disk_busy: 0.95,
+                ..Default::default()
+            },
+            Bystanders {
+                disk: &hogs,
+                memory: &[],
+            },
+        )
+        .unwrap();
+
+        assert!(freeze.culprits.contains("MsMpEng.exe"), "{freeze:?}");
+        assert!(freeze.culprits.contains("SearchIndexer.exe"), "{freeze:?}");
+        // С числами: без них имя ничего не значит.
+        assert!(freeze.culprits.contains("/с"), "{freeze:?}");
+    }
+
+    #[test]
+    fn driver_time_never_blames_a_process() {
+        // Это время не принадлежит ни одному процессу. Назвать кого-то
+        // рядом стоящего было бы враньём, а человек пошёл бы его закрывать.
+        let hogs = [("chrome.exe".to_string(), 40 << 20)];
+        let freeze = detect_with(
+            Moment {
+                driver_ratio: 0.35,
+                ..Default::default()
+            },
+            Bystanders {
+                disk: &hogs,
+                memory: &hogs,
+            },
+        )
+        .unwrap();
+
+        assert_eq!(freeze.culprits, "", "драйверам виновника не приписываем");
+    }
+
+    #[test]
+    fn memory_pressure_names_who_held_the_memory() {
+        let hogs = [("chrome.exe".to_string(), 6 << 30)];
+        let freeze = detect_with(
+            Moment {
+                memory_used_share: 0.97,
+                compressing_memory: true,
+                ..Default::default()
+            },
+            Bystanders {
+                disk: &[],
+                memory: &hogs,
+            },
+        )
+        .unwrap();
+
+        assert!(freeze.culprits.contains("chrome.exe"), "{freeze:?}");
+    }
+
+    #[test]
+    fn no_named_culprit_is_better_than_a_made_up_one() {
+        // Диск бывает занят изнутри: сборкой мусора у SSD, драйвером.
+        // Тогда среди процессов виновника нет, и молчать честнее.
+        let freeze = detect_with(
+            Moment {
+                disk_queue: 20,
+                ..Default::default()
+            },
+            Bystanders::default(),
+        )
+        .unwrap();
+
+        assert_eq!(freeze.culprits, "");
+        // Но совет обязан объяснить и этот случай.
+        assert!(freeze.cause.advice().contains("не назван"));
+    }
+
+    #[test]
+    fn only_a_few_culprits_are_named() {
+        let many: Vec<(String, u64)> = (0..10)
+            .map(|n| (format!("процесс{n}.exe"), 10 << 20))
+            .collect();
+        let freeze = detect_with(
+            Moment {
+                disk_queue: 20,
+                ..Default::default()
+            },
+            Bystanders {
+                disk: &many,
+                memory: &[],
+            },
+        )
+        .unwrap();
+
+        assert!(freeze.culprits.contains("процесс0.exe"), "{freeze:?}");
+        assert!(!freeze.culprits.contains("процесс5.exe"), "{freeze:?}");
     }
 
     #[test]
@@ -380,7 +552,7 @@ mod tests {
             ..Default::default()
         };
         for round in 0..3 {
-            log.observe(stuck, round * 120_000);
+            log.observe(stuck, Bystanders::default(), round * 120_000);
         }
 
         let text = log.summary(400_000).unwrap();

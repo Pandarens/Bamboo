@@ -5,6 +5,7 @@
 
 use bamboo_core::{Error, Result};
 use windows_sys::Win32::System::SystemInformation::GetTickCount;
+use windows_sys::Win32::UI::Input::KeyboardAndMouse::GetDoubleClickTime;
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{GetLastInputInfo, LASTINPUTINFO};
 use windows_sys::Win32::UI::Shell::{
     SHQueryUserNotificationState, QUNS_ACCEPTS_NOTIFICATIONS, QUNS_APP, QUNS_BUSY,
@@ -108,6 +109,18 @@ pub fn notification_state() -> NotificationState {
         x if x == QUNS_APP => NotificationState::FullScreenApp,
         _ => NotificationState::Unknown,
     }
+}
+
+/// Сколько времени Windows отводит на двойной щелчок.
+///
+/// Настройка человека, а не наша: темп двойного щелчка выставляется
+/// в параметрах мыши, и подменять его своим числом значит мешать тому,
+/// кто его настроил.
+pub fn double_click_time_ms() -> Option<u32> {
+    // Функция не возвращает ошибок и не может не сработать: значение
+    // всегда есть, даже если человек его не трогал.
+    let ms = unsafe { GetDoubleClickTime() };
+    (ms > 0).then_some(ms)
 }
 
 #[cfg(test)]

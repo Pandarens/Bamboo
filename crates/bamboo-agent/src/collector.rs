@@ -296,8 +296,35 @@ fn run(sender: Sender<Snapshot>, visible: WidgetVisible) {
             tick.system.memory.physical_total,
             compressing,
         );
+        // Виновников снимаем здесь же, а не потом: пока человек откроет
+        // окно, подвисание кончится и виновник разойдётся.
+        let mut disk_hogs: Vec<(String, u64)> = top
+            .iter()
+            .map(|line| {
+                (
+                    line.name.clone(),
+                    line.read_per_second.saturating_add(line.write_per_second),
+                )
+            })
+            .filter(|(_, rate)| *rate > 0)
+            .collect();
+        disk_hogs.sort_by_key(|(_, rate)| core::cmp::Reverse(*rate));
+
+        let mut memory_hogs: Vec<(String, u64)> = top
+            .iter()
+            .map(|line| (line.name.clone(), line.memory.as_u64()))
+            .collect();
+        memory_hogs.sort_by_key(|(_, size)| core::cmp::Reverse(*size));
+
         let now_ms = started.elapsed().as_millis() as u64;
-        freezes.observe(moment, now_ms);
+        freezes.observe(
+            moment,
+            bamboo_analyze::freeze::Bystanders {
+                disk: &disk_hogs,
+                memory: &memory_hogs,
+            },
+            now_ms,
+        );
         let freeze = freezes.summary(now_ms);
 
         // Считаем до сборки снимка: дальше список процессов уедет в него.

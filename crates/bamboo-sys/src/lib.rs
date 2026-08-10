@@ -62,6 +62,6 @@ pub use startup::{
     StartupItem,
 };
 pub use storage::{enumerate as enumerate_drives, read_smart, Drive};
-pub use user::{idle_ms, notification_state, NotificationState};
+pub use user::{double_click_time_ms, idle_ms, notification_state, NotificationState};
 pub use wake::{wake_history, WakeEvent, WakeSource};
 pub use window::window_titles;

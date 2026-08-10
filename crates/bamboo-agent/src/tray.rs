@@ -24,6 +24,13 @@ pub struct Tray {
     quit_id: MenuId,
     /// Пункт с галочкой: его состояние надо обновлять после переключения.
     autostart: CheckMenuItem,
+    /// Одиночный щелчок, реакция на который отложена.
+    ///
+    /// Двойной щелчок Windows присылает как пару одиночных плюс отдельное
+    /// событие. Если реагировать на первый же щелчок, виджет успеет мигнуть
+    /// прежде, чем откроется окно. Поэтому одиночный щелчок ждёт: не придёт
+    /// ли следом второй.
+    pending_click: std::cell::Cell<Option<std::time::Instant>>,
 }
 
 impl Tray {
@@ -60,6 +67,7 @@ impl Tray {
             autostart_id: autostart.id().clone(),
             quit_id: quit.id().clone(),
             autostart,
+            pending_click: std::cell::Cell::new(None),
         })
     }
 
@@ -108,20 +116,54 @@ impl Tray {
         }
 
         while let Ok(event) = TrayIconEvent::receiver().try_recv() {
-            // Реагируем только на отпускание левой кнопки: нажатие приходит
-            // отдельным событием, и на паре «нажал-отпустил» виджет мигнул бы.
-            if let TrayIconEvent::Click {
-                button: tray_icon::MouseButton::Left,
-                button_state: tray_icon::MouseButtonState::Up,
-                ..
-            } = event
-            {
+            match event {
+                // Двойной щелчок открывает окно. Проверяем его первым:
+                // одиночный, который уже ждал своей очереди, отменяется.
+                TrayIconEvent::DoubleClick {
+                    button: tray_icon::MouseButton::Left,
+                    ..
+                } => {
+                    self.pending_click.set(None);
+                    actions.push(TrayAction::OpenWindow);
+                }
+                // Реагируем только на отпускание левой кнопки: нажатие
+                // приходит отдельным событием, и на паре «нажал-отпустил»
+                // виджет мигнул бы.
+                // Не отменяем уже открытое окно вторым щелчком пары: после
+                // двойного щелчка Windows пришлёт ещё одно отпускание, и оно
+                // не должно ничего значить.
+                TrayIconEvent::Click {
+                    button: tray_icon::MouseButton::Left,
+                    button_state: tray_icon::MouseButtonState::Up,
+                    ..
+                } if !actions.contains(&TrayAction::OpenWindow) => {
+                    self.pending_click.set(Some(std::time::Instant::now()));
+                }
+                _ => {}
+            }
+        }
+
+        // Одиночный щелчок дождался своего: второго не последовало.
+        if let Some(at) = self.pending_click.get() {
+            if at.elapsed() >= double_click_time() {
+                self.pending_click.set(None);
                 actions.push(TrayAction::ToggleWidget);
             }
         }
 
         actions
     }
+}
+
+/// Сколько ждать второго щелчка.
+///
+/// Берём системную настройку, а не своё число: человек мог выставить свой
+/// темп в параметрах мыши, и наше «полсекунды» ему бы мешало.
+fn double_click_time() -> std::time::Duration {
+    // Значение по умолчанию в Windows — 500 мс. Оно же годится, если
+    // спросить систему нечем.
+    let ms = bamboo_sys::double_click_time_ms().unwrap_or(500);
+    std::time::Duration::from_millis(u64::from(ms))
 }
 
 /// Рисует иконку кодом: морда панды и стебель бамбука сбоку.

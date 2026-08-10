@@ -646,6 +646,71 @@ pub struct DriveRow {
     pub verdict: String,
 }
 
+/// Строка «кто занимает диск».
+pub struct DiskUserRow {
+    pub name: String,
+    /// Скорость: «12.4 МБ/с».
+    pub rate: String,
+    /// Доля от всей работы с диском, 0..1 — для полоски.
+    pub share: f32,
+}
+
+/// Кто прямо сейчас работает с накопителем.
+///
+/// Ровно тот вопрос, ради которого раздел и открывают: «диск в сотне
+/// процентов, кто это». Здоровье накопителя на него не отвечает.
+pub fn disk_user_rows(snapshot: &Snapshot) -> (Vec<DiskUserRow>, String) {
+    // Складываем по программе, а не по процессу: браузер работает с диском
+    // из десятка процессов, и каждый по отдельности выглядит невинно.
+    let mut groups: Vec<(String, u64)> = group_by_app(snapshot)
+        .into_iter()
+        .filter(|group| group.disk_per_second > 0)
+        .map(|group| (group.name, group.disk_per_second))
+        .collect();
+    groups.sort_by_key(|(_, rate)| core::cmp::Reverse(*rate));
+    groups.truncate(10);
+
+    let busiest = snapshot
+        .disks
+        .iter()
+        .map(|disk| disk.busy)
+        .fold(0.0_f64, f64::max);
+
+    if groups.is_empty() {
+        // Пустой список — не пустой экран. Молчание здесь означало бы,
+        // что Bamboo не справился, а на самом деле ответ есть.
+        let note = if busiest > 0.5 {
+            format!(
+                "Накопитель занят на {:.0}%, но среди программ виновника нет.                  Так выглядит работа изнутри: проверка антивируса, индексатор                  поиска или сборка мусора у самого SSD. Закрывать нечего —                  такое проходит само.",
+                busiest * 100.0
+            )
+        } else {
+            "Сейчас с диском никто заметно не работает.".to_string()
+        };
+        return (Vec::new(), note);
+    }
+
+    let total: u64 = groups.iter().map(|(_, rate)| *rate).sum();
+    let rows = groups
+        .iter()
+        .map(|(name, rate)| DiskUserRow {
+            name: name.clone(),
+            rate: format!("{}/с", bamboo_core::Bytes(*rate)),
+            share: if total == 0 {
+                0.0
+            } else {
+                *rate as f32 / total as f32
+            },
+        })
+        .collect();
+
+    let note = format!(
+        "Всего {}/с. Придержать любого можно правой кнопкой на строке          процесса — «Придержать диск». Это обратимо и снимается там же.",
+        bamboo_core::Bytes(total)
+    );
+    (rows, note)
+}
+
 /// Загружает накопители и их здоровье. Разовый запрос при открытии раздела.
 pub fn drive_rows() -> (Vec<DriveRow>, String) {
     let mut rows = Vec::new();
@@ -691,7 +756,14 @@ pub fn drive_rows() -> (Vec<DriveRow>, String) {
         });
     }
 
-    let note = if drives.iter().any(|d| d.bus.name() == "SATA") {
+    let note = if drives.is_empty() {
+        // Пустой экран не говорит ничего. Если накопителей не нашлось,
+        // причина почти всегда в правах, и сказать это надо прямо.
+        "Накопители перечислить не удалось: для этого нужны права \
+         администратора. Здоровье диска читается запросом к самому \
+         накопителю, и обычному пользователю его не отдают."
+            .to_string()
+    } else if drives.iter().any(|d| d.bus.name() == "SATA") {
         "SMART у SATA доступен только с правами администратора — под обычным \
          пользователем здесь будет отказ, а не оценка."
             .to_string()
@@ -1459,6 +1531,61 @@ mod explain_tests {
         assert!(text.contains("На вкладку в среднем"), "{text}");
         // И главное: чистить нечего, есть что закрыть.
         assert!(text.contains("есть что закрыть"), "{text}");
+    }
+
+    #[test]
+    fn disk_users_are_grouped_by_program_not_by_process() {
+        // Браузер работает с диском из десятка процессов, и каждый
+        // по отдельности выглядит невинно. Складывать надо программу.
+        let mut one = line("chrome.exe", 100, 500);
+        one.write_per_second = 6 << 20;
+        let mut two = line("chrome.exe", 101, 500);
+        two.write_per_second = 4 << 20;
+        let mut other = line("MsMpEng.exe", 200, 300);
+        other.read_per_second = 2 << 20;
+
+        let snapshot = Snapshot {
+            top: vec![one, two, other],
+            ..Default::default()
+        };
+
+        let (rows, note) = disk_user_rows(&snapshot);
+        assert_eq!(rows.len(), 2, "два процесса Chrome — одна строка");
+        assert_eq!(rows[0].name, "chrome.exe");
+        assert!(rows[0].rate.contains("10"), "{}", rows[0].rate);
+        // Доля нужна для полоски: у крупнейшего она больше половины.
+        assert!(rows[0].share > 0.5, "{}", rows[0].share);
+        assert!(note.contains("Придержать диск"), "{note}");
+    }
+
+    #[test]
+    fn a_busy_disk_with_no_culprit_still_gets_an_answer() {
+        // Пустой список — не пустой экран. Диск бывает занят изнутри,
+        // и это ответ, а не отсутствие ответа.
+        let snapshot = Snapshot {
+            disks: vec![crate::collector::DiskLine {
+                name: "SSD".into(),
+                busy: 1.0,
+                read_per_second: bamboo_core::Bytes(0),
+                write_per_second: bamboo_core::Bytes(0),
+                queue_depth: 0,
+                saturated: true,
+            }],
+            ..Default::default()
+        };
+
+        let (rows, note) = disk_user_rows(&snapshot);
+        assert!(rows.is_empty());
+        assert!(note.contains("виновника нет"), "{note}");
+        // И главное — что делать: ничего, такое проходит само.
+        assert!(note.contains("проходит само"), "{note}");
+    }
+
+    #[test]
+    fn an_idle_disk_says_so_plainly() {
+        let (rows, note) = disk_user_rows(&Snapshot::default());
+        assert!(rows.is_empty());
+        assert!(note.contains("никто заметно не работает"), "{note}");
     }
 
     #[test]

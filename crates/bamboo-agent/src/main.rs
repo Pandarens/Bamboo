@@ -1110,6 +1110,20 @@ fn apply_overview(
         snapshot.freeze.clone().unwrap_or_default(),
     ));
 
+    // Кто занимает диск. Считается из того же снимка каждым тиком: список
+    // живой, а не снятый в момент открытия раздела.
+    let (users, users_note) = mainwin::disk_user_rows(snapshot);
+    let users: Vec<DiskUserRow> = users
+        .into_iter()
+        .map(|row| DiskUserRow {
+            name: SharedString::from(row.name),
+            rate: SharedString::from(row.rate),
+            share: row.share,
+        })
+        .collect();
+    replace(&main.get_disk_users(), users);
+    main.set_disk_users_note(SharedString::from(users_note));
+
     fill_processes(main, snapshot, processes, limits);
 }
 

@@ -74,6 +74,13 @@ struct PagefileRow {
     fill: float,
 }
 
+// Кто прямо сейчас работает с накопителем.
+struct DiskUserRow {
+    name: string,
+    rate: string,
+    share: float,
+}
+
 struct DriveRow {
     title: string,
     facts: string,
@@ -293,6 +300,8 @@ export component MainWindow inherits Window {
     // Объяснение работы ядра с диском: тот самый случай «виноват System».
     in property <string> system-io: "";
     in property <string> freeze: "";
+    in property <[DiskUserRow]> disk-users: [];
+    in property <string> disk-users-note: "";
     in property <bool> autopilot: false;
     in property <string> autopilot-status: "";
     callback toggle-autopilot();
@@ -335,6 +344,25 @@ export component MainWindow inherits Window {
     in-out property <length> menu-y: 0px;
     // Что случилось с последним действием — показываем под таблицей.
     in property <string> action-note: "";
+
+    // Открыть меню строки. Отдельным вызовом, потому что зовут его две
+    // области нажатия: сама строка и имя группы поверх неё. Имя перекрывает
+    // строку целиком, и без этого правый щелчок по группе не доходил
+    // никуда — меню просто не открывалось.
+    callback open-row-menu(length, length, string, string, bool, string, bool);
+    open-row-menu(ax, ay, pid, name, is-group, pids, throttled) => {
+        // Координаты приходят в системе окна: у PopupWindow родитель — окно,
+        // и без пересчёта он встаёт в угол.
+        root.menu-x = ax - root.absolute-position.x;
+        root.menu-y = ay - root.absolute-position.y;
+        root.menu-pid = pid;
+        root.menu-name = name;
+        root.menu-group = is-group;
+        root.menu-pids = pids;
+        root.menu-throttled = throttled;
+        root.confirming = "";
+        menu.show();
+    }
 
     callback refresh();
     // Пересортировать по столбцу. Rust перестраивает список и возвращает
@@ -919,21 +947,11 @@ export component MainWindow inherits Window {
                                     pointer-event(event) => {
                                         if (event.button == PointerEventButton.right
                                             && event.kind == PointerEventKind.down) {
-                                            // Координаты курсора в окне: своя позиция
-                                            // строки плюс положение мыши внутри неё.
-                                            root.menu-x = row-touch.absolute-position.x
-                                                + row-touch.mouse-x
-                                                - root.absolute-position.x;
-                                            root.menu-y = row-touch.absolute-position.y
-                                                + row-touch.mouse-y
-                                                - root.absolute-position.y;
-                                            root.menu-pid = process.pid;
-                                            root.menu-name = process.name;
-                                            root.menu-group = process.is-group;
-                                            root.menu-pids = process.member-pids;
-                                            root.menu-throttled = process.throttled;
-                                            root.confirming = "";
-                                            menu.show();
+                                            root.open-row-menu(
+                                                row-touch.absolute-position.x + row-touch.mouse-x,
+                                                row-touch.absolute-position.y + row-touch.mouse-y,
+                                                process.pid, process.name, process.is-group,
+                                                process.member-pids, process.throttled);
                                         }
                                     }
                                 }
@@ -966,6 +984,26 @@ export component MainWindow inherits Window {
                                                 ? MouseCursor.pointer
                                                 : MouseCursor.default;
                                             clicked => { root.toggle-group(process.name); }
+                                            // Имя группы лежит поверх строки и
+                                            // перехватывает щелчки. Правый надо
+                                            // обработать здесь же, иначе по группе
+                                            // меню не открыть — а именно у группы
+                                            // есть что предложить: завершить всю
+                                            // разом.
+                                            pointer-event(event) => {
+                                                if (event.button == PointerEventButton.right
+                                                    && event.kind == PointerEventKind.down) {
+                                                    root.open-row-menu(
+                                                        name-touch.absolute-position.x
+                                                            + name-touch.mouse-x,
+                                                        name-touch.absolute-position.y
+                                                            + name-touch.mouse-y,
+                                                        process.pid, process.name,
+                                                        process.is-group,
+                                                        process.member-pids,
+                                                        process.throttled);
+                                                }
+                                            }
                                         }
                                         HorizontalLayout {
                                             padding-left: 4px; spacing: 5px;
@@ -1072,6 +1110,47 @@ export component MainWindow inherits Window {
                 if root.section == 2: VerticalLayout {
                     spacing: 8px;
                     Text { text: "Диск"; font-size: 20px; color: #e8f0ec; }
+
+                    // Кто занимает диск — тот самый вопрос, ради которого
+                    // раздел и открывают. Здоровье накопителя на него
+                    // не отвечает, поэтому список идёт первым.
+                    Text { text: "Кто занимает диск"; font-size: 14px; color: #b6c6bd; }
+                    for user in root.disk-users: Rectangle {
+                        background: #1e2a24; border-radius: 6px;
+                        height: 40px;
+                        VerticalLayout {
+                            padding: 8px; spacing: 4px;
+                            HorizontalLayout {
+                                spacing: 8px;
+                                Text {
+                                    text: user.name; font-size: 12px; color: #e8f0ec;
+                                    horizontal-stretch: 1; overflow: elide;
+                                    vertical-alignment: center;
+                                }
+                                Text {
+                                    text: user.rate; font-size: 12px; color: #7fb0d8;
+                                    vertical-alignment: center;
+                                }
+                            }
+                            Rectangle {
+                                height: 3px; background: #16201b; border-radius: 2px;
+                                Rectangle {
+                                    x: 0;
+                                    width: parent.width * user.share;
+                                    height: parent.height;
+                                    background: #4a86c9; border-radius: 2px;
+                                }
+                            }
+                        }
+                    }
+                    if root.disk-users-note != "": Text {
+                        text: root.disk-users-note;
+                        font-size: 11px; color: #7d8f86; wrap: word-wrap;
+                    }
+
+                    Text {
+                        text: "Здоровье накопителя"; font-size: 14px; color: #b6c6bd;
+                    }
                     for drive in root.drives: Rectangle {
                         background: #1e2a24; border-radius: 8px;
                         VerticalLayout {
