@@ -135,7 +135,7 @@ impl<'a, B: Backend> Executor<'a, B> {
                 Outcome::Applied { journal_id }
             }
             Err(error) => {
-                let _ = self.journal.fail(journal_id);
+                let _ = self.journal.fail(journal_id, &error);
                 Outcome::Failed { journal_id, error }
             }
         }

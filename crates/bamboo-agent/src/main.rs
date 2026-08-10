@@ -54,7 +54,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let (updates, visible) = collector::spawn();
     let widget = Widget::new()?;
 
-    apply_window_look(&widget);
+    widget.show()?;
 
     // Закрепление поверх остальных окон — единственное действие,
     // доступное сейчас из интерфейса.
@@ -367,6 +367,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // вернёт виджет поверх игры, мы бы прятали его снова каждый тик.
     let mut was_fullscreen = false;
     let mut hidden_for_fullscreen = false;
+    // Стили окна применяем из цикла событий, а не сразу после создания.
+    // Slint делает нативное окно лениво, и до первого прохода цикла
+    // дескриптора ещё нет: все настройки уходили в пустоту, поэтому виджет
+    // так и оставался обычным окном с кнопкой в панели задач.
+    let mut styled = false;
     timer.start(
         slint::TimerMode::Repeated,
         // Опрашиваем канал чаще, чем приходят данные: так виджет реагирует
@@ -376,6 +381,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let Some(widget) = weak.upgrade() else {
                 return;
             };
+
+            if !styled {
+                apply_window_look(&widget);
+                styled = window_handle(&widget) != 0;
+            }
 
             // Полноэкранное приложение (игра, презентация, видео) не должно
             // перекрываться виджетом. Прячем на входе в полный экран и

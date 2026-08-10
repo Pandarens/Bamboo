@@ -64,7 +64,7 @@ fn a_crash_leaves_the_entry_for_the_next_start_to_sort_out() {
 fn a_failed_action_is_not_active() {
     let journal = journal();
     let id = begin(&journal, 1000, Action::EnableEcoQos);
-    journal.fail(id).unwrap();
+    journal.fail(id, "проверка").unwrap();
 
     assert_eq!(journal.get(id).unwrap().unwrap().status, Status::Failed);
     assert!(journal.active().unwrap().is_empty());

@@ -12,9 +12,9 @@ use windows_sys::Win32::Graphics::Dwm::{
 };
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::ReleaseCapture;
 use windows_sys::Win32::UI::WindowsAndMessaging::{
-    GetWindowLongPtrW, SendMessageW, SetWindowLongPtrW, SetWindowPos, ShowWindow, GWL_EXSTYLE,
+    GetWindowLongPtrW, PostMessageW, SetWindowLongPtrW, SetWindowPos, ShowWindow, GWL_EXSTYLE,
     HTCAPTION, HWND_NOTOPMOST, HWND_TOPMOST, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SW_MINIMIZE,
-    WM_NCLBUTTONDOWN, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW,
+    WM_LBUTTONUP, WM_NCLBUTTONDOWN, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW,
 };
 
 /// Применяет стили виджета к окну.
@@ -127,12 +127,32 @@ pub fn minimize(hwnd: isize) -> Result<()> {
 /// пришлось на заголовок, — дальше окно тащит сама система, ровно так же,
 /// как обычное окно с рамкой.
 pub fn begin_drag(hwnd: isize) -> Result<()> {
+    start_system_move(hwnd, HTCAPTION as usize)
+}
+
+/// Просит Windows начать перетаскивание или растягивание окна.
+///
+/// Отправляем именно `PostMessage`, а не `SendMessage`, и это важно.
+/// `SendMessage` не вернётся, пока Windows не закончит свой модальный цикл
+/// перетаскивания, — а вызывают нас из обработчика нажатия в интерфейсе.
+/// Интерфейс на всё это время замирает, а главное, он так и не узнаёт, что
+/// кнопку мыши отпустили: событие «отпустили» съедает модальный цикл. Окно
+/// остаётся с намертво «нажатой» кнопкой и перестаёт отзываться на щелчки.
+///
+/// Поэтому сначала отдаём интерфейсу событие отпускания, чтобы он закрыл
+/// нажатие честно, и только потом ставим сообщение в очередь и немедленно
+/// возвращаемся.
+fn start_system_move(hwnd: isize, hit_code: usize) -> Result<()> {
     if hwnd == 0 {
         return Err(Error::Unsupported("окно ещё не создано"));
     }
+    let hwnd = hwnd as HWND;
     unsafe {
         ReleaseCapture();
-        SendMessageW(hwnd as HWND, WM_NCLBUTTONDOWN, HTCAPTION as usize, 0);
+        // Закрываем нажатие в самом приложении: иначе оно останется
+        // «зажатым» и следующие щелчки будут проигнорированы.
+        PostMessageW(hwnd, WM_LBUTTONUP, 0, 0);
+        PostMessageW(hwnd, WM_NCLBUTTONDOWN, hit_code, 0);
     }
     Ok(())
 }
@@ -191,14 +211,7 @@ impl ResizeEdge {
 /// Windows, что нажатие пришлось на край окна, и дальше размер меняет сама
 /// система — с правильным курсором, привязкой к краям экрана и всем прочим.
 pub fn begin_resize(hwnd: isize, edge: ResizeEdge) -> Result<()> {
-    if hwnd == 0 {
-        return Err(Error::Unsupported("окно ещё не создано"));
-    }
-    unsafe {
-        ReleaseCapture();
-        SendMessageW(hwnd as HWND, WM_NCLBUTTONDOWN, edge.hit_code(), 0);
-    }
-    Ok(())
+    start_system_move(hwnd, edge.hit_code())
 }
 
 const fn size_of_i32() -> u32 {

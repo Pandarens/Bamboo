@@ -426,7 +426,12 @@ pub fn journal(entries: &[Entry], path: &str) {
             entry.status.as_str(),
         );
         if let Some(reason) = &entry.revert_reason {
-            println!("      причина отката: {reason}");
+            let what = if entry.status == bamboo_journal::Status::Failed {
+                "причина неудачи"
+            } else {
+                "причина отката"
+            };
+            println!("      {what}: {reason}");
         }
     }
 
