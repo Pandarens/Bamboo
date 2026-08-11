@@ -44,6 +44,18 @@ impl Backend for SystemBackend {
                     .with("service_start_type", current.start_type)
                     .with("service_delayed", yes_no(current.delayed)))
             }
+            Action::StopService | Action::DisableService => {
+                let current = bamboo_sys::service_start(&target.app_key)
+                    .map_err(|error| error.to_string())?;
+                // Триггер запоминаем вместе с типом запуска. Без него откат
+                // вернул бы «ручной запуск» и выглядел бы успешным, хотя
+                // служба, просыпавшаяся сама, просыпаться перестала бы.
+                let trigger = bamboo_sys::has_start_trigger(&target.app_key).unwrap_or(false);
+                Ok(PriorState::new()
+                    .with("service_start_type", current.start_type)
+                    .with("service_delayed", yes_no(current.delayed))
+                    .with("service_trigger", yes_no(trigger)))
+            }
             other => Err(format!("{} ещё не реализовано", other.name())),
         }
     }
@@ -75,6 +87,24 @@ impl Backend for SystemBackend {
                     bamboo_sys::ServiceStart::delayed_auto(),
                 )
                 .map_err(|error| error.to_string())
+            }
+            Action::StopService => bamboo_sys::services::stop_service(&target.app_key)
+                .map_err(|error| error.to_string()),
+            Action::DisableService => {
+                // Триггерную службу не отключаем совсем. Внешне она такая же
+                // «ручная», как обычная, но просыпается сама — по появлению
+                // устройства, открытию порта, событию. Отключив её, человек
+                // получит отказ чего-то постороннего и связь с причиной
+                // не найдёт никогда. Проверено, что угадать это по имени
+                // нельзя: триггер есть даже у планировщика заданий.
+                if bamboo_sys::has_start_trigger(&target.app_key).unwrap_or(false) {
+                    return Err(
+                        "служба просыпается по триггеру: отключение сломает то,                          ради чего она есть, и связь с причиной найти будет нечем"
+                            .to_string(),
+                    );
+                }
+                bamboo_sys::set_service_start(&target.app_key, bamboo_sys::ServiceStart::disabled())
+                    .map_err(|error| error.to_string())
             }
             other => Err(format!("{} ещё не реализовано", other.name())),
         }
@@ -121,6 +151,30 @@ impl Backend for SystemBackend {
                         start_type,
                         delayed,
                     },
+                )
+                .map_err(|error| error.to_string())
+            }
+
+            Action::StopService => {
+                // Запустить обратно. Тип запуска не трогаем: остановка его
+                // не меняла, и «восстановить» его значило бы изменить то,
+                // чего мы не касались.
+                bamboo_sys::services::start_service(&target.app_key)
+                    .map_err(|error| error.to_string())
+            }
+
+            Action::DisableService => {
+                // Тот же довод, что и у отложенного старта: угадывать
+                // прежний тип запуска нельзя. Без записи откат невозможен,
+                // и сказать об этом честнее, чем выставить «ручной»
+                // и объявить дело сделанным.
+                let start_type = prior.get_u32("service_start_type").ok_or_else(|| {
+                    "в журнале нет прежнего типа запуска службы, откат невозможен".to_string()
+                })?;
+                let delayed = prior.get_bool("service_delayed").unwrap_or(false);
+                bamboo_sys::set_service_start(
+                    &target.app_key,
+                    bamboo_sys::ServiceStart::from_parts(start_type, delayed),
                 )
                 .map_err(|error| error.to_string())
             }
@@ -228,9 +282,31 @@ mod tests {
 
     #[test]
     fn unimplemented_actions_say_so_instead_of_pretending() {
+        // Список нарочно перечислен здесь целиком: он и есть то, чего
+        // исполнитель ещё не умеет. Реализуете действие — тест упадёт
+        // и напомнит убрать его отсюда. Прежняя редакция сторожила так
+        // остановку службы и честно упала, когда та появилась.
+        //
+        // Придержание диска здесь особый случай: оно идёт мимо
+        // исполнителя намеренно — ограничение живёт ровно столько,
+        // сколько жив дескриптор job-объекта.
         let backend = SystemBackend;
-        let error = backend.apply(Action::StopService, &me()).unwrap_err();
-        assert!(error.contains("ещё не реализовано"));
+        for action in [
+            Action::DisableStartupItem,
+            Action::DisableWakeTimer,
+            Action::DisableScheduledTask,
+            Action::FreezeProcess,
+            Action::LimitDiskRate,
+        ] {
+            let error = backend
+                .apply(action, &me())
+                .expect_err("нереализованное действие обязано отказать");
+            assert!(
+                error.contains("ещё не реализовано"),
+                "{}: {error}",
+                action.name()
+            );
+        }
     }
 
     #[test]
@@ -298,5 +374,61 @@ mod safety_net_tests {
                 "отказ обязан объяснить причину: {note}"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod service_action_tests {
+    use super::*;
+
+    fn target(name: &str) -> Target {
+        Target {
+            app_key: name.to_string(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn a_trigger_service_is_never_disabled() {
+        // Главная защита этих двух действий. Триггерная служба внешне
+        // такая же «ручная», как обычная, но просыпается сама — по
+        // появлению устройства, открытию порта, событию. Отключив её,
+        // человек получит отказ чего-то постороннего и связь с причиной
+        // не найдёт никогда.
+        //
+        // Планировщик заданий здесь не случайно: я считал его обычной
+        // службой и ошибся — у него есть триггер по событию RPC. Значит
+        // угадывать триггерность по имени нельзя, и проверка обязана
+        // быть в коде, а не в голове.
+        if bamboo_sys::has_start_trigger("Schedule").unwrap_or(false) {
+            let error = SystemBackend
+                .apply(Action::DisableService, &target("Schedule"))
+                .expect_err("триггерную службу отключать нельзя");
+            assert!(error.contains("триггеру"), "{error}");
+        }
+    }
+
+    #[test]
+    fn the_prior_state_of_a_service_records_its_trigger() {
+        // Без записи о триггере откат вернул бы тип запуска и выглядел
+        // успешным, хотя служба, просыпавшаяся сама, просыпаться
+        // перестала бы.
+        let Ok(prior) = SystemBackend.capture(Action::DisableService, &target("Dhcp")) else {
+            return; // Без прав состояние не снять — это законный отказ.
+        };
+        let text = prior.to_string();
+        assert!(text.contains("service_start_type"), "{text}");
+        assert!(text.contains("service_trigger"), "{text}");
+    }
+
+    #[test]
+    fn a_revert_without_a_recorded_start_type_is_refused() {
+        // Угадывать прежний тип запуска нельзя: выставить «ручной» вместо
+        // «автоматического» значит тихо оставить службу невключённой,
+        // объявив откат сделанным.
+        let error = SystemBackend
+            .revert(Action::DisableService, &target("Dhcp"), &PriorState::new())
+            .expect_err("без записи откат невозможен");
+        assert!(error.contains("откат невозможен"), "{error}");
     }
 }

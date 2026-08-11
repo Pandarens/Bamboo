@@ -65,6 +65,7 @@ pub use restore::{
     create_restore_point, has_recent_restore_point, last_restore_point_ms, RestoreOutcome,
 };
 pub use schedtask::{channel_enabled, recent_task_starts, started_by_task, StartedByTask};
+pub use service::has_start_trigger;
 pub use service::{
     install as install_service, service_start, set_service_start, uninstall as uninstall_service,
     ServiceStart, StopSignal,

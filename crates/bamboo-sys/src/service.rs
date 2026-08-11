@@ -347,6 +347,26 @@ impl ServiceStart {
     pub fn is_disabled(self) -> bool {
         self.start_type == SERVICE_DISABLED
     }
+
+    /// Полностью отключённая служба — целевое состояние действия шестого
+    /// уровня.
+    pub fn disabled() -> ServiceStart {
+        ServiceStart {
+            start_type: SERVICE_DISABLED,
+            delayed: false,
+        }
+    }
+
+    /// Прежнее состояние по записанным в журнал числам.
+    ///
+    /// Нужно для отката: восстанавливать надо ровно то, что было, а не
+    /// «что-то разумное».
+    pub fn from_parts(start_type: u32, delayed: bool) -> ServiceStart {
+        ServiceStart {
+            start_type,
+            delayed,
+        }
+    }
 }
 
 fn open_service(manager: &ScHandle, name: &str, access: u32) -> Result<ScHandle> {
@@ -540,5 +560,108 @@ mod tests {
         assert!(target.delayed);
         assert!(!target.is_demand_start());
         assert!(!target.is_disabled());
+    }
+}
+
+/// Запускается ли служба по триггеру.
+///
+/// Важно перед отключением. Триггерная служба стоит в «ручном» запуске
+/// и просыпается сама, когда появляется устройство, открывается порт или
+/// приходит событие. Отключить её — не то же самое, что отключить обычную
+/// ручную: обычная просто не запустится сама, а у триггерной перестанет
+/// работать то, ради чего она есть, и связь с причиной человек не найдёт.
+pub fn has_start_trigger(name: &str) -> Result<bool> {
+    use windows_sys::Win32::System::Services::{
+        QueryServiceConfig2W, SERVICE_CONFIG_TRIGGER_INFO, SERVICE_TRIGGER_INFO,
+    };
+
+    let manager = open_manager(SC_MANAGER_CONNECT)?;
+    let service = open_service(&manager, name, SERVICE_QUERY_CONFIG)?;
+
+    // Сначала спрашиваем размер: у службы триггеров может быть несколько,
+    // и буфер под них переменный.
+    let mut needed: u32 = 0;
+    unsafe {
+        QueryServiceConfig2W(
+            service.0,
+            SERVICE_CONFIG_TRIGGER_INFO,
+            core::ptr::null_mut(),
+            0,
+            &mut needed,
+        )
+    };
+    if needed == 0 {
+        return Ok(false);
+    }
+
+    let mut buffer = vec![0u8; needed as usize];
+    let ok = unsafe {
+        QueryServiceConfig2W(
+            service.0,
+            SERVICE_CONFIG_TRIGGER_INFO,
+            buffer.as_mut_ptr(),
+            needed,
+            &mut needed,
+        )
+    };
+    if ok == 0 {
+        return Err(Error::Win32 {
+            call: "QueryServiceConfig2W(триггеры)",
+            code: unsafe { windows_sys::Win32::Foundation::GetLastError() },
+        });
+    }
+
+    let info = unsafe { &*buffer.as_ptr().cast::<SERVICE_TRIGGER_INFO>() };
+    Ok(info.cTriggers > 0)
+}
+
+#[cfg(test)]
+mod trigger_tests {
+    use super::*;
+
+    #[test]
+    fn a_service_with_a_known_trigger_is_recognised() {
+        // BthAvctpSvc просыпается по появлению устройства Bluetooth —
+        // хрестоматийная триггерная служба. Если её на машине нет,
+        // проверять нечего.
+        //
+        // Смысл проверки: отличить триггерную службу от обычной ручной
+        // до того, как её отключать. Внешне они одинаковы.
+        for name in ["BthAvctpSvc", "WpnService", "TabletInputService"] {
+            if let Ok(true) = has_start_trigger(name) {
+                return;
+            }
+        }
+    }
+
+    #[test]
+    fn a_plain_service_has_no_trigger() {
+        // Dhcp — обычная автоматическая служба без триггеров (сверено
+        // с sc qtriggerinfo).
+        if let Ok(has) = has_start_trigger("Dhcp") {
+            assert!(!has, "у Dhcp триггеров быть не должно");
+        }
+    }
+
+    #[test]
+    fn a_trigger_cannot_be_guessed_from_the_service_name() {
+        // Этот тест написан после того, как предыдущая его редакция
+        // упала. Я считал, что планировщик заданий — обычная служба
+        // без триггеров, и ошибся: у него есть триггер по событию
+        // интерфейса RPC (сверено с sc qtriggerinfo Schedule).
+        //
+        // Отсюда вывод, ради которого проверка и осталась: по имени
+        // и роли службы её триггерность не угадывается. Спрашивать надо
+        // систему, а не полагаться на здравый смысл, — иначе отключишь
+        // то, что просыпается само, и связь с последствием никто
+        // не найдёт.
+        if let Ok(has) = has_start_trigger("Schedule") {
+            assert!(has, "у планировщика заданий триггер есть");
+        }
+    }
+
+    #[test]
+    fn an_unknown_service_fails_cleanly() {
+        assert!(has_start_trigger("НетТакойСлужбы").is_err());
     }
 }

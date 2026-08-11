@@ -394,3 +394,80 @@ mod owner_tests {
         assert!(stop_service("НетТакойСлужбыBamboo").is_err());
     }
 }
+
+/// Запускает службу.
+///
+/// Нужна ровно для отката остановки: остановить и не уметь запустить
+/// обратно — это не обратимое действие, а односторонняя поломка.
+pub fn start_service(name: &str) -> Result<()> {
+    use windows_sys::Win32::System::Services::{
+        OpenServiceW, StartServiceW, SC_MANAGER_CONNECT, SERVICE_START,
+    };
+
+    let manager =
+        unsafe { OpenSCManagerW(core::ptr::null(), core::ptr::null(), SC_MANAGER_CONNECT) };
+    if manager.is_null() {
+        return Err(Error::Win32 {
+            call: "OpenSCManagerW(запуск)",
+            code: unsafe { GetLastError() },
+        });
+    }
+
+    let wide: Vec<u16> = name.encode_utf16().chain(core::iter::once(0)).collect();
+    let service = unsafe { OpenServiceW(manager, wide.as_ptr(), SERVICE_START) };
+    if service.is_null() {
+        let code = unsafe { GetLastError() };
+        unsafe { CloseServiceHandle(manager) };
+        return Err(Error::Win32 {
+            call: "OpenServiceW(запуск)",
+            code,
+        });
+    }
+
+    let ok = unsafe { StartServiceW(service, 0, core::ptr::null()) };
+    let code = unsafe { GetLastError() };
+
+    unsafe {
+        CloseServiceHandle(service);
+        CloseServiceHandle(manager);
+    }
+
+    // Уже запущена — не ошибка, а именно то состояние, которого добивались.
+    const ERROR_SERVICE_ALREADY_RUNNING: u32 = 1056;
+    if ok == 0 && code != ERROR_SERVICE_ALREADY_RUNNING {
+        return Err(Error::Win32 {
+            call: "StartServiceW",
+            code,
+        });
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod start_tests {
+    use super::*;
+
+    #[test]
+    fn an_unknown_service_fails_cleanly() {
+        assert!(start_service("НетТакойСлужбы").is_err());
+    }
+
+    #[test]
+    fn starting_an_already_running_service_is_not_an_error() {
+        // Откат должен быть идемпотентным: если служба уже поднялась сама,
+        // это тот же успех, а не повод объявить откат неудавшимся.
+        //
+        // RpcSs запущена всегда: без неё Windows не работает.
+        match start_service("RpcSs") {
+            Ok(()) => {}
+            // Без прав запустить нельзя — это другой отказ, и он законен.
+            Err(error) => {
+                let text = error.to_string();
+                assert!(
+                    text.contains("отказано") || text.contains("код 5"),
+                    "{text}"
+                );
+            }
+        }
+    }
+}
