@@ -1,15 +1,19 @@
+# yaml-language-server: $schema=https://aka.ms/winget-manifest.installer.1.12.0.schema.json
+#
+# Portable без подписи. Так можно: в каталоге winget неподписанных
+# portable-пакетов много — fzf, fd и прочие. Прежняя редакция этого
+# манифеста утверждала обратное, и это было неверно.
 PackageIdentifier: Pandarens.Bamboo
 PackageVersion: 0.9.0-beta.6
 InstallerType: portable
-# Установщика у Bamboo нет и не нужно: это один файл, который никуда
-# себя не прописывает. Автозапуск включается в самой программе, и делать
-# это за человека при установке было бы навязчиво.
+# Установщика у Bamboo нет и не нужно: это один файл, который никуда себя
+# не прописывает. Автозапуск включается в самой программе — делать это
+# за человека при установке было бы навязчиво.
 Commands:
-  - bamboo
-ReleaseDate: 2026-08-10
+- bamboo
 Installers:
-  - Architecture: x64
-    InstallerUrl: https://github.com/Pandarens/Bamboo/releases/download/v0.9.0-beta.6/bamboo-agent.exe
-    InstallerSha256: 75B3408611A428E315B4D316FFAC15616DF4C964F74CFD3C9DD1D720C827FB56
+- Architecture: x64
+  InstallerUrl: https://github.com/Pandarens/Bamboo/releases/download/v0.9.0-beta.6/bamboo-agent.exe
+  InstallerSha256: 75B3408611A428E315B4D316FFAC15616DF4C964F74CFD3C9DD1D720C827FB56
 ManifestType: installer
-ManifestVersion: 1.6.0
+ManifestVersion: 1.12.0

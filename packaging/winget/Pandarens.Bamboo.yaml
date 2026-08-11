@@ -1,8 +1,6 @@
-# Манифест winget, версия 1.6. Подать можно только запросом на слияние
-# в microsoft/winget-pkgs, и там требуется подписанный установщик —
-# см. packaging/README.md. Файл готов заранее, но не подан намеренно.
+# yaml-language-server: $schema=https://aka.ms/winget-manifest.version.1.12.0.schema.json
 PackageIdentifier: Pandarens.Bamboo
 PackageVersion: 0.9.0-beta.6
 DefaultLocale: ru-RU
 ManifestType: version
-ManifestVersion: 1.6.0
+ManifestVersion: 1.12.0

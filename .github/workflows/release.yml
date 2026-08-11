@@ -88,5 +88,28 @@ jobs:
             bamboo-agent.exe --repo ${{ github.repository }}`.
 
             Подписи у файла нет — Windows покажет SmartScreen. Это
-            ожидаемо: сертификата у проекта нет, а самоподписанный
-            от SmartScreen не спасает.
+            решение, а не недоделка: проект открытый и бесплатный,
+            сертификат стоит денег, а самоподписанный от SmartScreen
+            не спасает — доверие там к репутации издателя, а не к факту
+            подписи.
+
+  winget:
+    name: Подача в winget
+    needs: build
+    runs-on: ubuntu-latest
+    # Только для окончательных выпусков. Каталог winget — не место
+    # для бет: люди ставят оттуда не глядя, и подсовывать им
+    # предварительную сборку нечестно.
+    if: ${{ !contains(github.ref_name, 'beta') }}
+
+    steps:
+      - name: Отправить обновление
+        uses: vedantmgoyal9/winget-releaser@main
+        with:
+          identifier: Pandarens.Bamboo
+          installers-regex: 'bamboo-agent\.exe$'
+          # Нужен личный токен с правом public_repo: действие делает
+          # копию microsoft/winget-pkgs и открывает туда запрос
+          # на слияние. Токен репозитория для чужого репозитория
+          # не годится.
+          token: ${{ secrets.WINGET_TOKEN }}
