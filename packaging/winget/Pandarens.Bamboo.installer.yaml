@@ -4,7 +4,7 @@
 # portable-пакетов много — fzf, fd и прочие. Прежняя редакция этого
 # манифеста утверждала обратное, и это было неверно.
 PackageIdentifier: Pandarens.Bamboo
-PackageVersion: 0.9.0-beta.6
+PackageVersion: 0.9.0-beta.7
 InstallerType: portable
 # Установщика у Bamboo нет и не нужно: это один файл, который никуда себя
 # не прописывает. Автозапуск включается в самой программе — делать это
@@ -13,7 +13,7 @@ Commands:
 - bamboo
 Installers:
 - Architecture: x64
-  InstallerUrl: https://github.com/Pandarens/Bamboo/releases/download/v0.9.0-beta.6/bamboo-agent.exe
-  InstallerSha256: 75B3408611A428E315B4D316FFAC15616DF4C964F74CFD3C9DD1D720C827FB56
+  InstallerUrl: https://github.com/Pandarens/Bamboo/releases/download/v0.9.0-beta.7/bamboo-agent.exe
+  InstallerSha256: 8F5910D1D81316E03EA69F30B43D9C9C9FFA6EA71E3C0771128F14AB833350F4
 ManifestType: installer
 ManifestVersion: 1.12.0

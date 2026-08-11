@@ -3,7 +3,7 @@ resolver = "2"
 members = ["crates/*", "tools/*"]
 
 [workspace.package]
-version = "0.9.0-beta.6"
+version = "0.9.0-beta.7"
 edition = "2021"
 rust-version = "1.82"
 license = "GPL-3.0-or-later"
@@ -14,16 +14,16 @@ authors = ["Pandarens"]
 # Внутренние крейты — с путём и версией: без версии cargo считает
 # зависимость wildcard, а wildcard'ы в резидентной утилите запрещены
 # (см. deny.toml).
-bamboo-core = { path = "crates/bamboo-core", version = "0.9.0-beta.6" }
-bamboo-sys = { path = "crates/bamboo-sys", version = "0.9.0-beta.6" }
-bamboo-collect = { path = "crates/bamboo-collect", version = "0.9.0-beta.6" }
-bamboo-etw = { path = "crates/bamboo-etw", version = "0.9.0-beta.6" }
-bamboo-store = { path = "crates/bamboo-store", version = "0.9.0-beta.6" }
-bamboo-analyze = { path = "crates/bamboo-analyze", version = "0.9.0-beta.6" }
-bamboo-policy = { path = "crates/bamboo-policy", version = "0.9.0-beta.6" }
-bamboo-actuate = { path = "crates/bamboo-actuate", version = "0.9.0-beta.6" }
-bamboo-journal = { path = "crates/bamboo-journal", version = "0.9.0-beta.6" }
-bamboo-ipc = { path = "crates/bamboo-ipc", version = "0.9.0-beta.6" }
+bamboo-core = { path = "crates/bamboo-core", version = "0.9.0-beta.7" }
+bamboo-sys = { path = "crates/bamboo-sys", version = "0.9.0-beta.7" }
+bamboo-collect = { path = "crates/bamboo-collect", version = "0.9.0-beta.7" }
+bamboo-etw = { path = "crates/bamboo-etw", version = "0.9.0-beta.7" }
+bamboo-store = { path = "crates/bamboo-store", version = "0.9.0-beta.7" }
+bamboo-analyze = { path = "crates/bamboo-analyze", version = "0.9.0-beta.7" }
+bamboo-policy = { path = "crates/bamboo-policy", version = "0.9.0-beta.7" }
+bamboo-actuate = { path = "crates/bamboo-actuate", version = "0.9.0-beta.7" }
+bamboo-journal = { path = "crates/bamboo-journal", version = "0.9.0-beta.7" }
+bamboo-ipc = { path = "crates/bamboo-ipc", version = "0.9.0-beta.7" }
 
 windows-sys = "0.61"
 
