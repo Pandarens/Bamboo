@@ -19,9 +19,9 @@ use bamboo_policy::{Action, AutonomyMode, Context, ProcessFacts, Profile, UserWh
 /// Читающие запросы (метрики, история, наблюдения) брокер пока не
 /// обслуживает: у него нет своего коллектора и хранилища — они подключатся
 /// отдельно. Честно отвечаем `NotImplemented`, а не выдумываем данные.
-pub fn run<B: Backend>(
+pub fn run<B: Backend, S: bamboo_actuate::SafetyNet>(
     request: &Request,
-    executor: &Executor<'_, B>,
+    executor: &Executor<'_, B, S>,
     whitelist: &UserWhitelist,
     now_unix_ms: i64,
 ) -> Response {
@@ -92,8 +92,8 @@ pub fn run<B: Backend>(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn apply<B: Backend>(
-    executor: &Executor<'_, B>,
+fn apply<B: Backend, S: bamboo_actuate::SafetyNet>(
+    executor: &Executor<'_, B, S>,
     whitelist: &UserWhitelist,
     action: Action,
     app_key: &str,

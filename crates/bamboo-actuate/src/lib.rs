@@ -15,11 +15,11 @@ mod health;
 #[cfg(windows)]
 mod windows;
 
-pub use executor::{Backend, Executor, Outcome};
+pub use executor::{Backend, Executor, NoSafetyNet, Outcome, SafetyNet, NEEDS_SAFETY_NET};
 pub use state::{yes_no, PriorState};
 pub use watchdog::{remember_reverted, sweep, HealthProbe, WatchdogSweep};
 
 #[cfg(windows)]
 pub use health::LiveHealthProbe;
 #[cfg(windows)]
-pub use windows::SystemBackend;
+pub use windows::{RestorePointNet, SystemBackend};

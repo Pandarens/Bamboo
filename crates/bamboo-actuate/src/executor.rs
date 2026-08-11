@@ -50,6 +50,34 @@ impl Outcome {
 /// Вынесено в трейт по двум причинам: чтобы исполнителя можно было
 /// проверить тестами без изменения живой системы, и чтобы `bamboo-actuate`
 /// не зависел напрямую от Windows.
+/// Есть ли у системы путь назад, помимо нашего собственного отката.
+///
+/// Свой откат чинит то, что сделали мы. Точка восстановления страхует
+/// случай, когда от нашего действия сломалось что-то ещё, — и без неё
+/// действия уровня 5–6 выполнять нельзя.
+pub trait SafetyNet {
+    /// Готовит страховку перед действием. Возвращает объяснение для
+    /// человека и признак того, что путь назад есть.
+    fn prepare(&self, description: &str) -> (String, bool);
+}
+
+/// Страховка, которой нет.
+///
+/// Для действий уровня 1–4 она и не нужна: они обратимы своим же откатом.
+pub struct NoSafetyNet;
+
+impl SafetyNet for NoSafetyNet {
+    fn prepare(&self, _description: &str) -> (String, bool) {
+        (String::new(), true)
+    }
+}
+
+/// Начиная с этого уровня риска действие требует точки восстановления.
+///
+/// Пятый уровень — остановка службы, шестой — её отключение. От них ломается
+/// то, что от службы зависит, и наш откат такого не чинит.
+pub const NEEDS_SAFETY_NET: u8 = 5;
+
 pub trait Backend {
     /// Снимает состояние цели до изменения.
     fn capture(&self, action: Action, target: &Target) -> Result<PriorState, String>;
@@ -61,14 +89,31 @@ pub trait Backend {
     fn revert(&self, action: Action, target: &Target, prior: &PriorState) -> Result<(), String>;
 }
 
-pub struct Executor<'a, B: Backend> {
+pub struct Executor<'a, B: Backend, S: SafetyNet = NoSafetyNet> {
     journal: &'a Journal,
     backend: B,
+    safety_net: S,
 }
 
-impl<'a, B: Backend> Executor<'a, B> {
+impl<'a, B: Backend> Executor<'a, B, NoSafetyNet> {
     pub fn new(journal: &'a Journal, backend: B) -> Self {
-        Executor { journal, backend }
+        Executor {
+            journal,
+            backend,
+            safety_net: NoSafetyNet,
+        }
+    }
+}
+
+impl<'a, B: Backend, S: SafetyNet> Executor<'a, B, S> {
+    /// Исполнитель со страховкой: перед действиями уровня 5–6 он оставляет
+    /// путь назад и отказывается действовать, если оставить его не вышло.
+    pub fn with_safety_net(journal: &'a Journal, backend: B, safety_net: S) -> Self {
+        Executor {
+            journal,
+            backend,
+            safety_net,
+        }
     }
 
     /// Применяет действие, проведя его через все проверки.
@@ -87,6 +132,19 @@ impl<'a, B: Backend> Executor<'a, B> {
         match decide(context) {
             Decision::Refuse(reason) => return Outcome::Refused { reason },
             Decision::Apply | Decision::Offer => {}
+        }
+
+        // Страховка перед рискованным действием. Проверяем до симуляции:
+        // в симуляции человек и должен узнать, что действие сорвётся.
+        if context.action.risk() >= NEEDS_SAFETY_NET {
+            let (note, protected) = self.safety_net.prepare(&format!(
+                "Bamboo: {} для {}",
+                context.action.name(),
+                target.describe()
+            ));
+            if !protected {
+                return Outcome::Refused { reason: note };
+            }
         }
 
         let prior = match self.backend.capture(context.action, target) {
@@ -440,5 +498,132 @@ mod tests {
         let backend = FakeBackend::default();
         let executor = Executor::new(&journal, &backend);
         assert!(executor.revert(999, "нет такой").is_err());
+    }
+}
+
+#[cfg(test)]
+mod safety_net_gate_tests {
+    use super::*;
+    use bamboo_journal::{Actor, Journal};
+    use bamboo_policy::{AutonomyMode, Context, ProcessFacts, Profile, UserWhitelist};
+
+    /// Страховка, которой не удалось.
+    struct NoWayBack;
+
+    impl SafetyNet for NoWayBack {
+        fn prepare(&self, _description: &str) -> (String, bool) {
+            (
+                "Защита системы выключена, действие отменено.".to_string(),
+                false,
+            )
+        }
+    }
+
+    /// Бэкенд, который считает, сколько раз его тронули.
+    struct CountingBackend(std::cell::Cell<usize>);
+
+    impl Backend for CountingBackend {
+        fn capture(&self, _action: Action, _target: &Target) -> Result<PriorState, String> {
+            Ok(PriorState::new().with("что-то", "было"))
+        }
+        fn apply(&self, _action: Action, _target: &Target) -> Result<(), String> {
+            self.0.set(self.0.get() + 1);
+            Ok(())
+        }
+        fn revert(
+            &self,
+            _action: Action,
+            _target: &Target,
+            _prior: &PriorState,
+        ) -> Result<(), String> {
+            Ok(())
+        }
+    }
+
+    fn context(action: Action, whitelist: &UserWhitelist) -> Context<'_> {
+        Context {
+            action,
+            process: ProcessFacts {
+                image_name: "чужая-служба",
+                session_id: 1,
+                ..Default::default()
+            },
+            app_key: "чужая-служба",
+            app_class: None,
+            profile: Profile::Normal,
+            mode: AutonomyMode::Assist,
+            learning: false,
+            whitelist,
+        }
+    }
+
+    #[test]
+    fn a_risky_action_without_a_way_back_is_refused_and_not_performed() {
+        // Смысл всей страховки: если пути назад нет, действие не делается.
+        // Отказаться после — поздно, служба уже остановлена.
+        let journal = Journal::in_memory().unwrap();
+        let backend = CountingBackend(std::cell::Cell::new(0));
+        let whitelist = UserWhitelist::new();
+
+        let executor = Executor::with_safety_net(&journal, backend, NoWayBack);
+        let outcome = executor.apply(
+            0,
+            &context(Action::StopService, &whitelist),
+            &Target {
+                app_key: "чужая-служба".to_string(),
+                ..Default::default()
+            },
+            Actor::Manual,
+            false,
+        );
+
+        match outcome {
+            Outcome::Refused { reason } => {
+                assert!(reason.contains("отменено"), "{reason}");
+            }
+            other => panic!("рискованное действие прошло без страховки: {other:?}"),
+        }
+        // И в журнале следа быть не должно: действия не было.
+        assert_eq!(journal.count().unwrap(), 0);
+    }
+
+    #[test]
+    fn a_harmless_action_needs_no_safety_net() {
+        // Экономичный режим обратим своим же откатом. Требовать под него
+        // точку восстановления значило бы мешать без причины.
+        let journal = Journal::in_memory().unwrap();
+        let whitelist = UserWhitelist::new();
+
+        let executor = Executor::with_safety_net(
+            &journal,
+            CountingBackend(std::cell::Cell::new(0)),
+            NoWayBack,
+        );
+        let outcome = executor.apply(
+            0,
+            &context(Action::EnableEcoQos, &whitelist),
+            &Target {
+                app_key: "чужая-служба".to_string(),
+                pid: Some(1234),
+                ..Default::default()
+            },
+            Actor::Manual,
+            false,
+        );
+
+        assert!(
+            matches!(outcome, Outcome::Applied { .. }),
+            "безобидное действие не должно упираться в страховку: {outcome:?}"
+        );
+    }
+
+    #[test]
+    fn the_threshold_matches_the_risk_levels_from_the_spec() {
+        // Пятый уровень — остановка службы, шестой — отключение. Ниже
+        // страховка не нужна: там всё чинится своим же откатом.
+        assert!(Action::StopService.risk() >= NEEDS_SAFETY_NET);
+        assert!(Action::DisableService.risk() >= NEEDS_SAFETY_NET);
+        assert!(Action::FreezeProcess.risk() < NEEDS_SAFETY_NET);
+        assert!(Action::EnableEcoQos.risk() < NEEDS_SAFETY_NET);
     }
 }

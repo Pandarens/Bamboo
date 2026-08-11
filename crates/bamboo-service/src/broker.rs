@@ -4,7 +4,7 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
-use bamboo_actuate::{Executor, SystemBackend};
+use bamboo_actuate::{Executor, RestorePointNet, SystemBackend};
 use bamboo_core::Result;
 use bamboo_ipc::{pipe_name, ErrorCode, Request, Response};
 use bamboo_journal::Journal;
@@ -28,7 +28,11 @@ pub fn run_as_service(stop: bamboo_sys::StopSignal) {
     let policy = BrokerPolicy::default();
 
     let journal = open_broker_journal();
-    let executor = Executor::new(&journal, SystemBackend);
+    // Со страховкой: перед остановкой и отключением службы брокер
+    // оставляет точку восстановления, а если оставить её не вышло —
+    // отказывается действовать. Свой откат чинит то, что сделали мы;
+    // точка страхует случай, когда сломалось что-то ещё.
+    let executor = Executor::with_safety_net(&journal, SystemBackend, RestorePointNet);
     let whitelist = UserWhitelist::new();
 
     while !stop.stop_requested() {
@@ -58,7 +62,11 @@ pub fn run_console() -> Result<()> {
     let policy = BrokerPolicy::default();
 
     let journal = open_broker_journal();
-    let executor = Executor::new(&journal, SystemBackend);
+    // Со страховкой: перед остановкой и отключением службы брокер
+    // оставляет точку восстановления, а если оставить её не вышло —
+    // отказывается действовать. Свой откат чинит то, что сделали мы;
+    // точка страхует случай, когда сломалось что-то ещё.
+    let executor = Executor::with_safety_net(&journal, SystemBackend, RestorePointNet);
     let whitelist = UserWhitelist::new();
 
     while !stop.load(Ordering::Relaxed) {
@@ -79,7 +87,7 @@ pub fn run_console() -> Result<()> {
 fn serve_one_client(
     name: &str,
     policy: &BrokerPolicy,
-    executor: &Executor<'_, SystemBackend>,
+    executor: &Executor<'_, SystemBackend, RestorePointNet>,
     whitelist: &UserWhitelist,
 ) -> Result<()> {
     let server = PipeServer::create(name)?;
@@ -131,7 +139,7 @@ fn handle_frame(
     body: &[u8],
     client: &ClientFacts,
     policy: &BrokerPolicy,
-    executor: &Executor<'_, SystemBackend>,
+    executor: &Executor<'_, SystemBackend, RestorePointNet>,
     whitelist: &UserWhitelist,
 ) -> Response {
     let request: Request = match bamboo_ipc::decode_message(body) {

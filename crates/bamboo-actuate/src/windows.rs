@@ -4,7 +4,7 @@ use bamboo_journal::Target;
 use bamboo_policy::Action;
 use bamboo_sys::control::{self, MemoryPriority};
 
-use crate::executor::Backend;
+use crate::executor::{Backend, SafetyNet};
 use crate::state::{yes_no, PriorState};
 
 /// Приоритет памяти, до которого понижаем фоновые приложения.
@@ -255,5 +255,48 @@ mod tests {
         );
 
         control::set_memory_priority(std::process::id(), before).unwrap();
+    }
+}
+
+/// Страховка через точку восстановления Windows.
+///
+/// Отличие от наивной реализации в одном, но решающем: успехом считается
+/// не удавшийся вызов, а появившаяся точка. Windows придерживает создание —
+/// если свежая точка уже есть, она молча пропускает новую. Программа,
+/// считающая свой вызов успехом, отчитывается о защите, которой нет,
+/// и это ровно плацебо из раздела 11.5 ТЗ.
+pub struct RestorePointNet;
+
+impl SafetyNet for RestorePointNet {
+    fn prepare(&self, description: &str) -> (String, bool) {
+        match bamboo_sys::create_restore_point(description) {
+            Ok(outcome) => (outcome.explain().to_string(), outcome.is_protected()),
+            Err(error) => (
+                format!(
+                    "Точку восстановления создать не удалось: {error}. Действие                      отменено: рискованные изменения без пути назад Bamboo не делает."
+                ),
+                false,
+            ),
+        }
+    }
+}
+
+#[cfg(test)]
+mod safety_net_tests {
+    use super::*;
+
+    #[test]
+    fn a_refusal_explains_itself_and_cancels_the_action() {
+        // Проверяем форму отказа, а не саму Windows: создание точки требует
+        // прав администратора, и в тестах их может не быть. Важно, что при
+        // любом исходе человек получает объяснение, а не пустую строку.
+        let (note, protected) = RestorePointNet.prepare("Bamboo: проверка");
+        assert!(!note.is_empty(), "молчаливый исход недопустим");
+        if !protected {
+            assert!(
+                note.contains("отменено") || note.contains("выключена"),
+                "отказ обязан объяснить причину: {note}"
+            );
+        }
     }
 }

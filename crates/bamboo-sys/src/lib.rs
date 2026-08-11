@@ -29,9 +29,10 @@ pub mod nt;
 pub mod pipe;
 pub mod power;
 pub mod process;
+pub mod restore;
 pub mod service;
 pub mod services;
-pub mod settings;
+mod settings;
 pub mod startup;
 pub mod storage;
 pub mod user;
@@ -52,10 +53,13 @@ pub use gpu::{load_by_process as gpu_load_by_process, GpuCounter, GpuLoad};
 pub use http::{fetch, fetch_text};
 pub use iolimit::{IoLimit, LimitedProcess};
 pub use memory::{memory_stat, system_counts, SystemCounts};
-pub use power::{power_status, PowerSource, PowerStatus};
+pub use power::{power_capabilities, power_status, PowerCapabilities, PowerSource, PowerStatus};
 pub use process::{
     has_hung_window, hung_process_ids, terminate as terminate_process, ProcessBuffer, ProcessIter,
     RawProcess,
+};
+pub use restore::{
+    create_restore_point, has_recent_restore_point, last_restore_point_ms, RestoreOutcome,
 };
 pub use service::{
     install as install_service, service_start, set_service_start, uninstall as uninstall_service,
