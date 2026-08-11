@@ -52,50 +52,74 @@ pub enum Bottleneck {
 
 impl Bottleneck {
     pub fn name(self) -> &'static str {
+        use bamboo_core::pick;
         match self {
-            Bottleneck::Gpu => "упирается в видеокарту",
-            Bottleneck::Cpu => "упирается в процессор",
-            Bottleneck::Memory => "не хватает оперативной памяти",
-            Bottleneck::Disk => "ждёт диска",
-            Bottleneck::Nothing => "запас был везде",
+            Bottleneck::Gpu => pick("упирается в видеокарту", "limited by the graphics card"),
+            Bottleneck::Cpu => pick("упирается в процессор", "limited by the processor"),
+            Bottleneck::Memory => pick("не хватает оперативной памяти", "not enough memory"),
+            Bottleneck::Disk => pick("ждёт диска", "waiting on the disk"),
+            Bottleneck::Nothing => pick("запас был везде", "everything had headroom"),
         }
     }
 
     /// Что это значит и что с этим делать.
     pub fn advice(self) -> &'static str {
+        use bamboo_core::pick;
         match self {
-            Bottleneck::Gpu => {
+            Bottleneck::Gpu => pick(
                 "Видеокарта почти всё время была загружена под предел, а процессор \
                  простаивал. Это обычное и здоровое состояние для игры: она берёт \
                  от видеокарты всё, что та даёт. Кадров прибавит только снижение \
                  настроек графики или разрешения — закрывать программы бесполезно, \
-                 они тут ни при чём."
-            }
-            Bottleneck::Cpu => {
+                 они тут ни при чём.",
+                "The graphics card was at its limit almost the whole time while the \
+                 processor idled. For a game that is normal and healthy: it takes \
+                 everything the card will give. Only lowering graphics settings or \
+                 resolution will add frames — closing programs is pointless, they \
+                 have nothing to do with it.",
+            ),
+            Bottleneck::Cpu => pick(
                 "Процессор был загружен, а видеокарта недогружена — значит она \
                  ждала, пока ей подготовят кадр. Вот здесь закрытие лишних программ \
                  действительно помогает, потому что они отбирают то самое \
                  процессорное время. Снижение настроек графики, наоборот, почти \
-                 ничего не даст."
-            }
-            Bottleneck::Memory => {
+                 ничего не даст.",
+                "The processor was loaded while the graphics card was not — meaning \
+                 the card was waiting for a frame to be prepared for it. Here closing \
+                 unnecessary programs genuinely helps, because they take away that \
+                 very processor time. Lowering graphics settings, on the contrary, \
+                 will give almost nothing.",
+            ),
+            Bottleneck::Memory => pick(
                 "Памяти не хватало, и Windows вытесняла страницы на диск. Просадки \
                  при этом рваные: программа замирает, пока её данные возвращаются \
                  с накопителя. Помогает только освобождение памяти — закрыть \
-                 вкладки браузера и всё лишнее до запуска."
-            }
-            Bottleneck::Disk => {
+                 вкладки браузера и всё лишнее до запуска.",
+                "There was not enough memory, and Windows was pushing pages out to \
+                 disk. The stutters are ragged because of it: the program freezes \
+                 while its data comes back from the drive. Only freeing memory helps — \
+                 close browser tabs and anything unnecessary before starting.",
+            ),
+            Bottleneck::Disk => pick(
                 "Программа заметную часть времени ждала накопитель. У игр так \
                  выглядит подгрузка уровня, у остального — работа с крупными \
                  файлами. Если это повторяется не только при загрузке, стоит \
-                 посмотреть в разделе «Диск», кто ещё его занимает."
-            }
-            Bottleneck::Nothing => {
+                 посмотреть в разделе «Диск», кто ещё его занимает.",
+                "The program spent a noticeable share of the time waiting on the \
+                 drive. In games that is what level streaming looks like; elsewhere \
+                 it is work with large files. If it repeats outside loading screens, \
+                 look in the «Disk» section at what else is using it.",
+            ),
+            Bottleneck::Nothing => pick(
                 "Ничто не упиралось в потолок: и процессор, и видеокарта, и память \
                  имели запас. Если просадки при этом были, дело не в нехватке \
                  ресурсов — так выглядят ограничение кадров, работа драйвера или \
-                 сама программа."
-            }
+                 сама программа.",
+                "Nothing hit a ceiling: the processor, the graphics card and memory \
+                 all had headroom. If there were stutters anyway, it is not a shortage \
+                 of resources — that is what a frame cap, a driver, or the program \
+                 itself looks like.",
+            ),
         }
     }
 }

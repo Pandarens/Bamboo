@@ -43,35 +43,52 @@ pub enum FreezeCause {
 
 impl FreezeCause {
     pub fn name(self) -> &'static str {
+        use bamboo_core::pick;
         match self {
-            FreezeCause::DiskQueue => "накопитель не успевает",
-            FreezeCause::DriverTime => "драйверы заняли процессор",
-            FreezeCause::MemoryPressure => "закончилась оперативная память",
+            FreezeCause::DiskQueue => pick("накопитель не успевает", "the drive cannot keep up"),
+            FreezeCause::DriverTime => {
+                pick("драйверы заняли процессор", "drivers took the processor")
+            }
+            FreezeCause::MemoryPressure => pick("закончилась оперативная память", "memory ran out"),
         }
     }
 
     /// Что с этим делать. Совет обязан быть выполнимым.
     pub fn advice(self) -> &'static str {
+        use bamboo_core::pick;
         match self {
-            FreezeCause::DiskQueue => {
+            FreezeCause::DiskQueue => pick(
                 "Запросы к диску встали в очередь, и всё, что ждёт диска, замирает. \
                  Если виновник назван выше, его можно придержать: правая кнопка \
                  на строке процесса, «Придержать диск». Если не назван, диск занят \
                  изнутри — антивирусом, индексатором поиска или самим накопителем, \
-                 и остаётся только переждать."
-            }
-            FreezeCause::DriverTime => {
+                 и остаётся только переждать.",
+                "Disk requests queued up, and everything waiting on the disk freezes. \
+                 If a culprit is named above, it can be held back: right-click its \
+                 row and pick «Hold back the disk». If none is named, the disk is \
+                 busy from the inside — antivirus, the search indexer, or the drive \
+                 itself — and all you can do is wait it out.",
+            ),
+            FreezeCause::DriverTime => pick(
                 "Процессор ушёл в обработку прерываний — это работа драйверов, \
                  а не программ. Чаще всего виноват драйвер сети, звука или \
                  видеокарты. Среди процессов виновника искать бесполезно: \
-                 помогает обновление драйверов, а не закрытие программ."
-            }
-            FreezeCause::MemoryPressure => {
+                 помогает обновление драйверов, а не закрытие программ.",
+                "The processor went into interrupt handling — that is drivers at \
+                 work, not programs. Usually it is the network, sound or graphics \
+                 driver. Looking for a culprit among processes is pointless: \
+                 updating drivers helps, closing programs does not.",
+            ),
+            FreezeCause::MemoryPressure => pick(
                 "Свободной памяти не осталось, и Windows вытесняет страницы \
                  на диск. Отсюда и рывки: программа ждёт, пока её данные \
                  вернутся с накопителя. Закройте лишние вкладки и программы — \
-                 это единственное, что помогает по-настоящему."
-            }
+                 это единственное, что помогает по-настоящему.",
+                "There is no free memory left, and Windows is pushing pages out \
+                 to disk. Hence the jerkiness: a program waits while its data \
+                 comes back from the drive. Close spare tabs and programs — that \
+                 is the only thing that genuinely helps.",
+            ),
         }
     }
 }

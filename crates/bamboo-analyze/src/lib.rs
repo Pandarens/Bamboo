@@ -43,3 +43,89 @@ pub use sysdiff::{diff as system_diff, SystemDiff, SystemSnapshot};
 pub use systemio::{explain as explain_system_io, Bystanders, SystemIoCause, SystemIoVerdict};
 pub use tbw::{rating_for, TbwRating};
 pub use wear::{WearInput, WearVerdict};
+
+#[cfg(test)]
+mod translation_tests {
+    use bamboo_core::{set_language, Language};
+    use std::sync::Mutex;
+
+    /// Язык один на процесс: тесты, меняющие его, нельзя пускать разом.
+    static LANGUAGE_LOCK: Mutex<()> = Mutex::new(());
+
+    /// Прогоняет каждое объяснение на обоих языках.
+    ///
+    /// Сторож от полупереведённого вывода. Забыть перевести новую ветку
+    /// легко: код соберётся, тесты пройдут, и заметит недосмотр только
+    /// человек, выбравший английский, — то есть тот, кому уже поздно.
+    fn on_both<T: Copy>(values: &[T], text: impl Fn(T) -> &'static str) {
+        let _guard = LANGUAGE_LOCK.lock().unwrap();
+
+        for value in values {
+            set_language(Language::Russian);
+            let russian = text(*value);
+            set_language(Language::English);
+            let english = text(*value);
+
+            assert!(!russian.trim().is_empty());
+            assert!(!english.trim().is_empty());
+            assert_ne!(
+                russian, english,
+                "строка не переведена: осталась одинаковой на обоих языках"
+            );
+            assert!(
+                !english
+                    .chars()
+                    .any(|c| ('\u{0410}'..='\u{044f}').contains(&c)),
+                "в английском тексте осталась кириллица: {english}"
+            );
+        }
+        set_language(Language::Russian);
+    }
+
+    #[test]
+    fn every_bottleneck_speaks_both_languages() {
+        use crate::record::Bottleneck;
+        const ALL: [Bottleneck; 5] = [
+            Bottleneck::Gpu,
+            Bottleneck::Cpu,
+            Bottleneck::Memory,
+            Bottleneck::Disk,
+            Bottleneck::Nothing,
+        ];
+        on_both(&ALL, |value| value.name());
+        on_both(&ALL, |value| value.advice());
+    }
+
+    #[test]
+    fn every_freeze_cause_speaks_both_languages() {
+        use crate::freeze::FreezeCause;
+        const ALL: [FreezeCause; 3] = [
+            FreezeCause::DiskQueue,
+            FreezeCause::DriverTime,
+            FreezeCause::MemoryPressure,
+        ];
+        on_both(&ALL, |value| value.name());
+        on_both(&ALL, |value| value.advice());
+    }
+
+    #[test]
+    fn the_english_advice_stays_workable() {
+        // То же требование, что и к русскому: совет обязан говорить,
+        // что делать, а не «перезагрузите компьютер».
+        let _guard = LANGUAGE_LOCK.lock().unwrap();
+        set_language(Language::English);
+
+        for advice in [
+            crate::record::Bottleneck::Gpu.advice(),
+            crate::record::Bottleneck::Cpu.advice(),
+            crate::freeze::FreezeCause::DiskQueue.advice(),
+        ] {
+            assert!(advice.len() > 80, "совет слишком общий: {advice}");
+            assert!(
+                !advice.to_lowercase().contains("reboot"),
+                "бесполезный совет: {advice}"
+            );
+        }
+        set_language(Language::Russian);
+    }
+}
