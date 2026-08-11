@@ -84,6 +84,22 @@ struct ExtensionRow {
 // Что можно выбрать для анализа: установленная игра либо запущенная
 // программа. Одним списком, потому что человеку это одно и то же — то,
 // за чем он хочет понаблюдать.
+// Загрузка системы.
+struct BootRow {
+    when: string,
+    total: string,
+    phases: string,
+    slower: string,
+    degraded: bool,
+}
+
+// Запись автозагрузки.
+struct StartupRow {
+    name: string,
+    command: string,
+    enabled: bool,
+}
+
 struct TargetRow {
     // Что показать: «BitCraft Online» либо «chrome.exe».
     label: string,
@@ -386,6 +402,17 @@ export component MainWindow inherits Window {
     in property <bool> update-busy: false;
     in property <string> app-version: "";
     in property <string> history-note: "";
+    in property <[BootRow]> boots: [];
+    in property <string> boot-note: "";
+    in property <[StartupRow]> startup: [];
+    in property <string> startup-note: "";
+    // Переключение записи автозагрузки: имя и чего добиваемся.
+    callback toggle-startup(string, bool);
+    in property <string> report-text: "";
+    in property <string> report-note: "";
+    in-out property <int> report-format: 0;
+    callback build-report();
+    callback save-report();
     callback install-update();
     callback check-update();
     in property <[DiskUserRow]> disk-users: [];
@@ -653,6 +680,21 @@ export component MainWindow inherits Window {
                     label: "Питание";
                     active: root.section == 3;
                     chosen => { root.section = 3; root.refresh(); }
+                }
+                NavButton {
+                    label: "Загрузка";
+                    active: root.section == 9;
+                    chosen => { root.section = 9; root.refresh(); }
+                }
+                NavButton {
+                    label: "Автозапуск";
+                    active: root.section == 10;
+                    chosen => { root.section = 10; root.refresh(); }
+                }
+                NavButton {
+                    label: "Отчёты";
+                    active: root.section == 11;
+                    chosen => { root.section = 11; root.refresh(); }
                 }
                 NavButton {
                     label: "Оптимизация";
@@ -1506,6 +1548,157 @@ export component MainWindow inherits Window {
                             Text {
                                 text: root.record-verdict;
                                 font-size: 12px; color: #b6c6bd; wrap: word-wrap;
+                            }
+                        }
+                    }
+                }
+
+                // --- Загрузка ---
+                if root.section == 9: VerticalLayout {
+                    spacing: 8px;
+                    Text { text: "Загрузка системы"; font-size: 20px; color: #e8f0ec; }
+                    Text {
+                        text: root.boot-note;
+                        font-size: 11px; color: #7d8f86; wrap: word-wrap;
+                    }
+                    Flickable {
+                        vertical-stretch: 1;
+                        VerticalLayout {
+                            spacing: 4px;
+                            for boot[index] in root.boots: Rectangle {
+                                background: boot.degraded ? #2e2320 : #1e2a24;
+                                border-radius: 8px;
+                                height: 54px;
+                                VerticalLayout {
+                                    padding: 10px; spacing: 3px;
+                                    HorizontalLayout {
+                                        spacing: 8px;
+                                        Text {
+                                            text: boot.when;
+                                            font-size: 12px; color: #e8f0ec;
+                                            horizontal-stretch: 1;
+                                            vertical-alignment: center;
+                                        }
+                                        Text {
+                                            text: boot.total;
+                                            font-size: 13px;
+                                            color: boot.degraded ? #e0a44a : #6fb58a;
+                                            vertical-alignment: center;
+                                        }
+                                    }
+                                    Text {
+                                        text: boot.slower != ""
+                                            ? boot.phases + " — " + boot.slower
+                                            : boot.phases;
+                                        font-size: 11px;
+                                        color: boot.degraded ? #d8c4a8 : #7d8f86;
+                                        overflow: elide;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // --- Автозапуск ---
+                if root.section == 10: VerticalLayout {
+                    spacing: 8px;
+                    Text { text: "Автозапуск"; font-size: 20px; color: #e8f0ec; }
+                    Text {
+                        text: root.startup-note;
+                        font-size: 11px; color: #7d8f86; wrap: word-wrap;
+                    }
+                    Flickable {
+                        vertical-stretch: 1;
+                        VerticalLayout {
+                            spacing: 3px;
+                            for item[index] in root.startup: Rectangle {
+                                background: Math.mod(index, 2) == 0 ? #1b2521 : #18211d;
+                                border-radius: 6px;
+                                height: 46px;
+                                HorizontalLayout {
+                                    padding: 8px; spacing: 10px;
+                                    VerticalLayout {
+                                        spacing: 2px;
+                                        horizontal-stretch: 1;
+                                        Text {
+                                            text: item.name;
+                                            font-size: 12px;
+                                            color: item.enabled ? #e8f0ec : #62736a;
+                                            overflow: elide;
+                                        }
+                                        Text {
+                                            text: item.command;
+                                            font-size: 10px; color: #4d5b53;
+                                            overflow: elide;
+                                        }
+                                    }
+                                    VerticalLayout {
+                                        alignment: center;
+                                        RowButton {
+                                            label: item.enabled ? "Выключить" : "Включить";
+                                            width: 110px;
+                                            pressed => {
+                                                root.toggle-startup(item.name, !item.enabled);
+                                                root.refresh();
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    Text {
+                        text: root.action-note;
+                        font-size: 11px; color: #9fb3a8; wrap: word-wrap;
+                    }
+                }
+
+                // --- Отчёты ---
+                if root.section == 11: VerticalLayout {
+                    spacing: 10px;
+                    Text { text: "Недельный отчёт"; font-size: 20px; color: #e8f0ec; }
+
+                    HorizontalLayout {
+                        spacing: 8px;
+                        for name[index] in ["Текст", "HTML", "JSON"]: RowButton {
+                            label: name;
+                            width: 100px;
+                            pressed => {
+                                root.report-format = index;
+                                root.build-report();
+                            }
+                        }
+                        Rectangle { horizontal-stretch: 1; }
+                        RowButton {
+                            label: "Сохранить";
+                            width: 120px;
+                            pressed => { root.save-report(); }
+                        }
+                    }
+
+                    Text {
+                        text: root.report-note;
+                        font-size: 11px; color: #7d8f86; wrap: word-wrap;
+                    }
+
+                    Rectangle {
+                        background: #141b18;
+                        border-radius: 8px;
+                        vertical-stretch: 1;
+                        Flickable {
+                            x: 10px; y: 10px;
+                            width: parent.width - 20px;
+                            height: parent.height - 20px;
+                            VerticalLayout {
+                                Text {
+                                    text: root.report-text != ""
+                                        ? root.report-text
+                                        : "Нажмите «Текст», «HTML» или «JSON», чтобы собрать отчёт.";
+                                    font-size: 11px;
+                                    color: root.report-text != "" ? #b6c6bd : #4d5b53;
+                                    wrap: word-wrap;
+                                }
                             }
                         }
                     }

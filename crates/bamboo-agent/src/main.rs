@@ -141,6 +141,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     main_window.set_journal(journal_model.clone());
     main_window.set_extensions(ModelRc::new(VecModel::from(Vec::<ExtensionRow>::new())));
     main_window.set_targets(ModelRc::new(VecModel::from(Vec::<TargetRow>::new())));
+    main_window.set_boots(ModelRc::new(VecModel::from(Vec::<BootRow>::new())));
+    main_window.set_startup(ModelRc::new(VecModel::from(Vec::<StartupRow>::new())));
     main_window.set_record_cpu(ModelRc::new(VecModel::from(Vec::<f32>::new())));
     main_window.set_record_memory(ModelRc::new(VecModel::from(Vec::<f32>::new())));
     main_window.set_record_gpu(ModelRc::new(VecModel::from(Vec::<f32>::new())));
@@ -333,6 +335,71 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 return;
             }
             win.set_action_note(SharedString::from(note));
+        });
+    }
+
+    // Включение и выключение записи автозагрузки.
+    {
+        let weak = main_window.as_weak();
+        main_window.on_toggle_startup(move |name, wanted| {
+            let Some(win) = weak.upgrade() else {
+                return;
+            };
+
+            let note = match bamboo_sys::set_startup_enabled(&name, wanted) {
+                // Отвечаем по факту, а не по намерению: Windows может
+                // и отказать, и человек должен видеть, что вышло.
+                Ok(true) if wanted => format!("{name}: будет запускаться вместе с Windows."),
+                Ok(true) => format!(
+                    "{name}: больше не запускается сам. Программа осталась                      установленной — запустить её можно как обычно."
+                ),
+                Ok(false) => format!("{name}: состояние не изменилось."),
+                Err(error) => format!("{name}: изменить не удалось — {error}"),
+            };
+            win.set_action_note(SharedString::from(note));
+        });
+    }
+
+    // Сборка недельного отчёта.
+    {
+        let weak = main_window.as_weak();
+        let snapshot = last_snapshot.clone();
+        main_window.on_build_report(move || {
+            let Some(win) = weak.upgrade() else {
+                return;
+            };
+            let format = win.get_report_format();
+
+            let empty = collector::Snapshot::default();
+            let borrowed = snapshot.borrow();
+            let snapshot = borrowed.as_ref().unwrap_or(&empty);
+
+            let (text, note) = mainwin::weekly_report(snapshot, format);
+            win.set_report_text(SharedString::from(text));
+            win.set_report_note(SharedString::from(note));
+        });
+    }
+
+    // Сохранение отчёта в файл.
+    {
+        let weak = main_window.as_weak();
+        main_window.on_save_report(move || {
+            let Some(win) = weak.upgrade() else {
+                return;
+            };
+            let text = win.get_report_text().to_string();
+            if text.is_empty() {
+                win.set_report_note(SharedString::from(
+                    "Сохранять нечего: сначала соберите отчёт.",
+                ));
+                return;
+            }
+
+            let note = match mainwin::save_report(&text, win.get_report_format()) {
+                Ok(path) => format!("Отчёт сохранён: {path}"),
+                Err(error) => format!("Сохранить не удалось: {error}"),
+            };
+            win.set_report_note(SharedString::from(note));
         });
     }
 
@@ -938,6 +1005,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 4 => "Открываю журнал действий…",
                 7 => "Читаю профили браузеров…",
                 8 => "Ищу установленные игры…",
+                9 => "Читаю журнал загрузок…",
+                10 => "Читаю автозагрузку…",
                 _ => "",
             };
             match section {
@@ -946,6 +1015,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 4 => win.set_journal_note(SharedString::from(note)),
                 7 => win.set_extensions_note(SharedString::from(note)),
                 8 => win.set_targets_note(SharedString::from(note)),
+                9 => win.set_boot_note(SharedString::from(note)),
+                10 => win.set_startup_note(SharedString::from(note)),
+                // Отчёт собирается по кнопке, а не при открытии раздела:
+                // он читает журнал, и делать это на каждом переключении
+                // впустую незачем.
+                11 => return,
                 _ => return,
             }
 
@@ -997,6 +1072,44 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             win.set_targets_note(SharedString::from(format!(
                                 "Игр найдено: {count}. Список ниже — обновляется сам."
                             )));
+                        }
+                    });
+                }
+                9 => {
+                    let (rows, note) = mainwin::boot_rows();
+                    let _ = slint::invoke_from_event_loop(move || {
+                        if let Some(win) = back.upgrade() {
+                            replace(
+                                &win.get_boots(),
+                                rows.into_iter()
+                                    .map(|row| BootRow {
+                                        when: SharedString::from(row.when),
+                                        total: SharedString::from(row.total),
+                                        phases: SharedString::from(row.phases),
+                                        slower: SharedString::from(row.slower),
+                                        degraded: row.degraded,
+                                    })
+                                    .collect(),
+                            );
+                            win.set_boot_note(SharedString::from(note));
+                        }
+                    });
+                }
+                10 => {
+                    let (rows, note) = mainwin::startup_rows();
+                    let _ = slint::invoke_from_event_loop(move || {
+                        if let Some(win) = back.upgrade() {
+                            replace(
+                                &win.get_startup(),
+                                rows.into_iter()
+                                    .map(|row| StartupRow {
+                                        name: SharedString::from(row.name),
+                                        command: SharedString::from(row.command),
+                                        enabled: row.enabled,
+                                    })
+                                    .collect(),
+                            );
+                            win.set_startup_note(SharedString::from(note));
                         }
                     });
                 }

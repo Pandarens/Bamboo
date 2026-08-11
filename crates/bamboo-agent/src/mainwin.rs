@@ -655,6 +655,165 @@ pub struct DriveRow {
     pub verdict: String,
 }
 
+/// Строка истории загрузок.
+pub struct BootRow {
+    /// «8 августа, 14:32».
+    pub when: String,
+    /// «41 с» — сколько всего заняло.
+    pub total: String,
+    /// «до рабочего стола 18 с, после 23 с».
+    pub phases: String,
+    /// «на 12 с дольше обычного» либо пусто.
+    pub slower: String,
+    /// Загрузка заметно дольше обычной — красим строку.
+    pub degraded: bool,
+}
+
+/// Загрузки системы и то, что их замедлило.
+///
+/// Отвечает на вопрос «почему компьютер стал дольше включаться», который
+/// иначе выяснить нечем: Windows знает ответ и держит его в журнале
+/// диагностики, но не показывает.
+pub fn boot_rows() -> (Vec<BootRow>, String) {
+    let history = match bamboo_sys::boot::boot_history(12) {
+        Ok(history) => history,
+        Err(error) => {
+            return (
+                Vec::new(),
+                format!(
+                    "Историю загрузок прочитать не удалось: {error}. Журнал \
+                     диагностики производительности читается только с правами \
+                     администратора."
+                ),
+            )
+        }
+    };
+
+    if history.is_empty() {
+        return (
+            Vec::new(),
+            "Записей о загрузках нет. Windows пишет их в журнал диагностики \
+             производительности, и на некоторых сборках он выключен."
+                .to_string(),
+        );
+    }
+
+    let rows: Vec<BootRow> = history
+        .iter()
+        .map(|record| BootRow {
+            when: crate::mainwin::spell_moment(record.at_unix_ms),
+            total: spell_seconds(record.total_ms),
+            phases: format!(
+                "до рабочего стола {}, после {}",
+                spell_seconds(record.main_path_ms),
+                spell_seconds(record.post_boot_ms)
+            ),
+            slower: record
+                .degradation_ms
+                .filter(|extra| *extra > 0)
+                .map(|extra| format!("на {} дольше обычного", spell_seconds(extra)))
+                .unwrap_or_default(),
+            degraded: record.degradation_ms.is_some_and(|extra| extra > 10_000),
+        })
+        .collect();
+
+    // Виновники — то, ради чего раздел и открывают. Без них список времён
+    // говорит «стало дольше» и не говорит, из-за чего.
+    let culprits = bamboo_sys::boot::boot_culprits(8).unwrap_or_default();
+    let note = if culprits.is_empty() {
+        format!(
+            "Загрузок в журнале: {}. Отдельных виновников Windows не отметила — \
+             значит замедлило не что-то одно.",
+            rows.len()
+        )
+    } else {
+        let named: Vec<String> = culprits
+            .iter()
+            .take(4)
+            .map(|culprit| format!("{} ({})", culprit.name, spell_seconds(culprit.total_ms)))
+            .collect();
+        format!(
+            "Дольше всех при загрузке работали: {}. Это те, кем стоит заняться \
+             в разделе «Автозапуск», если загрузка стала долгой.",
+            named.join(", ")
+        )
+    };
+
+    (rows, note)
+}
+
+fn spell_seconds(ms: u64) -> String {
+    if ms < 1000 {
+        return format!("{ms} мс");
+    }
+    let seconds = ms / 1000;
+    if seconds < 60 {
+        format!("{seconds} с")
+    } else {
+        format!("{} мин {} с", seconds / 60, seconds % 60)
+    }
+}
+
+/// Момент по стенным часам, словами.
+pub fn spell_moment(unix_ms: i64) -> String {
+    let now = bamboo_core::SampleTime::wall_clock_now();
+    let ago = now.saturating_sub(unix_ms).max(0) as u64;
+
+    let hours = ago / 3_600_000;
+    if hours < 1 {
+        format!("{} мин назад", ago / 60_000)
+    } else if hours < 24 {
+        format!("{hours} ч назад")
+    } else {
+        format!("{} дн назад", hours / 24)
+    }
+}
+
+/// Строка автозагрузки.
+pub struct StartupRow {
+    pub name: String,
+    pub command: String,
+    pub enabled: bool,
+}
+
+/// Что запускается вместе с Windows.
+pub fn startup_rows() -> (Vec<StartupRow>, String) {
+    let items = match bamboo_sys::user_startup_items() {
+        Ok(items) => items,
+        Err(error) => {
+            return (
+                Vec::new(),
+                format!("Список автозагрузки недоступен: {error}"),
+            )
+        }
+    };
+
+    if items.is_empty() {
+        return (
+            Vec::new(),
+            "В автозагрузке пользователя ничего нет.".to_string(),
+        );
+    }
+
+    let off = items.iter().filter(|item| !item.enabled).count();
+    let note = format!(
+        "Записей: {}, из них выключено {off}. Выключение здесь — то же самое, \
+         что в диспетчере задач: программа остаётся установленной и запускается \
+         вручную. Обратимо в любой момент.",
+        items.len()
+    );
+
+    let rows = items
+        .into_iter()
+        .map(|item| StartupRow {
+            name: item.name,
+            command: item.command,
+            enabled: item.enabled,
+        })
+        .collect();
+    (rows, note)
+}
+
 /// Что можно выбрать для анализа.
 pub struct TargetRow {
     pub label: String,
@@ -1902,4 +2061,99 @@ mod explain_tests {
         let status = watch_status(&snapshot);
         assert!(status.contains("утечек нет"), "{status}");
     }
+}
+
+/// Собирает недельный отчёт из того, что Bamboo знает.
+///
+/// Отчёт строится из журнала действий и снимка: истории наблюдений может
+/// ещё не быть — база наполняется часами, — и тогда часть блоков окажется
+/// пустой. Это сказано в самом отчёте, а не скрыто: пустой блок без
+/// объяснения человек читает как «ничего не происходило», а на деле
+/// «Bamboo ещё не насмотрелся».
+pub fn weekly_report(snapshot: &Snapshot, format: i32) -> (String, String) {
+    use bamboo_analyze::report::{weekly_html, weekly_json, weekly_markdown, WeeklyData};
+
+    // Действия за неделю берём из журнала: это единственное, что Bamboo
+    // знает наверняка про свою же работу.
+    let week_ago = bamboo_core::SampleTime::wall_clock_now() - 7 * 24 * 60 * 60 * 1000;
+    let done: Vec<bamboo_analyze::report::ActionEffect> =
+        bamboo_journal::Journal::open(journal_path())
+            .and_then(|journal| journal.since(week_ago))
+            .map(|entries| {
+                entries
+                    .into_iter()
+                    .map(|entry| bamboo_analyze::report::ActionEffect {
+                        description: format!(
+                            "{} для {} — {}",
+                            entry.action.name(),
+                            entry.target.app_key,
+                            entry.status.as_str()
+                        ),
+                        // Измеренного эффекта у нас нет, и придумывать его нельзя:
+                        // «ускорило на 20%» без замера — это то самое враньё,
+                        // которым живут «оптимизаторы».
+                        effect: None,
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+
+    // Кто больше всех писал на диск — из живого снимка. За неделю таких
+    // данных пока нет: история только начала копиться.
+    let mut writers: Vec<(String, bamboo_core::Bytes)> = group_by_app(snapshot)
+        .into_iter()
+        .filter(|group| group.disk_per_second > 0)
+        .map(|group| (group.name, bamboo_core::Bytes(group.disk_per_second)))
+        .collect();
+    writers.sort_by_key(|(_, bytes)| core::cmp::Reverse(bytes.as_u64()));
+    writers.truncate(5);
+
+    let data = WeeklyData {
+        written: bamboo_core::Bytes(0),
+        years_left: None,
+        top_writers: &writers,
+        cpu_spikes: &[],
+        memory_trends: &[],
+        actions: &done,
+        auto_reverted: 0,
+    };
+
+    let text = match format {
+        1 => weekly_html(&data),
+        2 => weekly_json(&data),
+        _ => weekly_markdown(&data),
+    };
+
+    let note = if done.is_empty() {
+        "Действий за неделю не было — Bamboo ничего не менял. Часть блоков \
+         пуста потому, что история наблюдений копится часами и заполнится \
+         не сразу; выдумывать за неё числа Bamboo не станет."
+            .to_string()
+    } else {
+        format!(
+            "Действий за неделю: {}. Измеренного эффекта в отчёте нет намеренно: \
+             снаружи его не измерить, а писать «ускорило на двадцать процентов» \
+             без замера — то самое враньё, которым живут «оптимизаторы».",
+            done.len()
+        )
+    };
+
+    (text, note)
+}
+
+/// Сохраняет отчёт рядом с журналом и возвращает путь.
+pub fn save_report(text: &str, format: i32) -> Result<String, String> {
+    let extension = match format {
+        1 => "html",
+        2 => "json",
+        _ => "md",
+    };
+
+    let base = std::env::var("LOCALAPPDATA").unwrap_or_else(|_| ".".to_string());
+    let folder = PathBuf::from(base).join("Bamboo");
+    let _ = std::fs::create_dir_all(&folder);
+
+    let path = folder.join(format!("отчёт.{extension}"));
+    std::fs::write(&path, text).map_err(|error| error.to_string())?;
+    Ok(path.to_string_lossy().to_string())
 }
