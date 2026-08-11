@@ -224,38 +224,6 @@ impl Drop for OwnedKey {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use std::sync::Mutex;
-
-    /// Тесты правят один и тот же раздел реестра — сериализуем.
-    static LOCK: Mutex<()> = Mutex::new(());
-
-    #[test]
-    fn a_flag_survives_a_round_trip() {
-        let _guard = LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let was = show_widget_on_start();
-
-        set_show_widget_on_start(true).expect("запись настройки не удалась");
-        assert!(show_widget_on_start());
-
-        set_show_widget_on_start(false).expect("запись настройки не удалась");
-        assert!(!show_widget_on_start());
-
-        // Возвращаем как было: тест не должен менять настройки машины.
-        set_show_widget_on_start(was).ok();
-    }
-
-    #[test]
-    fn an_unknown_flag_falls_back_to_its_default() {
-        let _guard = LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        // Настройки с таким именем нет и не будет — берётся умолчание.
-        assert!(read_flag("НетТакойНастройки", true));
-        assert!(!read_flag("НетТакойНастройки", false));
-    }
-}
-
 /// Читает числовое значение из реестра.
 ///
 /// Спутник `registry_string`: тип и порядок запуска службы записаны
@@ -302,4 +270,36 @@ pub(crate) fn registry_u32(hive: &str, path: &str, value: &str) -> Option<u32> {
         )
     };
     (status == 0).then_some(number)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Mutex;
+
+    /// Тесты правят один и тот же раздел реестра — сериализуем.
+    static LOCK: Mutex<()> = Mutex::new(());
+
+    #[test]
+    fn a_flag_survives_a_round_trip() {
+        let _guard = LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let was = show_widget_on_start();
+
+        set_show_widget_on_start(true).expect("запись настройки не удалась");
+        assert!(show_widget_on_start());
+
+        set_show_widget_on_start(false).expect("запись настройки не удалась");
+        assert!(!show_widget_on_start());
+
+        // Возвращаем как было: тест не должен менять настройки машины.
+        set_show_widget_on_start(was).ok();
+    }
+
+    #[test]
+    fn an_unknown_flag_falls_back_to_its_default() {
+        let _guard = LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        // Настройки с таким именем нет и не будет — берётся умолчание.
+        assert!(read_flag("НетТакойНастройки", true));
+        assert!(!read_flag("НетТакойНастройки", false));
+    }
 }
