@@ -255,3 +255,51 @@ mod tests {
         assert!(!read_flag("НетТакойНастройки", false));
     }
 }
+
+/// Читает числовое значение из реестра.
+///
+/// Спутник `registry_string`: тип и порядок запуска службы записаны
+/// числами, а не строками.
+pub(crate) fn registry_u32(hive: &str, path: &str, value: &str) -> Option<u32> {
+    use windows_sys::Win32::System::Registry::{
+        RegOpenKeyExW, RegQueryValueExW, HKEY_LOCAL_MACHINE, KEY_READ, KEY_WOW64_64KEY,
+    };
+
+    let root = match hive {
+        "HKLM" => HKEY_LOCAL_MACHINE,
+        _ => HKEY_CURRENT_USER,
+    };
+
+    let wide_path: Vec<u16> = path.encode_utf16().chain(core::iter::once(0)).collect();
+    let mut handle: HKEY = core::ptr::null_mut();
+    let status = unsafe {
+        RegOpenKeyExW(
+            root,
+            wide_path.as_ptr(),
+            0,
+            KEY_READ | KEY_WOW64_64KEY,
+            &mut handle,
+        )
+    };
+    if status != 0 {
+        return None;
+    }
+    let handle = OwnedKey(handle);
+
+    let wide_value: Vec<u16> = value.encode_utf16().chain(core::iter::once(0)).collect();
+    let mut kind: u32 = 0;
+    let mut number: u32 = 0;
+    let mut size = core::mem::size_of::<u32>() as u32;
+
+    let status = unsafe {
+        RegQueryValueExW(
+            handle.0,
+            wide_value.as_ptr(),
+            core::ptr::null(),
+            &mut kind,
+            (&mut number as *mut u32).cast(),
+            &mut size,
+        )
+    };
+    (status == 0).then_some(number)
+}
