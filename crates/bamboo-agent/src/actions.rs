@@ -113,6 +113,41 @@ fn open_journal() -> Option<Journal> {
     Journal::open(&path).ok()
 }
 
+/// Где лежит список отказов.
+///
+/// Обычный текстовый файл рядом с журналом: человек вправе прочитать
+/// и поправить его блокнотом. Реестр или база сделали бы список
+/// непрозрачным, а это как раз то, что он вправе видеть — чем именно
+/// Bamboo решил больше не заниматься.
+fn rejections_path() -> std::path::PathBuf {
+    let base = std::env::var("LOCALAPPDATA").unwrap_or_else(|_| ".".to_string());
+    std::path::PathBuf::from(base)
+        .join("Bamboo")
+        .join("отказы.txt")
+}
+
+/// Читает список отказов.
+///
+/// Файла может не быть — это обычное начало: человек ещё ни от чего
+/// не отказывался.
+pub fn load_rejections() -> bamboo_policy::Rejections {
+    let text = std::fs::read_to_string(rejections_path()).unwrap_or_default();
+    bamboo_policy::Rejections::from_text(&text)
+}
+
+/// Сохраняет список отказов.
+///
+/// Без сохранения «больше не предлагать никогда» жило бы до выхода
+/// из программы, и человек получал бы то же предложение после каждой
+/// перезагрузки — то есть правило не работало бы вовсе.
+pub fn save_rejections(rejections: &bamboo_policy::Rejections) -> Result<(), String> {
+    let path = rejections_path();
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    std::fs::write(&path, rejections.to_text()).map_err(|error| error.to_string())
+}
+
 /// Применяет действие к процессу и возвращает строку для показа пользователю.
 ///
 /// Ничего не делает молча: и успех, и отказ объясняются словами. Отказ

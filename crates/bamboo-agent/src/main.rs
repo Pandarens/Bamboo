@@ -165,6 +165,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         std::cell::RefCell<std::collections::HashMap<(u32, &'static str), i64>>,
     > = std::rc::Rc::new(std::cell::RefCell::new(std::collections::HashMap::new()));
 
+    // Отказы человека. Читаются с диска при запуске: без этого
+    // «больше не предлагать никогда» жило бы до выхода из программы,
+    // и то же предложение возвращалось бы после каждой перезагрузки.
+    let rejections: std::rc::Rc<std::cell::RefCell<bamboo_policy::Rejections>> =
+        std::rc::Rc::new(std::cell::RefCell::new(actions::load_rejections()));
+
     // Установленные игры: читаются с диска при открытии раздела «Анализ»
     // и живут до закрытия программы. Перечитывать их каждый тик значило бы
     // ходить на диск без нужды.
@@ -247,6 +253,64 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 Err(error) => format!("Настройку сохранить не удалось: {error}"),
             };
             win.set_autopilot(pilot.enabled());
+            win.set_action_note(SharedString::from(note));
+        });
+    }
+
+    // Отказ от предложения. Дважды — и оно замолкает навсегда.
+    {
+        let weak = main_window.as_weak();
+        let rejections = rejections.clone();
+        let snapshot = last_snapshot.clone();
+        main_window.on_reject_suggestion(move |pid, code| {
+            let Some(win) = weak.upgrade() else {
+                return;
+            };
+            let Ok(pid) = pid.parse::<u32>() else {
+                return;
+            };
+
+            // Отказ запоминаем по имени программы, а не по номеру процесса:
+            // номер сменится при следующем запуске, и «никогда» продержалось
+            // бы ровно до перезапуска программы.
+            let name = snapshot
+                .borrow()
+                .as_ref()
+                .and_then(|snapshot| {
+                    snapshot
+                        .top
+                        .iter()
+                        .find(|line| line.pid == pid)
+                        .map(|line| line.name.clone())
+                })
+                .unwrap_or_default();
+            if name.is_empty() {
+                win.set_action_note(SharedString::from("Процесс уже завершился."));
+                return;
+            }
+
+            let what = remedy_name(code);
+            let now = bamboo_core::SampleTime::wall_clock_now();
+            let learned = rejections.borrow_mut().reject(&name, what, now);
+
+            let note = match learned {
+                bamboo_policy::Learned::Silenced => format!(
+                    "{name}: больше не предложу «{what}». Передумаете — удалите строку                      из файла отказов рядом с журналом."
+                ),
+                bamboo_policy::Learned::Counted { .. } => format!(
+                    "{name}: понял, «{what}» пока пропускаю. Откажетесь ещё раз —                      перестану предлагать совсем."
+                ),
+                // Тот же самый отказ пришёл дважды: считать его вторым
+                // нельзя, иначе одно нажатие замолчит предложение навсегда.
+                bamboo_policy::Learned::Duplicate => return,
+            };
+
+            if let Err(error) = actions::save_rejections(&rejections.borrow()) {
+                win.set_action_note(SharedString::from(format!(
+                    "Отказ учтён, но сохранить его не удалось: {error}.                      После перезапуска предложение вернётся."
+                )));
+                return;
+            }
             win.set_action_note(SharedString::from(note));
         });
     }
@@ -817,6 +881,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let refresh_rows = main_processes.clone();
         let refresh_pilot = autopilot.clone();
         let refresh_games = known_games.clone();
+        let refresh_rejections = rejections.clone();
         main_window.on_refresh(move || {
             let Some(win) = weak.upgrade() else {
                 return;
@@ -840,6 +905,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         &refresh_limits.borrow(),
                         &refresh_pilot,
                         &refresh_games,
+                        &refresh_rejections.borrow(),
                     );
                 }
                 return;
@@ -979,6 +1045,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let update_found = pending_update.clone();
 
     let tick_games = known_games.clone();
+    let tick_rejections = rejections.clone();
     let tick_recording = recording.clone();
     let started = std::time::Instant::now();
     let tick_pilot = autopilot.clone();
@@ -1154,6 +1221,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             &io_limits.borrow(),
                             &tick_pilot,
                             &tick_games,
+                            &tick_rejections.borrow(),
                         );
                     }
                 }
@@ -1254,6 +1322,20 @@ fn remedy_key(remedy: bamboo_analyze::suggest::Remedy) -> &'static str {
         Remedy::LowerMemory => "память",
         Remedy::ThrottleDisk => "диск",
         Remedy::JustSaying => "ничего",
+    }
+}
+
+/// Короткое имя средства для списка отказов.
+///
+/// Отказ запоминается по паре «программа + средство»: отказ придержать диск
+/// браузеру не означает отказа от экономичного режима для него же.
+#[cfg(windows)]
+fn remedy_name(action: i32) -> &'static str {
+    match action {
+        0 => "эконом",
+        1 => "память",
+        2 => "диск",
+        _ => "прочее",
     }
 }
 
@@ -1394,6 +1476,7 @@ fn apply_overview(
     limits: &actions::IoLimits,
     autopilot: &std::cell::RefCell<autopilot::Autopilot>,
     known_games: &std::sync::Mutex<Vec<bamboo_sys::Game>>,
+    rejections: &bamboo_policy::Rejections,
 ) {
     let overview = mainwin::overview(snapshot);
     main.set_cpu_summary(SharedString::from(overview.cpu));
@@ -1454,6 +1537,19 @@ fn apply_overview(
     let (suggestions, note) = mainwin::suggestion_rows(snapshot, &|pid| {
         limits.is_limited(pid) || !applied.marks(pid, false).is_empty()
     });
+    // То, от чего человек отказался дважды, из списка убираем совсем.
+    let suggestions: Vec<mainwin::SuggestionRow> = suggestions
+        .into_iter()
+        .filter(|row| {
+            let name = snapshot
+                .top
+                .iter()
+                .find(|line| line.pid.to_string() == row.pid)
+                .map(|line| line.name.as_str())
+                .unwrap_or_default();
+            !rejections.is_silenced(name, remedy_name(row.action))
+        })
+        .collect();
     let rows: Vec<SuggestionRow> = suggestions
         .into_iter()
         .map(|row| SuggestionRow {

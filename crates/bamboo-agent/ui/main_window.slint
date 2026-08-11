@@ -489,6 +489,8 @@ export component MainWindow inherits Window {
     callback toggle-game-mode();
     // Перестроить список после изменения фильтра.
     callback apply-filter();
+    // Человек отказался от предложения. Дважды — и оно замолкает навсегда.
+    callback reject-suggestion(string, int);
     // Переключить запуск вместе с Windows.
     callback toggle-autostart();
     // Переключить показ виджета при запуске.
@@ -1673,6 +1675,26 @@ export component MainWindow inherits Window {
                                                     } else {
                                                         root.apply-action(item.pid, item.action);
                                                     }
+                                                    root.refresh();
+                                                }
+                                            }
+                                        }
+                                    }
+                                    // Отказ — такое же решение, как согласие,
+                                    // и у него должна быть своя кнопка.
+                                    // Без неё человеку остаётся только молча
+                                    // не нажимать, а Bamboo будет предлагать
+                                    // одно и то же бесконечно.
+                                    if item.button != "": Rectangle {
+                                        width: 110px;
+                                        VerticalLayout {
+                                            alignment: center;
+                                            RowButton {
+                                                label: "Не трогать";
+                                                width: 110px;
+                                                pressed => {
+                                                    root.reject-suggestion(
+                                                        item.pid, item.action);
                                                     root.refresh();
                                                 }
                                             }

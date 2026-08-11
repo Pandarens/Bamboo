@@ -9,12 +9,14 @@
 
 pub mod action;
 pub mod freeze;
+pub mod learn;
 pub mod notify;
 pub mod profile;
 pub mod whitelist;
 
 pub use action::{may_apply_autonomously, Action, Autonomy, AutonomyMode};
 pub use freeze::{may_freeze, FreezeFacts, FreezeVerdict};
+pub use learn::{Learned, Rejections, REJECTIONS_TO_SILENCE};
 pub use notify::{may_notify, NotifyContext, Silence};
 pub use profile::{auto_profile, Profile, Situation};
 pub use whitelist::{immutable_reason, AppClass, ProcessFacts, UserWhitelist};
