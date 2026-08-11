@@ -8,6 +8,7 @@
 
 pub mod app;
 pub mod error;
+pub mod fill;
 pub mod lang;
 pub mod process;
 pub mod storage;
@@ -17,6 +18,7 @@ pub mod units;
 
 pub use app::AppKey;
 pub use error::{Error, Result};
+pub use fill::{fill, say};
 pub use lang::{language, pick, set_language, Language};
 pub use process::{Pid, ProcessId, ProcessSample};
 pub use storage::{BusType, CriticalWarning, DriveInfo, SmartHealth, SmartSource};

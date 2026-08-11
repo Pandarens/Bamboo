@@ -190,14 +190,28 @@ pub fn apply(pid: u32, image_name: &str, what: RowAction) -> String {
 
     let now = bamboo_core::SampleTime::wall_clock_now();
     match executor.apply(now, &context, &target, Actor::Manual, false) {
-        Outcome::Applied { journal_id } => format!(
-            "{}: {} — применено, запись №{journal_id}. Откатить можно в журнале.",
-            image_name,
-            action.name()
+        Outcome::Applied { journal_id } => bamboo_core::say(
+            "{app}: {action} — применено, запись №{id}. Откатить можно в журнале.",
+            "{app}: {action} — applied, entry №{id}. It can be undone from the journal.",
+            &[
+                ("app", image_name),
+                ("action", action.name()),
+                ("id", &journal_id.to_string()),
+            ],
         ),
-        Outcome::Simulated { would_do } => format!("{image_name}: {would_do}"),
-        Outcome::Refused { reason } => format!("{image_name}: отказ — {reason}"),
-        Outcome::Failed { error, .. } => format!("{image_name}: не удалось — {error}"),
+        Outcome::Simulated { would_do } => {
+            bamboo_core::fill("{app}: {what}", &[("app", image_name), ("what", &would_do)])
+        }
+        Outcome::Refused { reason } => bamboo_core::say(
+            "{app}: отказ — {why}",
+            "{app}: refused — {why}",
+            &[("app", image_name), ("why", &reason)],
+        ),
+        Outcome::Failed { error, .. } => bamboo_core::say(
+            "{app}: не удалось — {why}",
+            "{app}: did not work — {why}",
+            &[("app", image_name), ("why", &error)],
+        ),
     }
 }
 
@@ -297,7 +311,11 @@ impl IoLimits {
             if let Some(id) = self.journal_ids.remove(&pid) {
                 record_limit_lifted(id);
             }
-            return format!("{image_name}: ограничение диска снято.");
+            return bamboo_core::say(
+                "{app}: ограничение диска снято.",
+                "{app}: the disk limit is lifted.",
+                &[("app", image_name)],
+            );
         }
 
         let facts = ProcessFacts {
@@ -306,7 +324,11 @@ impl IoLimits {
             ..Default::default()
         };
         if let Some(reason) = bamboo_policy::immutable_reason(&facts) {
-            return format!("{image_name}: придерживать нельзя — {reason}");
+            return bamboo_core::say(
+                "{app}: придерживать нельзя — {why}",
+                "{app}: cannot be held back — {why}",
+                &[("app", image_name), ("why", reason)],
+            );
         }
 
         // Запись открываем до попытки: иначе неудачная попытка не оставила бы
@@ -324,13 +346,22 @@ impl IoLimits {
                 }
                 let held = self.count();
                 let others = if held > 1 {
-                    format!(" Сейчас придержано процессов: {held}.")
+                    bamboo_core::say(
+                        " Сейчас придержано процессов: {count}.",
+                        " Processes held back right now: {count}.",
+                        &[("count", &held.to_string())],
+                    )
                 } else {
                     String::new()
                 };
-                format!(
-                    "{image_name}: диск придержан — {}. Полного запрета не бывает:                      процесс, которому отказали в чтении, просто упал бы.                      Ограничение снимется само, когда Bamboo закроется.{others}",
-                    limit.describe()
+                bamboo_core::say(
+                    "{app}: диск придержан — {limit}. Полного запрета не бывает:                      процесс, которому отказали в чтении, просто упал бы.                      Ограничение снимется само, когда Bamboo закроется.{others}",
+                    "{app}: the disk is held back — {limit}. A full ban does not exist:                      a process denied a read would simply crash. The limit lifts                      itself when Bamboo closes.{others}",
+                    &[
+                        ("app", image_name),
+                        ("limit", limit.describe()),
+                        ("others", &others),
+                    ],
                 )
             }
             Err(error) => {
@@ -338,7 +369,11 @@ impl IoLimits {
                 if let Some(id) = entry {
                     record_limit_failed(id, &reason);
                 }
-                format!("{image_name}: придержать не удалось — {reason}")
+                bamboo_core::say(
+                    "{app}: придержать не удалось — {why}",
+                    "{app}: holding back did not work — {why}",
+                    &[("app", image_name), ("why", &reason)],
+                )
             }
         }
     }

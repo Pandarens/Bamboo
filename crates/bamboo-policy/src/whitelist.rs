@@ -71,31 +71,51 @@ pub struct ProcessFacts<'a> {
 /// Причина возвращается текстом, чтобы интерфейс мог объяснить отказ,
 /// а не молча спрятать кандидата.
 pub fn immutable_reason(facts: &ProcessFacts<'_>) -> Option<&'static str> {
+    use bamboo_core::pick;
+
     let name = facts.image_name.to_lowercase();
 
     if SYSTEM_CORE.iter().any(|entry| entry.to_lowercase() == name) {
-        return Some("процесс входит в ядро системы");
+        return Some(pick(
+            "процесс входит в ядро системы",
+            "the process is part of the system core",
+        ));
     }
     if SECURITY.iter().any(|entry| *entry == name) {
-        return Some("средство защиты системы");
+        return Some(pick("средство защиты системы", "a system protection tool"));
     }
     if INFRASTRUCTURE.iter().any(|entry| *entry == name) {
-        return Some("системная инфраструктура: звук, печать, видео или обслуживание");
+        return Some(pick(
+            "системная инфраструктура: звук, печать, видео или обслуживание",
+            "system infrastructure: sound, printing, video or servicing",
+        ));
     }
 
     if facts.elam_driver {
-        return Some("в процесс загружен драйвер раннего запуска антивируса");
+        return Some(pick(
+            "в процесс загружен драйвер раннего запуска антивируса",
+            "an early-launch antivirus driver is loaded into the process",
+        ));
     }
     if facts.security_vendor {
-        return Some("процесс поставщика средств защиты");
+        return Some(pick(
+            "процесс поставщика средств защиты",
+            "a security vendor process",
+        ));
     }
     if facts.protected_process {
-        return Some("защищённый процесс, вмешательство запрещено системой");
+        return Some(pick(
+            "защищённый процесс, вмешательство запрещено системой",
+            "a protected process: the system forbids interference",
+        ));
     }
     // Любой процесс в сессии 0 с уровнем целостности System — часть
     // системной инфраструктуры, даже если имя нам незнакомо.
     if facts.session_id == 0 && facts.system_integrity {
-        return Some("системный процесс в сессии 0");
+        return Some(pick(
+            "системный процесс в сессии 0",
+            "a system process in session 0",
+        ));
     }
 
     None
@@ -303,5 +323,107 @@ mod tests {
         whitelist.remove("slack");
         assert!(!whitelist.contains("slack", None));
         assert_eq!(whitelist.rejection_count("slack"), 0);
+    }
+}
+
+#[cfg(test)]
+mod translation_tests {
+    use super::*;
+    use bamboo_core::{set_language, Language};
+    use std::sync::Mutex;
+
+    static LANGUAGE_LOCK: Mutex<()> = Mutex::new(());
+
+    /// Набор фактов, дающий каждую из причин отказа.
+    ///
+    /// Список перечислен целиком нарочно: добавите новую причину — тест
+    /// не упадёт сам, но соседний, считающий покрытие, упадёт и напомнит.
+    fn every_reason() -> Vec<ProcessFacts<'static>> {
+        vec![
+            ProcessFacts {
+                image_name: "csrss.exe",
+                ..Default::default()
+            },
+            ProcessFacts {
+                image_name: "msmpeng.exe",
+                ..Default::default()
+            },
+            ProcessFacts {
+                image_name: "audiodg.exe",
+                ..Default::default()
+            },
+            ProcessFacts {
+                image_name: "чужой.exe",
+                elam_driver: true,
+                ..Default::default()
+            },
+            ProcessFacts {
+                image_name: "чужой.exe",
+                security_vendor: true,
+                ..Default::default()
+            },
+            ProcessFacts {
+                image_name: "чужой.exe",
+                protected_process: true,
+                ..Default::default()
+            },
+            ProcessFacts {
+                image_name: "чужой.exe",
+                session_id: 0,
+                system_integrity: true,
+                ..Default::default()
+            },
+        ]
+    }
+
+    #[test]
+    fn every_refusal_reason_speaks_both_languages() {
+        // Отказ — то, что человек видит чаще всего: он нажал, и ему
+        // объяснили, почему нельзя. Оставить это на одном языке значило бы
+        // перевести интерфейс и не перевести разговор.
+        let _guard = LANGUAGE_LOCK.lock().unwrap();
+
+        for facts in every_reason() {
+            set_language(Language::Russian);
+            let russian = immutable_reason(&facts).expect("причина обязана быть");
+            set_language(Language::English);
+            let english = immutable_reason(&facts).expect("причина обязана быть");
+
+            assert_ne!(
+                russian, english,
+                "причина не переведена: {}",
+                facts.image_name
+            );
+            assert!(
+                !english
+                    .chars()
+                    .any(|c| ('\u{0410}'..='\u{044f}').contains(&c)),
+                "в английской причине осталась кириллица: {english}"
+            );
+        }
+        set_language(Language::Russian);
+    }
+
+    #[test]
+    fn the_list_of_reasons_covers_them_all() {
+        // Сторож для соседнего теста: если появится новая причина,
+        // а набор фактов её не даст, тот проверит на одну меньше
+        // и останется зелёным.
+        //
+        // Считаем ветки в боевой части файла, до модуля тестов.
+        // Первые две редакции этого счёта ловили сами себя: строка,
+        // которая ищет текст, содержит этот текст.
+        let source = include_str!("whitelist.rs");
+        let production = source
+            .split("#[cfg(test)]")
+            .next()
+            .expect("боевая часть файла");
+        let branches = production.matches("return Some(").count();
+        assert_eq!(
+            branches,
+            every_reason().len(),
+            "причин отказа {branches}, а проверяется {}",
+            every_reason().len()
+        );
     }
 }
