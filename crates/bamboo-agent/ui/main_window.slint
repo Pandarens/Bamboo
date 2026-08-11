@@ -401,6 +401,8 @@ export component MainWindow inherits Window {
     in property <string> update-status: "";
     in property <bool> update-busy: false;
     in property <string> app-version: "";
+    in-out property <string> language: "ru";
+    callback toggle-language();
     in property <string> history-note: "";
     in property <[BootRow]> boots: [];
     in property <string> boot-note: "";
@@ -569,24 +571,24 @@ export component MainWindow inherits Window {
                 Rectangle { height: 1px; background: #2f4038; }
 
                 MenuRow {
-                    label: "Экономичный режим";
-                    hint: "процессор";
+                    label: @tr("Экономичный режим");
+                    hint: @tr("процессор");
                     chosen => { root.apply-action(root.menu-pid, 0); }
                 }
                 MenuRow {
-                    label: "Понизить приоритет памяти";
-                    hint: "память";
+                    label: @tr("Понизить приоритет памяти");
+                    hint: @tr("память");
                     chosen => { root.apply-action(root.menu-pid, 1); }
                 }
                 MenuRow {
-                    label: root.menu-throttled ? "Отпустить диск" : "Придержать диск";
-                    hint: "диск";
+                    label: root.menu-throttled ? @tr("Отпустить диск") : @tr("Придержать диск");
+                    hint: @tr("диск");
                     chosen => { root.toggle-io-limit(root.menu-pid); }
                 }
                 Rectangle { height: 1px; background: #2f4038; }
                 MenuRow {
-                    label: root.menu-group ? "Завершить все процессы" : "Завершить процесс";
-                    hint: "необратимо";
+                    label: root.menu-group ? @tr("Завершить все процессы") : @tr("Завершить процесс");
+                    hint: @tr("необратимо");
                     danger: true;
                     chosen => {
                         if (root.menu-group) {
@@ -623,7 +625,7 @@ export component MainWindow inherits Window {
         HorizontalLayout {
             padding-left: 12px; spacing: 4px;
             Text {
-                text: "Bamboo — наблюдатель за системой";
+                text: @tr("Bamboo — наблюдатель за системой");
                 font-size: 12px;
                 color: #b6c6bd;
                 vertical-alignment: center;
@@ -662,62 +664,62 @@ export component MainWindow inherits Window {
                 Rectangle { height: 12px; }
 
                 NavButton {
-                    label: "Обзор";
+                    label: @tr("Обзор");
                     active: root.section == 0;
                     chosen => { root.section = 0; }
                 }
                 NavButton {
-                    label: "Процессы";
+                    label: @tr("Процессы");
                     active: root.section == 1;
                     chosen => { root.section = 1; }
                 }
                 NavButton {
-                    label: "Диск";
+                    label: @tr("Диск");
                     active: root.section == 2;
                     chosen => { root.section = 2; root.refresh(); }
                 }
                 NavButton {
-                    label: "Питание";
+                    label: @tr("Питание");
                     active: root.section == 3;
                     chosen => { root.section = 3; root.refresh(); }
                 }
                 NavButton {
-                    label: "Загрузка";
+                    label: @tr("Загрузка");
                     active: root.section == 9;
                     chosen => { root.section = 9; root.refresh(); }
                 }
                 NavButton {
-                    label: "Автозапуск";
+                    label: @tr("Автозапуск");
                     active: root.section == 10;
                     chosen => { root.section = 10; root.refresh(); }
                 }
                 NavButton {
-                    label: "Отчёты";
+                    label: @tr("Отчёты");
                     active: root.section == 11;
                     chosen => { root.section = 11; root.refresh(); }
                 }
                 NavButton {
-                    label: "Оптимизация";
+                    label: @tr("Оптимизация");
                     active: root.section == 6;
                     chosen => { root.section = 6; root.refresh(); }
                 }
                 NavButton {
-                    label: "Журнал";
+                    label: @tr("Журнал");
                     active: root.section == 4;
                     chosen => { root.section = 4; root.refresh(); }
                 }
                 NavButton {
-                    label: "Анализ";
+                    label: @tr("Анализ");
                     active: root.section == 8;
                     chosen => { root.section = 8; root.refresh(); }
                 }
                 NavButton {
-                    label: "Браузер";
+                    label: @tr("Браузер");
                     active: root.section == 7;
                     chosen => { root.section = 7; root.refresh(); }
                 }
                 NavButton {
-                    label: "Настройки";
+                    label: @tr("Настройки");
                     active: root.section == 5;
                     chosen => { root.section = 5; }
                 }
@@ -751,7 +753,7 @@ export component MainWindow inherits Window {
                             spacing: 3px;
                             horizontal-stretch: 1;
                             Text {
-                                text: "Вышла версия " + root.update-version;
+                                text: @tr("Вышла версия ") + root.update-version;
                                 font-size: 13px; color: #8fc4f0;
                             }
                             Text {
@@ -762,7 +764,7 @@ export component MainWindow inherits Window {
                         VerticalLayout {
                             alignment: center;
                             RowButton {
-                                label: root.update-busy ? "Качаю…" : "Обновить";
+                                label: root.update-busy ? @tr("Качаю…") : @tr("Обновить");
                                 width: 120px;
                                 pressed => {
                                     if (!root.update-busy) { root.install-update(); }
@@ -774,7 +776,7 @@ export component MainWindow inherits Window {
 
                 if root.section == 0: VerticalLayout {
                     spacing: 10px;
-                    Text { text: "Обзор"; font-size: 20px; color: #e8f0ec; }
+                    Text { text: @tr("Обзор"); font-size: 20px; color: #e8f0ec; }
 
                     HorizontalLayout {
                         spacing: 10px;
@@ -782,7 +784,7 @@ export component MainWindow inherits Window {
                             background: #1e2a24; border-radius: 8px; height: 78px;
                             VerticalLayout {
                                 padding: 12px;
-                                Text { text: "Процессор"; font-size: 11px; color: #7d8f86; }
+                                Text { text: @tr("Процессор"); font-size: 11px; color: #7d8f86; }
                                 Text { text: root.cpu-summary; font-size: 22px; color: #e8f0ec; }
                             }
                         }
@@ -790,7 +792,7 @@ export component MainWindow inherits Window {
                             background: #1e2a24; border-radius: 8px; height: 78px;
                             VerticalLayout {
                                 padding: 12px;
-                                Text { text: "Память"; font-size: 11px; color: #7d8f86; }
+                                Text { text: @tr("Память"); font-size: 11px; color: #7d8f86; }
                                 Text { text: root.memory-summary; font-size: 22px; color: #e8f0ec; }
                             }
                         }
@@ -798,7 +800,7 @@ export component MainWindow inherits Window {
                             background: #1e2a24; border-radius: 8px; height: 78px;
                             VerticalLayout {
                                 padding: 12px;
-                                Text { text: "Процессов"; font-size: 11px; color: #7d8f86; }
+                                Text { text: @tr("Процессов"); font-size: 11px; color: #7d8f86; }
                                 Text { text: root.process-summary; font-size: 22px; color: #e8f0ec; }
                             }
                         }
@@ -816,7 +818,7 @@ export component MainWindow inherits Window {
                                 spacing: 4px;
                                 horizontal-stretch: 1;
                                 Text {
-                                    text: "Система подвисала";
+                                    text: @tr("Система подвисала");
                                     font-size: 12px; color: #e0a44a;
                                 }
                                 Text {
@@ -830,7 +832,7 @@ export component MainWindow inherits Window {
                             if root.freeze-culprits != "": VerticalLayout {
                                 alignment: center;
                                 RowButton {
-                                    label: "Показать их";
+                                    label: @tr("Показать их");
                                     width: 120px;
                                     pressed => {
                                         root.filter = root.freeze-culprits;
@@ -854,17 +856,17 @@ export component MainWindow inherits Window {
                                 horizontal-stretch: 1;
                                 Text {
                                     text: root.game-mode
-                                        ? "Игровой режим включён"
-                                        : "Игровой режим";
+                                        ? @tr("Игровой режим включён")
+                                        : @tr("Игровой режим");
                                     font-size: 13px; color: #e8f0ec;
                                 }
                                 Text {
                                     text: root.game-mode
-                                        ? "Игра получает процессор и память в первую очередь. "
-                                          + "Выключите — всё вернётся как было."
-                                        : "Отдаёт процессор и память той программе, что сейчас "
-                                          + "на экране. Фоновые уводит в энергосберегающий режим. "
-                                          + "Discord, Steam и OBS не трогает.";
+                                        ? @tr("Игра получает процессор и память в первую очередь. ")
+                                          + @tr("Выключите — всё вернётся как было.")
+                                        : @tr("Отдаёт процессор и память той программе, что сейчас ")
+                                          + @tr("на экране. Фоновые уводит в энергосберегающий режим. ")
+                                          + @tr("Discord, Steam и OBS не трогает.");
                                     font-size: 11px; color: #7d8f86; wrap: word-wrap;
                                 }
                             }
@@ -873,7 +875,7 @@ export component MainWindow inherits Window {
                                 VerticalLayout {
                                     alignment: center;
                                     RowButton {
-                                        label: root.game-mode ? "Выключить" : "Включить";
+                                        label: root.game-mode ? @tr("Выключить") : @tr("Включить");
                                         width: 110px;
                                         pressed => { root.toggle-game-mode(); }
                                     }
@@ -883,7 +885,7 @@ export component MainWindow inherits Window {
                     }
 
                     // --- Накопители ---
-                    Text { text: "Накопители"; font-size: 14px; color: #e8f0ec; }
+                    Text { text: @tr("Накопители"); font-size: 14px; color: #e8f0ec; }
                     if root.disk-pressure != "": Rectangle {
                         background: #2a211c; border-radius: 8px;
                         height: pressure.preferred-height;
@@ -938,14 +940,14 @@ export component MainWindow inherits Window {
                                 }
                             }
                             Text {
-                                text: disk.speed + "   в очереди: " + disk.queue;
+                                text: disk.speed + @tr("   в очереди: ") + disk.queue;
                                 font-size: 11px; color: #7d8f86;
                             }
                         }
                     }
 
                     // --- Разделы ---
-                    Text { text: "Свободное место"; font-size: 14px; color: #e8f0ec; }
+                    Text { text: @tr("Свободное место"); font-size: 14px; color: #e8f0ec; }
                     for volume in root.volumes: Rectangle {
                         background: #1e2a24; border-radius: 8px;
                         VerticalLayout {
@@ -974,17 +976,17 @@ export component MainWindow inherits Window {
                                 }
                             }
                             if volume.cramped: Text {
-                                text: "Свободного места меньше десятой части. У SSD от этого "
-                                    + "падает скорость записи: контроллеру негде раскладывать данные.";
+                                text: @tr("Свободного места меньше десятой части. У SSD от этого ")
+                                    + @tr("падает скорость записи: контроллеру негде раскладывать данные.");
                                 font-size: 11px; color: #e0a44a; wrap: word-wrap;
                             }
                         }
                     }
 
                     // --- Подкачка ---
-                    Text { text: "Файл подкачки"; font-size: 14px; color: #e8f0ec; }
+                    Text { text: @tr("Файл подкачки"); font-size: 14px; color: #e8f0ec; }
                     if root.pagefiles.length == 0: Text {
-                        text: "Подкачка отключена — Windows держит всё в оперативной памяти.";
+                        text: @tr("Подкачка отключена — Windows держит всё в оперативной памяти.");
                         font-size: 11px; color: #7d8f86; wrap: word-wrap;
                     }
                     for file in root.pagefiles: Rectangle {
@@ -1020,8 +1022,8 @@ export component MainWindow inherits Window {
                     }
 
                     Text {
-                        text: "Bamboo наблюдает за системой и объясняет причины деградации. "
-                            + "Действия применяются только по вашему решению и всегда обратимы.";
+                        text: @tr("Bamboo наблюдает за системой и объясняет причины деградации. ")
+                            + @tr("Действия применяются только по вашему решению и всегда обратимы.");
                         font-size: 12px; color: #7d8f86; wrap: word-wrap;
                     }
                     Rectangle { vertical-stretch: 1; }
@@ -1033,7 +1035,7 @@ export component MainWindow inherits Window {
                     HorizontalLayout {
                         spacing: 8px;
                         Text {
-                            text: root.grouped ? "Программы" : "Процессы";
+                            text: root.grouped ? @tr("Программы") : @tr("Процессы");
                             font-size: 20px; color: #e8f0ec;
                             vertical-alignment: center; horizontal-stretch: 1;
                         }
@@ -1065,7 +1067,7 @@ export component MainWindow inherits Window {
                                     edited => { root.apply-filter(); }
                                 }
                                 if root.filter == "": Text {
-                                    text: "поиск";
+                                    text: @tr("поиск");
                                     font-size: 12px;
                                     color: #62736a;
                                     vertical-alignment: center;
@@ -1073,23 +1075,23 @@ export component MainWindow inherits Window {
                             }
                         }
                         RowButton {
-                            label: root.grouped ? "по процессам" : "по программам";
+                            label: root.grouped ? @tr("по процессам") : @tr("по программам");
                             width: 118px;
                             pressed => { root.toggle-grouping(); }
                         }
                     }
                     Text {
-                        text: "Правая кнопка по процессу — меню действий. Щелчок по имени "
-                            + "программы разворачивает её процессы. Столбец «Рост памяти» "
-                            + "показывает то, чего нет в диспетчере задач: не сколько памяти "
-                            + "занято сейчас, а растёт ли она и как быстро. Показаны первые "
-                            + "80 строк — сортировка идёт по всем процессам.";
+                        text: @tr("Правая кнопка по процессу — меню действий. Щелчок по имени ")
+                            + @tr("программы разворачивает её процессы. Столбец «Рост памяти» ")
+                            + @tr("показывает то, чего нет в диспетчере задач: не сколько памяти ")
+                            + @tr("занято сейчас, а растёт ли она и как быстро. Показаны первые ")
+                            + @tr("80 строк — сортировка идёт по всем процессам.");
                         font-size: 11px; color: #62736a; wrap: word-wrap;
                     }
                     HorizontalLayout {
                         padding-left: 10px; padding-right: 6px; spacing: 6px;
                         ColumnHeader {
-                            label: "Процесс"; horizontal-stretch: 1; min-width: 220px;
+                            label: @tr("Процесс"); horizontal-stretch: 1; min-width: 220px;
                             active: root.sort-column == 0; descending: root.sort-descending;
                             chosen => { root.sort-by(0); }
                         }
@@ -1104,31 +1106,31 @@ export component MainWindow inherits Window {
                             chosen => { root.sort-by(2); }
                         }
                         ColumnHeader {
-                            label: "Память"; width: 86px; align-right: true;
+                            label: @tr("Память"); width: 86px; align-right: true;
                             active: root.sort-column == 3; descending: root.sort-descending;
                             chosen => { root.sort-by(3); }
                         }
                         ColumnHeader {
-                            label: root.grouped ? "Процессов" : "Потоки"; width: 72px; align-right: true;
+                            label: root.grouped ? @tr("Процессов") : @tr("Потоки"); width: 72px; align-right: true;
                             active: root.sort-column == 4; descending: root.sort-descending;
                             chosen => { root.sort-by(4); }
                         }
                         ColumnHeader {
-                            label: "Рост памяти"; width: 104px; align-right: true;
+                            label: @tr("Рост памяти"); width: 104px; align-right: true;
                             active: root.sort-column == 5; descending: root.sort-descending;
                             chosen => { root.sort-by(5); }
                         }
                         ColumnHeader {
-                            label: "Диск"; width: 88px; align-right: true;
+                            label: @tr("Диск"); width: 88px; align-right: true;
                             active: root.sort-column == 7; descending: root.sort-descending;
                             chosen => { root.sort-by(7); }
                         }
                         Text {
-                            text: "Изменения"; width: 112px;
+                            text: @tr("Изменения"); width: 112px;
                             font-size: 11px; color: #7d8f86; vertical-alignment: center;
                         }
                         ColumnHeader {
-                            label: "Состояние"; width: 88px;
+                            label: @tr("Состояние"); width: 88px;
                             active: root.sort-column == 6; descending: root.sort-descending;
                             chosen => { root.sort-by(6); }
                         }
@@ -1308,7 +1310,7 @@ export component MainWindow inherits Window {
                             vertical-alignment: center;
                         }
                         if root.culprit-service != "": RowButton {
-                            label: "Остановить службу";
+                            label: @tr("Остановить службу");
                             danger: true;
                             width: 140px;
                             pressed => { root.stop-culprit-service(); }
@@ -1319,12 +1321,12 @@ export component MainWindow inherits Window {
                 // --- Диск ---
                 if root.section == 2: VerticalLayout {
                     spacing: 8px;
-                    Text { text: "Диск"; font-size: 20px; color: #e8f0ec; }
+                    Text { text: @tr("Диск"); font-size: 20px; color: #e8f0ec; }
 
                     // Кто занимает диск — тот самый вопрос, ради которого
                     // раздел и открывают. Здоровье накопителя на него
                     // не отвечает, поэтому список идёт первым.
-                    Text { text: "Кто занимает диск"; font-size: 14px; color: #b6c6bd; }
+                    Text { text: @tr("Кто занимает диск"); font-size: 14px; color: #b6c6bd; }
                     for user in root.disk-users: Rectangle {
                         background: #1e2a24; border-radius: 6px;
                         height: 40px;
@@ -1359,7 +1361,7 @@ export component MainWindow inherits Window {
                     }
 
                     Text {
-                        text: "Здоровье накопителя"; font-size: 14px; color: #b6c6bd;
+                        text: @tr("Здоровье накопителя"); font-size: 14px; color: #b6c6bd;
                     }
                     for drive in root.drives: Rectangle {
                         background: #1e2a24; border-radius: 8px;
@@ -1377,12 +1379,12 @@ export component MainWindow inherits Window {
                 // --- Анализ программы ---
                 if root.section == 8: VerticalLayout {
                     spacing: 10px;
-                    Text { text: "Анализ программы"; font-size: 20px; color: #e8f0ec; }
+                    Text { text: @tr("Анализ программы"); font-size: 20px; color: #e8f0ec; }
                     Text {
-                        text: "Выберите программу, запишите сеанс и посмотрите, что "
-                            + "упиралось в потолок. Мгновенные числа тут бесполезны: "
-                            + "просадка длится секунду, и к моменту, когда вы "
-                            + "переключитесь, всё уже прошло.";
+                        text: @tr("Выберите программу, запишите сеанс и посмотрите, что ")
+                            + @tr("упиралось в потолок. Мгновенные числа тут бесполезны: ")
+                            + @tr("просадка длится секунду, и к моменту, когда вы ")
+                            + @tr("переключитесь, всё уже прошло.");
                         font-size: 11px; color: #62736a; wrap: word-wrap;
                     }
 
@@ -1414,7 +1416,7 @@ export component MainWindow inherits Window {
                                     padding-left: 10px; padding-right: 10px; spacing: 6px;
                                     Text {
                                         text: root.record-app == ""
-                                            ? "выберите игру или программу"
+                                            ? @tr("выберите игру или программу")
                                             : root.record-app;
                                         color: root.record-app == "" ? #4d5b53 : #e8f0ec;
                                         font-size: 12px;
@@ -1430,7 +1432,7 @@ export component MainWindow inherits Window {
                                 }
                             }
                             RowButton {
-                                label: root.recording ? "Остановить" : "Записать";
+                                label: root.recording ? @tr("Остановить") : @tr("Записать");
                                 width: 130px;
                                 pressed => { root.toggle-recording(root.record-app); }
                             }
@@ -1513,25 +1515,25 @@ export component MainWindow inherits Window {
                         VerticalLayout {
                             spacing: 10px;
                             Chart {
-                                title: "Процессор";
+                                title: @tr("Процессор");
                                 scale: root.record-scale-cpu;
                                 points: root.record-cpu;
                                 tint: #6fb58a;
                             }
                             Chart {
-                                title: "Память";
+                                title: @tr("Память");
                                 scale: root.record-scale-memory;
                                 points: root.record-memory;
                                 tint: #7fb0d8;
                             }
                             if root.record-has-gpu: Chart {
-                                title: "Видеокарта";
+                                title: @tr("Видеокарта");
                                 scale: "0-100%";
                                 points: root.record-gpu;
                                 tint: #c08fd8;
                             }
                             Chart {
-                                title: "Диск";
+                                title: @tr("Диск");
                                 scale: root.record-scale-disk;
                                 points: root.record-disk;
                                 tint: #e0a44a;
@@ -1556,7 +1558,7 @@ export component MainWindow inherits Window {
                 // --- Загрузка ---
                 if root.section == 9: VerticalLayout {
                     spacing: 8px;
-                    Text { text: "Загрузка системы"; font-size: 20px; color: #e8f0ec; }
+                    Text { text: @tr("Загрузка системы"); font-size: 20px; color: #e8f0ec; }
                     Text {
                         text: root.boot-note;
                         font-size: 11px; color: #7d8f86; wrap: word-wrap;
@@ -1603,7 +1605,7 @@ export component MainWindow inherits Window {
                 // --- Автозапуск ---
                 if root.section == 10: VerticalLayout {
                     spacing: 8px;
-                    Text { text: "Автозапуск"; font-size: 20px; color: #e8f0ec; }
+                    Text { text: @tr("Автозапуск"); font-size: 20px; color: #e8f0ec; }
                     Text {
                         text: root.startup-note;
                         font-size: 11px; color: #7d8f86; wrap: word-wrap;
@@ -1636,7 +1638,7 @@ export component MainWindow inherits Window {
                                     VerticalLayout {
                                         alignment: center;
                                         RowButton {
-                                            label: item.enabled ? "Выключить" : "Включить";
+                                            label: item.enabled ? @tr("Выключить") : @tr("Включить");
                                             width: 110px;
                                             pressed => {
                                                 root.toggle-startup(item.name, !item.enabled);
@@ -1657,11 +1659,11 @@ export component MainWindow inherits Window {
                 // --- Отчёты ---
                 if root.section == 11: VerticalLayout {
                     spacing: 10px;
-                    Text { text: "Недельный отчёт"; font-size: 20px; color: #e8f0ec; }
+                    Text { text: @tr("Недельный отчёт"); font-size: 20px; color: #e8f0ec; }
 
                     HorizontalLayout {
                         spacing: 8px;
-                        for name[index] in ["Текст", "HTML", "JSON"]: RowButton {
+                        for name[index] in [@tr("Текст"), "HTML", "JSON"]: RowButton {
                             label: name;
                             width: 100px;
                             pressed => {
@@ -1671,7 +1673,7 @@ export component MainWindow inherits Window {
                         }
                         Rectangle { horizontal-stretch: 1; }
                         RowButton {
-                            label: "Сохранить";
+                            label: @tr("Сохранить");
                             width: 120px;
                             pressed => { root.save-report(); }
                         }
@@ -1694,7 +1696,7 @@ export component MainWindow inherits Window {
                                 Text {
                                     text: root.report-text != ""
                                         ? root.report-text
-                                        : "Нажмите «Текст», «HTML» или «JSON», чтобы собрать отчёт.";
+                                        : @tr("Нажмите «Текст», «HTML» или «JSON», чтобы собрать отчёт.");
                                     font-size: 11px;
                                     color: root.report-text != "" ? #b6c6bd : #4d5b53;
                                     wrap: word-wrap;
@@ -1707,7 +1709,7 @@ export component MainWindow inherits Window {
                 // --- Браузер ---
                 if root.section == 7: VerticalLayout {
                     spacing: 8px;
-                    Text { text: "Расширения браузера"; font-size: 20px; color: #e8f0ec; }
+                    Text { text: @tr("Расширения браузера"); font-size: 20px; color: #e8f0ec; }
                     Text {
                         text: root.extensions-note;
                         font-size: 11px; color: #7d8f86; wrap: word-wrap;
@@ -1744,7 +1746,7 @@ export component MainWindow inherits Window {
                 // --- Питание ---
                 if root.section == 3: VerticalLayout {
                     spacing: 8px;
-                    Text { text: "Питание"; font-size: 20px; color: #e8f0ec; }
+                    Text { text: @tr("Питание"); font-size: 20px; color: #e8f0ec; }
                     for wake in root.wakes: Rectangle {
                         height: 30px; background: #1a231f; border-radius: 5px;
                         HorizontalLayout {
@@ -1760,7 +1762,7 @@ export component MainWindow inherits Window {
                 // --- Журнал ---
                 if root.section == 4: VerticalLayout {
                     spacing: 8px;
-                    Text { text: "Журнал действий"; font-size: 20px; color: #e8f0ec; }
+                    Text { text: @tr("Журнал действий"); font-size: 20px; color: #e8f0ec; }
                     for entry in root.journal: Rectangle {
                         height: 30px; background: #1a231f; border-radius: 5px;
                         HorizontalLayout {
@@ -1778,12 +1780,12 @@ export component MainWindow inherits Window {
                 // --- Оптимизация ---
                 if root.section == 6: VerticalLayout {
                     spacing: 8px;
-                    Text { text: "Что можно улучшить"; font-size: 20px; color: #e8f0ec; }
+                    Text { text: @tr("Что можно улучшить"); font-size: 20px; color: #e8f0ec; }
                     Text {
-                        text: "Bamboo предлагает только то, что видит своими глазами, "
-                            + "и объясняет причину каждого предложения. Всё применяется "
-                            + "по вашему решению и записывается в журнал — откатить можно "
-                            + "в любой момент.";
+                        text: @tr("Bamboo предлагает только то, что видит своими глазами, ")
+                            + @tr("и объясняет причину каждого предложения. Всё применяется ")
+                            + @tr("по вашему решению и записывается в журнал — откатить можно ")
+                            + @tr("в любой момент.");
                         font-size: 11px; color: #62736a; wrap: word-wrap;
                     }
 
@@ -1799,7 +1801,7 @@ export component MainWindow inherits Window {
                                 spacing: 3px;
                                 horizontal-stretch: 1;
                                 Text {
-                                    text: "Оптимизировать самостоятельно";
+                                    text: @tr("Оптимизировать самостоятельно");
                                     font-size: 13px; color: #e8f0ec;
                                 }
                                 Text {
@@ -1810,7 +1812,7 @@ export component MainWindow inherits Window {
                             VerticalLayout {
                                 alignment: center;
                                 RowButton {
-                                    label: root.autopilot ? "Выключить" : "Включить";
+                                    label: root.autopilot ? @tr("Выключить") : @tr("Включить");
                                     width: 110px;
                                     pressed => { root.toggle-autopilot(); }
                                 }
@@ -1884,7 +1886,7 @@ export component MainWindow inherits Window {
                                         VerticalLayout {
                                             alignment: center;
                                             RowButton {
-                                                label: "Не трогать";
+                                                label: @tr("Не трогать");
                                                 width: 110px;
                                                 pressed => {
                                                     root.reject-suggestion(
@@ -1907,7 +1909,38 @@ export component MainWindow inherits Window {
                 // --- Настройки ---
                 if root.section == 5: VerticalLayout {
                     spacing: 10px;
-                    Text { text: "Настройки"; font-size: 20px; color: #e8f0ec; }
+                    Text { text: @tr("Настройки"); font-size: 20px; color: #e8f0ec; }
+
+                    // Язык интерфейса.
+                    Rectangle {
+                        background: #1e2a24; border-radius: 8px;
+                        height: langbox.preferred-height;
+                        langbox := HorizontalLayout {
+                            padding: 12px; spacing: 12px;
+                            VerticalLayout {
+                                spacing: 3px;
+                                horizontal-stretch: 1;
+                                Text {
+                                    text: @tr("Язык интерфейса");
+                                    font-size: 13px; color: #e8f0ec;
+                                }
+                                Text {
+                                    text: root.language == "ru"
+                                        ? @tr("Сейчас русский. Смена языка вступает в силу после перезапуска.")
+                                        : @tr("Currently English. A language change takes effect after a restart.");
+                                    font-size: 11px; color: #7d8f86; wrap: word-wrap;
+                                }
+                            }
+                            VerticalLayout {
+                                alignment: center;
+                                RowButton {
+                                    label: root.language == "ru" ? "English" : "Русский";
+                                    width: 110px;
+                                    pressed => { root.toggle-language(); }
+                                }
+                            }
+                        }
+                    }
 
                     // Свой расход. Bamboo считает чужую запись на диск
                     // и обязан показывать собственную: утилита, которая
@@ -1919,7 +1952,7 @@ export component MainWindow inherits Window {
                         histbox := VerticalLayout {
                             padding: 12px; spacing: 3px;
                             Text {
-                                text: "История наблюдений";
+                                text: @tr("История наблюдений");
                                 font-size: 13px; color: #e8f0ec;
                             }
                             Text {
@@ -1941,7 +1974,7 @@ export component MainWindow inherits Window {
                                 spacing: 3px;
                                 horizontal-stretch: 1;
                                 Text {
-                                    text: "Версия " + root.app-version;
+                                    text: @tr("Версия ") + root.app-version;
                                     font-size: 13px; color: #e8f0ec;
                                 }
                                 Text {
@@ -1955,10 +1988,10 @@ export component MainWindow inherits Window {
                                     alignment: center;
                                     RowButton {
                                         label: root.update-busy
-                                            ? "Проверяю…"
+                                            ? @tr("Проверяю…")
                                             : (root.update-version != ""
-                                                ? "Обновить"
-                                                : "Проверить");
+                                                ? @tr("Обновить")
+                                                : @tr("Проверить"));
                                         width: 130px;
                                         pressed => {
                                             if (root.update-busy) { return; }
@@ -1983,15 +2016,15 @@ export component MainWindow inherits Window {
                                 spacing: 3px;
                                 horizontal-stretch: 1;
                                 Text {
-                                    text: "Запускать вместе с Windows";
+                                    text: @tr("Запускать вместе с Windows");
                                     font-size: 13px; color: #e8f0ec;
                                 }
                                 Text {
                                     text: root.autostart
-                                        ? "Bamboo запустится сам и продолжит наблюдение."
-                                        : "Сейчас выключено. Наблюдение идёт только пока "
-                                          + "программа запущена, а выводы о росте памяти "
-                                          + "требуют нескольких часов подряд.";
+                                        ? @tr("Bamboo запустится сам и продолжит наблюдение.")
+                                        : @tr("Сейчас выключено. Наблюдение идёт только пока ")
+                                          + @tr("программа запущена, а выводы о росте памяти ")
+                                          + @tr("требуют нескольких часов подряд.");
                                     font-size: 11px; color: #7d8f86; wrap: word-wrap;
                                 }
                             }
@@ -2000,7 +2033,7 @@ export component MainWindow inherits Window {
                                 VerticalLayout {
                                     alignment: center;
                                     RowButton {
-                                        label: root.autostart ? "Выключить" : "Включить";
+                                        label: root.autostart ? @tr("Выключить") : @tr("Включить");
                                         width: 110px;
                                         pressed => { root.toggle-autostart(); }
                                     }
@@ -2018,14 +2051,14 @@ export component MainWindow inherits Window {
                                 spacing: 3px;
                                 horizontal-stretch: 1;
                                 Text {
-                                    text: "Показывать виджет при запуске";
+                                    text: @tr("Показывать виджет при запуске");
                                     font-size: 13px; color: #e8f0ec;
                                 }
                                 Text {
                                     text: root.show-widget-on-start
-                                        ? "Виджет появится сразу вместе с Bamboo."
-                                        : "Bamboo запускается в трее. Виджет открывается "
-                                          + "щелчком по значку — наблюдение идёт в любом случае.";
+                                        ? @tr("Виджет появится сразу вместе с Bamboo.")
+                                        : @tr("Bamboo запускается в трее. Виджет открывается ")
+                                          + @tr("щелчком по значку — наблюдение идёт в любом случае.");
                                     font-size: 11px; color: #7d8f86; wrap: word-wrap;
                                 }
                             }
@@ -2034,7 +2067,7 @@ export component MainWindow inherits Window {
                                 VerticalLayout {
                                     alignment: center;
                                     RowButton {
-                                        label: root.show-widget-on-start ? "Выключить" : "Включить";
+                                        label: root.show-widget-on-start ? @tr("Выключить") : @tr("Включить");
                                         width: 110px;
                                         pressed => { root.toggle-widget-on-start(); }
                                     }
@@ -2049,7 +2082,7 @@ export component MainWindow inherits Window {
                         watch := VerticalLayout {
                             padding: 12px; spacing: 3px;
                             Text {
-                                text: "Наблюдение";
+                                text: @tr("Наблюдение");
                                 font-size: 13px; color: #e8f0ec;
                             }
                             Text {
@@ -2065,15 +2098,15 @@ export component MainWindow inherits Window {
                         about := VerticalLayout {
                             padding: 12px; spacing: 3px;
                             Text {
-                                text: "О программе";
+                                text: @tr("О программе");
                                 font-size: 13px; color: #e8f0ec;
                             }
                             Text {
-                                text: "Bamboo наблюдает за системой и объясняет, что в ней "
-                                    + "происходит. Все действия записываются в журнал и "
-                                    + "обратимы. Того, что нельзя измерить, Bamboo не обещает: "
-                                    + "здесь нет «очистки памяти», «ускорения интернета» "
-                                    + "и прочего, чему нет доказательств.";
+                                text: @tr("Bamboo наблюдает за системой и объясняет, что в ней ")
+                                    + @tr("происходит. Все действия записываются в журнал и ")
+                                    + @tr("обратимы. Того, что нельзя измерить, Bamboo не обещает: ")
+                                    + @tr("здесь нет «очистки памяти», «ускорения интернета» ")
+                                    + @tr("и прочего, чему нет доказательств.");
                                 font-size: 11px; color: #7d8f86; wrap: word-wrap;
                             }
                         }

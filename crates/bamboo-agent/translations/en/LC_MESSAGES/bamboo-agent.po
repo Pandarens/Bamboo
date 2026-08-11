@@ -1,0 +1,522 @@
+# Английский перевод интерфейса Bamboo.
+#
+# Переводы вкомпилируются в исполняемый файл на сборке, а не читаются
+# gettext во время работы: фича slint/gettext на Windows не делает ничего,
+# её код целиком под cfg(unix). Встроенные переводы — другой механизм,
+# и он работает везде. Проверено: строки видны в собранном файле.
+#
+# Контекст — имя компонента Slint, так требует @tr() по умолчанию.
+msgid ""
+msgstr ""
+"Language: en\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=UTF-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+
+# --- Меню действий над процессом ---
+
+msgctxt "MainWindow"
+msgid "Экономичный режим"
+msgstr "Eco mode"
+
+msgctxt "MainWindow"
+msgid "процессор"
+msgstr "processor"
+
+msgctxt "MainWindow"
+msgid "Понизить приоритет памяти"
+msgstr "Lower memory priority"
+
+msgctxt "MainWindow"
+msgid "память"
+msgstr "memory"
+
+msgctxt "MainWindow"
+msgid "Отпустить диск"
+msgstr "Release the disk"
+
+msgctxt "MainWindow"
+msgid "Придержать диск"
+msgstr "Hold back the disk"
+
+msgctxt "MainWindow"
+msgid "диск"
+msgstr "disk"
+
+msgctxt "MainWindow"
+msgid "Завершить все процессы"
+msgstr "End all processes"
+
+msgctxt "MainWindow"
+msgid "Завершить процесс"
+msgstr "End process"
+
+msgctxt "MainWindow"
+msgid "необратимо"
+msgstr "cannot be undone"
+
+# --- Разделы и заголовки ---
+
+msgctxt "MainWindow"
+msgid "Bamboo — наблюдатель за системой"
+msgstr "Bamboo — system observer"
+
+msgctxt "MainWindow"
+msgid "Обзор"
+msgstr "Overview"
+
+msgctxt "MainWindow"
+msgid "Процессы"
+msgstr "Processes"
+
+msgctxt "MainWindow"
+msgid "Диск"
+msgstr "Disk"
+
+msgctxt "MainWindow"
+msgid "Питание"
+msgstr "Power"
+
+msgctxt "MainWindow"
+msgid "Загрузка"
+msgstr "Startup time"
+
+msgctxt "MainWindow"
+msgid "Автозапуск"
+msgstr "Startup apps"
+
+msgctxt "MainWindow"
+msgid "Отчёты"
+msgstr "Reports"
+
+msgctxt "MainWindow"
+msgid "Оптимизация"
+msgstr "Tuning"
+
+msgctxt "MainWindow"
+msgid "Журнал"
+msgstr "Journal"
+
+msgctxt "MainWindow"
+msgid "Анализ"
+msgstr "Analysis"
+
+msgctxt "MainWindow"
+msgid "Браузер"
+msgstr "Browser"
+
+msgctxt "MainWindow"
+msgid "Настройки"
+msgstr "Settings"
+
+# --- Обновление ---
+
+msgctxt "MainWindow"
+msgid "Вышла версия "
+msgstr "New version available: "
+
+msgctxt "MainWindow"
+msgid "Качаю…"
+msgstr "Downloading…"
+
+msgctxt "MainWindow"
+msgid "Обновить"
+msgstr "Update"
+
+# --- Обзор ---
+
+msgctxt "MainWindow"
+msgid "Процессор"
+msgstr "Processor"
+
+msgctxt "MainWindow"
+msgid "Память"
+msgstr "Memory"
+
+msgctxt "MainWindow"
+msgid "Процессов"
+msgstr "Processes"
+
+msgctxt "MainWindow"
+msgid "Система подвисала"
+msgstr "The system stalled"
+
+msgctxt "MainWindow"
+msgid "Показать их"
+msgstr "Show them"
+
+# --- Игровой режим ---
+
+msgctxt "MainWindow"
+msgid "Игровой режим включён"
+msgstr "Game mode is on"
+
+msgctxt "MainWindow"
+msgid "Игровой режим"
+msgstr "Game mode"
+
+msgctxt "MainWindow"
+msgid "Игра получает процессор и память в первую очередь. "
+msgstr "The game gets the processor and memory first. "
+
+msgctxt "MainWindow"
+msgid "Выключите — всё вернётся как было."
+msgstr "Turn it off and everything goes back."
+
+msgctxt "MainWindow"
+msgid "Отдаёт процессор и память той программе, что сейчас "
+msgstr "Gives the processor and memory to whatever program is "
+
+msgctxt "MainWindow"
+msgid "на экране. Фоновые уводит в энергосберегающий режим. "
+msgstr "on screen. Background ones go into eco mode. "
+
+msgctxt "MainWindow"
+msgid "Discord, Steam и OBS не трогает."
+msgstr "Discord, Steam and OBS are left alone."
+
+msgctxt "MainWindow"
+msgid "Выключить"
+msgstr "Turn off"
+
+msgctxt "MainWindow"
+msgid "Включить"
+msgstr "Turn on"
+
+# --- Диск ---
+
+msgctxt "MainWindow"
+msgid "Накопители"
+msgstr "Drives"
+
+msgctxt "MainWindow"
+msgid "   в очереди: "
+msgstr "   queued: "
+
+msgctxt "MainWindow"
+msgid "Свободное место"
+msgstr "Free space"
+
+msgctxt "MainWindow"
+msgid "Свободного места меньше десятой части. У SSD от этого "
+msgstr "Less than a tenth of the space is free. On an SSD this "
+
+msgctxt "MainWindow"
+msgid "падает скорость записи: контроллеру негде раскладывать данные."
+msgstr "slows writes down: the controller has nowhere to lay data out."
+
+msgctxt "MainWindow"
+msgid "Файл подкачки"
+msgstr "Page file"
+
+msgctxt "MainWindow"
+msgid "Подкачка отключена — Windows держит всё в оперативной памяти."
+msgstr "Paging is off — Windows keeps everything in RAM."
+
+# --- Процессы ---
+
+msgctxt "MainWindow"
+msgid "Bamboo наблюдает за системой и объясняет причины деградации. "
+msgstr "Bamboo watches the system and explains why it degrades. "
+
+msgctxt "MainWindow"
+msgid "Действия применяются только по вашему решению и всегда обратимы."
+msgstr "Actions are applied only on your decision, and always undoably."
+
+msgctxt "MainWindow"
+msgid "Программы"
+msgstr "Programs"
+
+msgctxt "MainWindow"
+msgid "поиск"
+msgstr "search"
+
+msgctxt "MainWindow"
+msgid "по процессам"
+msgstr "by process"
+
+msgctxt "MainWindow"
+msgid "по программам"
+msgstr "by program"
+
+msgctxt "MainWindow"
+msgid "Правая кнопка по процессу — меню действий. Щелчок по имени "
+msgstr "Right-click a process for the action menu. Clicking a program "
+
+msgctxt "MainWindow"
+msgid "программы разворачивает её процессы. Столбец «Рост памяти» "
+msgstr "name expands its processes. The «Memory growth» column "
+
+msgctxt "MainWindow"
+msgid "показывает то, чего нет в диспетчере задач: не сколько памяти "
+msgstr "shows what Task Manager does not: not how much memory is "
+
+msgctxt "MainWindow"
+msgid "занято сейчас, а растёт ли она и как быстро. Показаны первые "
+msgstr "used now, but whether it is growing and how fast. Showing the first "
+
+msgctxt "MainWindow"
+msgid "80 строк — сортировка идёт по всем процессам."
+msgstr "80 rows — sorting covers every process."
+
+msgctxt "MainWindow"
+msgid "Процесс"
+msgstr "Process"
+
+msgctxt "MainWindow"
+msgid "Потоки"
+msgstr "Threads"
+
+msgctxt "MainWindow"
+msgid "Рост памяти"
+msgstr "Memory growth"
+
+msgctxt "MainWindow"
+msgid "Изменения"
+msgstr "Changes"
+
+msgctxt "MainWindow"
+msgid "Состояние"
+msgstr "State"
+
+# --- Виджет ---
+
+msgctxt "Widget"
+msgid "запускаюсь"
+msgstr "starting up"
+
+msgctxt "MainWindow"
+msgid "Язык интерфейса"
+msgstr "Interface language"
+
+msgctxt "MainWindow"
+msgid "Сейчас русский. Смена языка вступает в силу после перезапуска."
+msgstr "Currently Russian. A language change takes effect after a restart."
+
+msgctxt "MainWindow"
+msgid "Currently English. A language change takes effect after a restart."
+msgstr "Currently English. A language change takes effect after a restart."
+
+# --- Диск и службы ---
+
+msgctxt "MainWindow"
+msgid "Остановить службу"
+msgstr "Stop the service"
+
+msgctxt "MainWindow"
+msgid "Кто занимает диск"
+msgstr "What is using the disk"
+
+msgctxt "MainWindow"
+msgid "Здоровье накопителя"
+msgstr "Drive health"
+
+# --- Анализ программы ---
+
+msgctxt "MainWindow"
+msgid "Анализ программы"
+msgstr "Program analysis"
+
+msgctxt "MainWindow"
+msgid "Выберите программу, запишите сеанс и посмотрите, что "
+msgstr "Pick a program, record a session and see what "
+
+msgctxt "MainWindow"
+msgid "упиралось в потолок. Мгновенные числа тут бесполезны: "
+msgstr "hit its ceiling. Instant numbers are useless here: "
+
+msgctxt "MainWindow"
+msgid "просадка длится секунду, и к моменту, когда вы "
+msgstr "a stutter lasts a second, and by the time you "
+
+msgctxt "MainWindow"
+msgid "переключитесь, всё уже прошло."
+msgstr "switch over, it is already gone."
+
+msgctxt "MainWindow"
+msgid "выберите игру или программу"
+msgstr "pick a game or a program"
+
+msgctxt "MainWindow"
+msgid "Остановить"
+msgstr "Stop"
+
+msgctxt "MainWindow"
+msgid "Записать"
+msgstr "Record"
+
+msgctxt "MainWindow"
+msgid "Видеокарта"
+msgstr "Graphics card"
+
+# --- Загрузка и отчёты ---
+
+msgctxt "MainWindow"
+msgid "Загрузка системы"
+msgstr "System startup"
+
+msgctxt "MainWindow"
+msgid "Недельный отчёт"
+msgstr "Weekly report"
+
+msgctxt "MainWindow"
+msgid "Текст"
+msgstr "Text"
+
+msgctxt "MainWindow"
+msgid "Сохранить"
+msgstr "Save"
+
+msgctxt "MainWindow"
+msgid "Нажмите «Текст», «HTML» или «JSON», чтобы собрать отчёт."
+msgstr "Press «Text», «HTML» or «JSON» to build the report."
+
+msgctxt "MainWindow"
+msgid "Расширения браузера"
+msgstr "Browser extensions"
+
+msgctxt "MainWindow"
+msgid "Журнал действий"
+msgstr "Action journal"
+
+# --- Оптимизация ---
+
+msgctxt "MainWindow"
+msgid "Что можно улучшить"
+msgstr "What can be improved"
+
+msgctxt "MainWindow"
+msgid "Bamboo предлагает только то, что видит своими глазами, "
+msgstr "Bamboo suggests only what it sees with its own eyes, "
+
+msgctxt "MainWindow"
+msgid "и объясняет причину каждого предложения. Всё применяется "
+msgstr "and explains the reason for every suggestion. Everything is applied "
+
+msgctxt "MainWindow"
+msgid "по вашему решению и записывается в журнал — откатить можно "
+msgstr "on your decision and written to the journal — it can be undone "
+
+msgctxt "MainWindow"
+msgid "в любой момент."
+msgstr "at any time."
+
+msgctxt "MainWindow"
+msgid "Оптимизировать самостоятельно"
+msgstr "Optimise on its own"
+
+msgctxt "MainWindow"
+msgid "Не трогать"
+msgstr "Leave it alone"
+
+msgctxt "MainWindow"
+msgid "История наблюдений"
+msgstr "Observation history"
+
+# --- Настройки ---
+
+msgctxt "MainWindow"
+msgid "Версия "
+msgstr "Version "
+
+msgctxt "MainWindow"
+msgid "Проверяю…"
+msgstr "Checking…"
+
+msgctxt "MainWindow"
+msgid "Проверить"
+msgstr "Check"
+
+msgctxt "MainWindow"
+msgid "Запускать вместе с Windows"
+msgstr "Start with Windows"
+
+msgctxt "MainWindow"
+msgid "Bamboo запустится сам и продолжит наблюдение."
+msgstr "Bamboo will start on its own and keep watching."
+
+msgctxt "MainWindow"
+msgid "Сейчас выключено. Наблюдение идёт только пока "
+msgstr "Currently off. Watching happens only while "
+
+msgctxt "MainWindow"
+msgid "программа запущена, а выводы о росте памяти "
+msgstr "the program runs, and conclusions about memory growth "
+
+msgctxt "MainWindow"
+msgid "требуют нескольких часов подряд."
+msgstr "need several hours in a row."
+
+msgctxt "MainWindow"
+msgid "Показывать виджет при запуске"
+msgstr "Show the widget at startup"
+
+msgctxt "MainWindow"
+msgid "Виджет появится сразу вместе с Bamboo."
+msgstr "The widget appears together with Bamboo."
+
+msgctxt "MainWindow"
+msgid "Bamboo запускается в трее. Виджет открывается "
+msgstr "Bamboo starts in the tray. The widget opens "
+
+msgctxt "MainWindow"
+msgid "щелчком по значку — наблюдение идёт в любом случае."
+msgstr "by clicking the icon — watching goes on either way."
+
+msgctxt "MainWindow"
+msgid "Наблюдение"
+msgstr "Watching"
+
+msgctxt "MainWindow"
+msgid "О программе"
+msgstr "About"
+
+msgctxt "MainWindow"
+msgid "Bamboo наблюдает за системой и объясняет, что в ней "
+msgstr "Bamboo watches the system and explains what is "
+
+msgctxt "MainWindow"
+msgid "происходит. Все действия записываются в журнал и "
+msgstr "happening in it. Every action is written to the journal and "
+
+msgctxt "MainWindow"
+msgid "обратимы. Того, что нельзя измерить, Bamboo не обещает: "
+msgstr "can be undone. Bamboo promises nothing it cannot measure: "
+
+msgctxt "MainWindow"
+msgid "здесь нет «очистки памяти», «ускорения интернета» "
+msgstr "there is no «memory cleaning», no «internet acceleration» "
+
+msgctxt "MainWindow"
+msgid "и прочего, чему нет доказательств."
+msgstr "and nothing else without evidence."
+
+# --- Виджет ---
+
+msgctxt "Widget"
+msgid "Показать их в процессах"
+msgstr "Show them in Processes"
+
+msgctxt "Widget"
+msgid "Процессор, 0–100%"
+msgstr "Processor, 0–100%"
+
+msgctxt "Widget"
+msgid "Память, размах за последние минуты"
+msgstr "Memory, range over recent minutes"
+
+msgctxt "Widget"
+msgid "ЦП"
+msgstr "CPU"
+
+msgctxt "Widget"
+msgid "ОЗУ"
+msgstr "RAM"
+
+msgctxt "Widget"
+msgid "Больше всего потребляют"
+msgstr "Using the most"
+
+msgctxt "Widget"
+msgid "Bamboo пока только наблюдает. Действия появятся на этапе 0.4."
+msgstr "Bamboo only watches for now. Actions arrive in stage 0.4."

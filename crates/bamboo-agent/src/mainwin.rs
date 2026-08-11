@@ -2157,3 +2157,70 @@ pub fn save_report(text: &str, format: i32) -> Result<String, String> {
     std::fs::write(&path, text).map_err(|error| error.to_string())?;
     Ok(path.to_string_lossy().to_string())
 }
+
+#[cfg(test)]
+mod translation_tests {
+    /// Все строки интерфейса, обёрнутые в `@tr()`.
+    fn translatable() -> Vec<String> {
+        let mut found = Vec::new();
+        for name in ["main_window.slint", "widget.slint"] {
+            let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("ui")
+                .join(name);
+            let Ok(text) = std::fs::read_to_string(path) else {
+                continue;
+            };
+            let mut rest = text.as_str();
+            while let Some(at) = rest.find("@tr(\"") {
+                rest = &rest[at + 5..];
+                let Some(end) = rest.find('"') else { break };
+                let literal = &rest[..end];
+                if !literal.is_empty() && !found.iter().any(|seen| seen == literal) {
+                    found.push(literal.to_string());
+                }
+            }
+        }
+        found
+    }
+
+    fn catalogue() -> String {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("translations")
+            .join("en")
+            .join("LC_MESSAGES")
+            .join("bamboo-agent.po");
+        std::fs::read_to_string(path).expect("каталог перевода на месте")
+    }
+
+    #[test]
+    fn every_interface_string_has_an_english_translation() {
+        // Сторож от полупереведённого интерфейса. Slint для строки без
+        // перевода молча покажет русский оригинал — то есть недосмотр
+        // не проявится ни в сборке, ни в глазах разработчика, который
+        // и так работает по-русски. Заметит его только человек,
+        // выбравший английский.
+        let catalogue = catalogue();
+        let missing: Vec<String> = translatable()
+            .into_iter()
+            .filter(|literal| !catalogue.contains(&format!("msgid \"{literal}\"")))
+            .collect();
+
+        assert!(
+            missing.is_empty(),
+            "без перевода осталось строк: {}\n{:#?}",
+            missing.len(),
+            missing
+        );
+    }
+
+    #[test]
+    fn the_interface_actually_has_translatable_strings() {
+        // Если обёртки пропадут — например, файл интерфейса перепишут
+        // заново, — предыдущий тест станет зелёным и бессмысленным.
+        assert!(
+            translatable().len() > 50,
+            "строк в @tr подозрительно мало: {}",
+            translatable().len()
+        );
+    }
+}

@@ -86,7 +86,7 @@ export component Widget inherits Window {
     in property <string> disk-note: "";
     // Объяснение, почему диск загружен. Пусто — диск свободен.
     in property <string> disk-pressure: "";
-    in property <string> status: "запускаюсь";
+    in property <string> status: @tr("запускаюсь");
     in property <string> own-cost: "";
     in property <[ProcessRow]> processes: [];
     // Спарклайн памяти: доли от максимума за окно наблюдения, 0..1.
@@ -177,19 +177,19 @@ export component Widget inherits Window {
         HorizontalLayout {
             spacing: 8px;
             Card {
-                label: "Процессор";
+                label: @tr("Процессор");
                 value: root.cpu-value;
                 note: root.cpu-note;
                 horizontal-stretch: 1;
             }
             Card {
-                label: "Память";
+                label: @tr("Память");
                 value: root.memory-value;
                 note: root.memory-note;
                 horizontal-stretch: 1;
             }
             Card {
-                label: "Диск";
+                label: @tr("Диск");
                 value: root.disk-value;
                 note: root.disk-note;
                 horizontal-stretch: 1;
@@ -236,7 +236,7 @@ export component Widget inherits Window {
                         clicked => { root.show-culprits(root.freeze-culprits); }
                     }
                     Text {
-                        text: "Показать их в процессах";
+                        text: @tr("Показать их в процессах");
                         font-size: 11px;
                         color: #e0a44a;
                         horizontal-alignment: center;
@@ -257,20 +257,20 @@ export component Widget inherits Window {
                     // абсолютная — об этом честно написано прямо здесь, иначе
                     // два графика в одном месте читались бы одинаково.
                     text: root.spark-cpu-mode
-                        ? "Процессор, 0–100%"
-                        : "Память, размах за последние минуты";
+                        ? @tr("Процессор, 0–100%")
+                        : @tr("Память, размах за последние минуты");
                     font-size: 10px;
                     color: #62736a;
                     vertical-alignment: center;
                     horizontal-stretch: 1;
                 }
                 SparkTab {
-                    label: "ЦП";
+                    label: @tr("ЦП");
                     active: root.spark-cpu-mode;
                     chosen => { root.spark-cpu-mode = true; }
                 }
                 SparkTab {
-                    label: "ОЗУ";
+                    label: @tr("ОЗУ");
                     active: !root.spark-cpu-mode;
                     chosen => { root.spark-cpu-mode = false; }
                 }
@@ -304,7 +304,7 @@ export component Widget inherits Window {
         }
 
         Text {
-            text: "Больше всего потребляют";
+            text: @tr("Больше всего потребляют");
             font-size: 11px;
             color: #7d8f86;
         }
@@ -368,7 +368,7 @@ export component Widget inherits Window {
         }
 
         Text {
-            text: "Bamboo пока только наблюдает. Действия появятся на этапе 0.4.";
+            text: @tr("Bamboo пока только наблюдает. Действия появятся на этапе 0.4.");
             font-size: 10px;
             color: #62736a;
             wrap: word-wrap;

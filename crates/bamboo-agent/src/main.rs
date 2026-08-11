@@ -64,6 +64,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // драйвер видеокарты.
     std::env::set_var("SLINT_BACKEND", "winit-software");
 
+    // Язык интерфейса — до создания окон: строки берутся при построении,
+    // и переключать их потом придётся перезапуском.
+    let language = bamboo_sys::language();
+    if language != "ru" {
+        // Русский встроен в сами файлы интерфейса и переводом не является:
+        // выбирать надо только всё остальное.
+        if let Err(error) = slint::select_bundled_translation(&language) {
+            eprintln!("язык интерфейса не переключился: {error}");
+        }
+    }
+
     // Утилита, которая учит систему экономить, начинает с себя.
     let _ = bamboo_sys::apply_self_limits();
 
@@ -140,6 +151,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     main_window.set_suggestions(ModelRc::new(VecModel::from(Vec::<SuggestionRow>::new())));
     main_window.set_autostart(bamboo_sys::is_in_startup());
     main_window.set_app_version(SharedString::from(update::CURRENT));
+    main_window.set_language(SharedString::from(language.clone()));
     main_window.set_update_status(SharedString::from("Проверяю обновления…"));
     main_window.set_show_widget_on_start(bamboo_sys::show_widget_on_start());
     main_window.set_processes(main_processes.clone());
@@ -248,6 +260,37 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             if let Some(snapshot) = snapshot.borrow().as_ref() {
                 fill_processes(&win, snapshot, &rows, &limits.borrow());
             }
+        });
+    }
+
+    // Переключение языка интерфейса.
+    {
+        let weak = main_window.as_weak();
+        main_window.on_toggle_language(move || {
+            let Some(win) = weak.upgrade() else {
+                return;
+            };
+
+            // Меняем на другой из двух: третьего пока нет, и городить
+            // список ради двух пунктов незачем.
+            let wanted = if win.get_language() == "ru" { "en" } else { "ru" };
+            let note = match bamboo_sys::set_language(wanted) {
+                // Строки интерфейса берутся при построении окна, поэтому
+                // на лету они не сменятся. Сказать об этом надо прямо:
+                // человек нажал и вправе понимать, почему ничего
+                // не изменилось.
+                Ok(()) => {
+                    win.set_language(SharedString::from(wanted));
+                    if wanted == "en" {
+                        "Язык переключён на английский. Он вступит в силу                          после перезапуска Bamboo — закройте его из трея                          и запустите снова."
+                    } else {
+                        "Язык переключён на русский. Он вступит в силу после                          перезапуска Bamboo."
+                    }
+                    .to_string()
+                }
+                Err(error) => format!("Язык сохранить не удалось: {error}"),
+            };
+            win.set_action_note(SharedString::from(note));
         });
     }
 

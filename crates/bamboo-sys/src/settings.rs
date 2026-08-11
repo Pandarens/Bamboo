@@ -88,6 +88,35 @@ fn read_flag(name: &str, default: bool) -> bool {
     value != 0
 }
 
+/// Записывает строковое значение настройки.
+fn write_string(name: &str, value: &str) -> Result<()> {
+    use windows_sys::Win32::System::Registry::REG_SZ;
+
+    let key = open(KEY_SET_VALUE)?;
+    let wide_name = wide(name);
+    let wide_value = wide(value);
+
+    let status = unsafe {
+        RegSetValueExW(
+            key.0,
+            wide_name.as_ptr(),
+            0,
+            REG_SZ,
+            wide_value.as_ptr().cast(),
+            // Длина в байтах вместе с завершающим нулём: без него
+            // строка в реестре останется без конца.
+            (wide_value.len() * 2) as u32,
+        )
+    };
+    if status != ERROR_SUCCESS {
+        return Err(Error::Win32 {
+            call: "RegSetValueExW(строка настройки)",
+            code: status,
+        });
+    }
+    Ok(())
+}
+
 fn write_flag(name: &str, enabled: bool) -> Result<()> {
     let key = open(KEY_SET_VALUE)?;
     let wide_name = wide(name);
@@ -272,6 +301,49 @@ pub(crate) fn registry_u32(hive: &str, path: &str, value: &str) -> Option<u32> {
     (status == 0).then_some(number)
 }
 
+/// Язык интерфейса.
+const LANGUAGE: &str = "Language";
+
+/// Выбранный язык интерфейса: «ru» либо «en».
+///
+/// По умолчанию берём у системы. Человеку, у которого Windows на русском,
+/// показывать английский незачем, и наоборот — заставлять его лезть
+/// в настройки при первом запуске тоже.
+pub fn language() -> String {
+    if let Some(chosen) = registry_string("HKCU", SETTINGS_KEY, LANGUAGE) {
+        if chosen == "ru" || chosen == "en" {
+            return chosen;
+        }
+    }
+    if system_prefers_russian() {
+        "ru".to_string()
+    } else {
+        "en".to_string()
+    }
+}
+
+/// Запоминает выбранный язык.
+pub fn set_language(code: &str) -> Result<()> {
+    if code != "ru" && code != "en" {
+        return Err(Error::Unsupported("такого языка интерфейса нет"));
+    }
+    write_string(LANGUAGE, code)
+}
+
+/// Русский ли язык у системы.
+fn system_prefers_russian() -> bool {
+    use windows_sys::Win32::Globalization::GetUserDefaultLocaleName;
+
+    let mut buffer = [0u16; 85];
+    let length = unsafe { GetUserDefaultLocaleName(buffer.as_mut_ptr(), buffer.len() as i32) };
+    if length <= 0 {
+        return false;
+    }
+
+    let name = String::from_utf16_lossy(&buffer[..(length - 1).max(0) as usize]);
+    name.to_lowercase().starts_with("ru")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -301,5 +373,66 @@ mod tests {
         // Настройки с таким именем нет и не будет — берётся умолчание.
         assert!(read_flag("НетТакойНастройки", true));
         assert!(!read_flag("НетТакойНастройки", false));
+    }
+}
+
+#[cfg(test)]
+mod language_tests {
+    use super::*;
+    use std::sync::Mutex;
+
+    /// Настройка одна на процесс: тесты, меняющие её, нельзя пускать разом.
+    static LANGUAGE_LOCK: Mutex<()> = Mutex::new(());
+
+    #[test]
+    fn the_language_defaults_to_the_system_one() {
+        // Человеку с русской Windows показывать английский незачем,
+        // и заставлять его лезть в настройки при первом запуске тоже.
+        let _guard = LANGUAGE_LOCK.lock().unwrap();
+        let was = registry_string("HKCU", SETTINGS_KEY, LANGUAGE);
+
+        // Убираем выбор и смотрим, что подставится.
+        let _ = write_string(LANGUAGE, "");
+        let chosen = language();
+        assert!(chosen == "ru" || chosen == "en", "{chosen}");
+
+        if let Some(was) = was {
+            let _ = write_string(LANGUAGE, &was);
+        }
+    }
+
+    #[test]
+    fn a_chosen_language_survives_a_restart() {
+        let _guard = LANGUAGE_LOCK.lock().unwrap();
+        let was = language();
+
+        set_language("en").expect("выбор языка сохраняется");
+        assert_eq!(language(), "en");
+        set_language("ru").expect("выбор языка сохраняется");
+        assert_eq!(language(), "ru");
+
+        let _ = set_language(&was);
+    }
+
+    #[test]
+    fn an_unknown_language_is_refused() {
+        // Молча подставить английский вместо непонятного значения
+        // значило бы сменить человеку язык без его ведома.
+        let error = set_language("эльфийский").expect_err("такого языка нет");
+        assert!(error.to_string().contains("нет"), "{error}");
+    }
+
+    #[test]
+    fn a_broken_value_in_the_registry_does_not_break_the_language() {
+        // Значение правит человек, и опечатка в нём не повод показать
+        // пустой интерфейс.
+        let _guard = LANGUAGE_LOCK.lock().unwrap();
+        let was = language();
+
+        let _ = write_string(LANGUAGE, "мусор");
+        let chosen = language();
+        assert!(chosen == "ru" || chosen == "en", "{chosen}");
+
+        let _ = set_language(&was);
     }
 }

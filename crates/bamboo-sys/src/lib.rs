@@ -74,7 +74,8 @@ pub use service::{
 };
 pub use services::{service_by_pid, service_names, stop_service, ServiceOwner};
 pub use settings::{
-    autopilot_enabled, set_autopilot_enabled, set_show_widget_on_start, show_widget_on_start,
+    autopilot_enabled, language, set_autopilot_enabled, set_language, set_show_widget_on_start,
+    show_widget_on_start,
 };
 pub use startup::{
     add_to_startup, is_in_startup, remove_from_startup, set_startup_enabled, user_startup_items,
