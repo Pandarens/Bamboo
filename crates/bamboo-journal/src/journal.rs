@@ -83,17 +83,17 @@ impl Journal {
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
             params![
                 entry.at_unix_ms,
-                entry.actor.as_str(),
+                entry.actor.storage_key(),
                 entry.profile,
                 entry.target.app_key,
                 entry.target.pid,
                 entry.target.service_name,
                 entry.target.task_path,
-                entry.action.name(),
+                entry.action.storage_key(),
                 entry.prior_state,
                 entry.observation,
                 entry.at_unix_ms + WINDOW_MS,
-                Status::Pending.as_str(),
+                Status::Pending.storage_key(),
             ],
         )?;
         Ok(self.conn.last_insert_rowid())
@@ -129,7 +129,7 @@ impl Journal {
         self.conn.execute(
             "UPDATE journal SET status = ?2, revert_reason = COALESCE(?3, revert_reason)
              WHERE id = ?1",
-            params![id, status.as_str(), reason],
+            params![id, status.storage_key(), reason],
         )?;
         Ok(())
     }
@@ -152,7 +152,7 @@ impl Journal {
         let mut statement = self
             .conn
             .prepare(&format!("{SELECT} WHERE status = ?1 ORDER BY at_ms"))?;
-        let rows = statement.query_map(params![Status::Pending.as_str()], Self::read_row)?;
+        let rows = statement.query_map(params![Status::Pending.storage_key()], Self::read_row)?;
         rows.collect()
     }
 
@@ -162,7 +162,7 @@ impl Journal {
             "{SELECT} WHERE status IN (?1, ?2) ORDER BY at_ms DESC"
         ))?;
         let rows = statement.query_map(
-            params![Status::Applied.as_str(), Status::Expired.as_str()],
+            params![Status::Applied.storage_key(), Status::Expired.storage_key()],
             Self::read_row,
         )?;
         rows.collect()
@@ -173,8 +173,10 @@ impl Journal {
         let mut statement = self.conn.prepare(&format!(
             "{SELECT} WHERE status = ?1 AND watchdog_ms > ?2 ORDER BY at_ms"
         ))?;
-        let rows =
-            statement.query_map(params![Status::Applied.as_str(), now_ms], Self::read_row)?;
+        let rows = statement.query_map(
+            params![Status::Applied.storage_key(), now_ms],
+            Self::read_row,
+        )?;
         rows.collect()
     }
 
@@ -196,7 +198,11 @@ impl Journal {
             "{SELECT} WHERE status IN (?1, ?2) AND at_ms >= ?3 ORDER BY at_ms DESC"
         ))?;
         let rows = statement.query_map(
-            params![Status::Applied.as_str(), Status::Expired.as_str(), since_ms],
+            params![
+                Status::Applied.storage_key(),
+                Status::Expired.storage_key(),
+                since_ms
+            ],
             Self::read_row,
         )?;
         rows.collect()
@@ -212,7 +218,7 @@ impl Journal {
         Ok(Entry {
             id: row.get(0)?,
             at_unix_ms: row.get(1)?,
-            actor: if row.get::<_, String>(2)? == Actor::Auto.as_str() {
+            actor: if Actor::from_storage_key(&row.get::<_, String>(2)?) == Some(Actor::Auto) {
                 Actor::Auto
             } else {
                 Actor::Manual
@@ -224,7 +230,17 @@ impl Journal {
                 service_name: row.get(6)?,
                 task_path: row.get(7)?,
             },
-            action: action_from_name(&action_name).unwrap_or(Action::EnableEcoQos),
+            // Неизвестное значение — не повод молча превратить остановку
+            // службы в экономичный режим, как делал прежний разбор.
+            action: Action::from_storage_key(&action_name).ok_or_else(|| {
+                rusqlite::Error::FromSqlConversionFailure(
+                    0,
+                    rusqlite::types::Type::Text,
+                    Box::new(std::io::Error::other(format!(
+                        "в журнале незнакомое действие: {action_name}"
+                    ))),
+                )
+            })?,
             prior_state: row.get(9)?,
             observation: row.get(10)?,
             watchdog_deadline_ms: row.get(11)?,
@@ -236,23 +252,6 @@ impl Journal {
 
 const SELECT: &str = "SELECT id, at_ms, actor, profile, app_key, pid, service_name, task_path, \
      action, prior_state, observation, watchdog_ms, status, revert_reason FROM journal";
-
-/// Восстанавливает действие по его названию.
-fn action_from_name(name: &str) -> Option<Action> {
-    const ALL: [Action; 10] = [
-        Action::EnableEcoQos,
-        Action::LowerMemoryPriority,
-        Action::LimitDiskRate,
-        Action::DelayServiceStart,
-        Action::DisableStartupItem,
-        Action::DisableWakeTimer,
-        Action::DisableScheduledTask,
-        Action::FreezeProcess,
-        Action::StopService,
-        Action::DisableService,
-    ];
-    ALL.into_iter().find(|action| action.name() == name)
-}
 
 #[cfg(test)]
 mod tests {
@@ -274,7 +273,10 @@ mod tests {
             Action::DisableService,
         ];
         for action in ALL {
-            assert_eq!(action_from_name(action.name()), Some(action));
+            // И по ключу хранения, и по старому русскому названию:
+            // журналы, записанные до разделения, обязаны читаться.
+            assert_eq!(Action::from_storage_key(action.storage_key()), Some(action));
+            assert_eq!(Action::from_storage_key(action.name()), Some(action));
         }
     }
 }

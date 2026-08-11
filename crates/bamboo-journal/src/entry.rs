@@ -10,6 +10,22 @@ pub enum Actor {
 }
 
 impl Actor {
+    /// Как записывается в базу. Не переводится никогда — см. довод
+    /// у `Action::storage_key`.
+    pub fn storage_key(self) -> &'static str {
+        match self {
+            Actor::Manual => "manual",
+            Actor::Auto => "auto",
+        }
+    }
+
+    /// Восстанавливает по ключу. Принимает и старые русские значения.
+    pub fn from_storage_key(key: &str) -> Option<Actor> {
+        [Actor::Manual, Actor::Auto]
+            .into_iter()
+            .find(|actor| actor.storage_key() == key || actor.as_str() == key)
+    }
+
     pub fn as_str(self) -> &'static str {
         match self {
             Actor::Manual => "вручную",
@@ -35,6 +51,22 @@ pub enum Status {
 }
 
 impl Status {
+    /// Как состояние записывается в базу.
+    ///
+    /// Ключ, а не название. Пока в колонку уходило русское «применено»,
+    /// перевод интерфейса на другой язык молча сломал бы чтение всех
+    /// существующих журналов: запись осталась бы, а разобрать её было
+    /// бы нечем.
+    pub fn storage_key(self) -> &'static str {
+        match self {
+            Status::Pending => "pending",
+            Status::Applied => "applied",
+            Status::Reverted => "reverted",
+            Status::Expired => "expired",
+            Status::Failed => "failed",
+        }
+    }
+
     pub fn as_str(self) -> &'static str {
         match self {
             Status::Pending => "не подтверждено",
@@ -45,13 +77,18 @@ impl Status {
         }
     }
 
+    /// Восстанавливает состояние из базы.
+    ///
+    /// Принимает и ключи, и старые русские названия: журналы, записанные
+    /// до разделения, обязаны читаться дальше. Выбрасывать чужую историю
+    /// ради своего удобства нельзя.
     pub fn parse(text: &str) -> Option<Status> {
         Some(match text {
-            "не подтверждено" => Status::Pending,
-            "применено" => Status::Applied,
-            "откачено" => Status::Reverted,
-            "прижилось" => Status::Expired,
-            "не удалось" => Status::Failed,
+            "pending" | "не подтверждено" => Status::Pending,
+            "applied" | "применено" => Status::Applied,
+            "reverted" | "откачено" => Status::Reverted,
+            "expired" | "прижилось" => Status::Expired,
+            "failed" | "не удалось" => Status::Failed,
             _ => return None,
         })
     }
@@ -199,5 +236,54 @@ mod tests {
             ..Target::app("slack.exe")
         };
         assert_eq!(process.describe(), "slack.exe (PID 4242)");
+    }
+}
+
+#[cfg(test)]
+mod storage_key_tests {
+    use super::*;
+
+    #[test]
+    fn old_journals_written_in_russian_still_read() {
+        // Главное требование этой правки. Журналы, записанные до
+        // разделения хранения и показа, обязаны читаться дальше:
+        // выбрасывать чужую историю ради своего удобства нельзя.
+        assert_eq!(Status::parse("применено"), Some(Status::Applied));
+        assert_eq!(Status::parse("не подтверждено"), Some(Status::Pending));
+        assert_eq!(Actor::from_storage_key("вручную"), Some(Actor::Manual));
+    }
+
+    #[test]
+    fn new_journals_are_written_with_stable_keys() {
+        // Ключ уходит в колонку базы и не меняется никогда — иначе
+        // перевод интерфейса сломал бы чтение записанного вчера.
+        assert_eq!(Status::Applied.storage_key(), "applied");
+        assert_eq!(Actor::Auto.storage_key(), "auto");
+
+        for status in [
+            Status::Pending,
+            Status::Applied,
+            Status::Reverted,
+            Status::Expired,
+            Status::Failed,
+        ] {
+            assert!(status.storage_key().is_ascii(), "{status:?}");
+            assert_eq!(Status::parse(status.storage_key()), Some(status));
+        }
+    }
+
+    #[test]
+    fn a_key_is_not_the_same_as_a_name() {
+        // Если бы они совпадали, разделение было бы бессмысленным:
+        // название должно быть свободно переводиться.
+        for status in [Status::Applied, Status::Reverted, Status::Failed] {
+            assert_ne!(status.storage_key(), status.as_str());
+        }
+    }
+
+    #[test]
+    fn nonsense_in_the_column_is_not_silently_accepted() {
+        assert_eq!(Status::parse("что-то не то"), None);
+        assert_eq!(Actor::from_storage_key(""), None);
     }
 }

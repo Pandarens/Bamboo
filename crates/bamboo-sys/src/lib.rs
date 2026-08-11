@@ -25,6 +25,7 @@ mod gpu;
 mod http;
 mod iolimit;
 pub mod memory;
+pub mod notify;
 pub mod nt;
 pub mod pipe;
 pub mod power;
@@ -54,6 +55,7 @@ pub use gpu::{load_by_process as gpu_load_by_process, GpuCounter, GpuLoad};
 pub use http::{fetch, fetch_text};
 pub use iolimit::{IoLimit, LimitedProcess};
 pub use memory::{memory_stat, system_counts, SystemCounts};
+pub use notify::{Importance, Notifier};
 pub use power::{power_capabilities, power_status, PowerCapabilities, PowerSource, PowerStatus};
 pub use process::{
     has_hung_window, hung_process_ids, terminate as terminate_process, ProcessBuffer, ProcessIter,

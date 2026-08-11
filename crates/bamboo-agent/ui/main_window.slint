@@ -385,6 +385,7 @@ export component MainWindow inherits Window {
     in property <string> update-status: "";
     in property <bool> update-busy: false;
     in property <string> app-version: "";
+    in property <string> history-note: "";
     callback install-update();
     callback check-update();
     in property <[DiskUserRow]> disk-users: [];
@@ -1714,6 +1715,26 @@ export component MainWindow inherits Window {
                 if root.section == 5: VerticalLayout {
                     spacing: 10px;
                     Text { text: "Настройки"; font-size: 20px; color: #e8f0ec; }
+
+                    // Свой расход. Bamboo считает чужую запись на диск
+                    // и обязан показывать собственную: утилита, которая
+                    // ругает других за износ накопителя и молчит про себя,
+                    // занимается двойной моралью.
+                    if root.history-note != "": Rectangle {
+                        background: #1e2a24; border-radius: 8px;
+                        height: histbox.preferred-height;
+                        histbox := VerticalLayout {
+                            padding: 12px; spacing: 3px;
+                            Text {
+                                text: "История наблюдений";
+                                font-size: 13px; color: #e8f0ec;
+                            }
+                            Text {
+                                text: root.history-note;
+                                font-size: 11px; color: #7d8f86; wrap: word-wrap;
+                            }
+                        }
+                    }
 
                     // Версия и обновление. Проверка идёт сама раз в сутки,
                     // но кнопка нужна: человек, услышавший про новую версию,

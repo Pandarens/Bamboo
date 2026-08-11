@@ -25,6 +25,7 @@ bamboo-journal.workspace = true
 # у них тот же, что у всех остальных действий.
 bamboo-actuate.workspace = true
 bamboo-policy.workspace = true
+bamboo-store.workspace = true
 
 # renderer-software и backend-winit без остального: GPU-контекст
 # не создаётся вообще (ТЗ, раздел 4.1). Виджету он не нужен, а его создание

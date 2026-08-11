@@ -13,3 +13,5 @@ bamboo-core.workspace = true
 
 [target.'cfg(windows)'.dependencies]
 bamboo-sys.workspace = true
+# Нужен ровно ради типа GUID в сигнатурах: сам ETW живёт в bamboo-sys.
+windows-sys = { workspace = true, features = ["Win32_System_Diagnostics_Etw"] }

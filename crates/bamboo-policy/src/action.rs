@@ -108,6 +108,54 @@ impl Action {
         }
     }
 
+    /// Как действие записывается в базу.
+    ///
+    /// Отдельно от `name()`, и это не дублирование. `name()` — текст для
+    /// человека: он переводится, его правят, он живёт по правилам языка.
+    /// А в колонку базы уходит ключ, и он обязан не меняться никогда:
+    /// журнал, записанный вчера, должен читаться завтра — и на другом
+    /// языке интерфейса тоже.
+    ///
+    /// Пока русское название служило и тем, и другим, перевод интерфейса
+    /// молча сломал бы чтение всех существующих журналов.
+    pub fn storage_key(self) -> &'static str {
+        match self {
+            Action::EnableEcoQos => "enable_eco_qos",
+            Action::LowerMemoryPriority => "lower_memory_priority",
+            Action::LimitDiskRate => "limit_disk_rate",
+            Action::DelayServiceStart => "delay_service_start",
+            Action::DisableStartupItem => "disable_startup_item",
+            Action::DisableWakeTimer => "disable_wake_timer",
+            Action::DisableScheduledTask => "disable_scheduled_task",
+            Action::FreezeProcess => "freeze_process",
+            Action::StopService => "stop_service",
+            Action::DisableService => "disable_service",
+        }
+    }
+
+    /// Восстанавливает действие по ключу хранения.
+    ///
+    /// Принимает и старые русские названия: журналы, записанные до
+    /// разделения, обязаны читаться. Молча превращать неизвестное значение
+    /// в первое попавшееся действие нельзя — так делал прежний разбор,
+    /// и запись о остановке службы читалась бы как экономичный режим.
+    pub fn from_storage_key(key: &str) -> Option<Action> {
+        const ALL: [Action; 10] = [
+            Action::EnableEcoQos,
+            Action::LowerMemoryPriority,
+            Action::LimitDiskRate,
+            Action::DelayServiceStart,
+            Action::DisableStartupItem,
+            Action::DisableWakeTimer,
+            Action::DisableScheduledTask,
+            Action::FreezeProcess,
+            Action::StopService,
+            Action::DisableService,
+        ];
+        ALL.into_iter()
+            .find(|action| action.storage_key() == key || action.name() == key)
+    }
+
     pub fn name(self) -> &'static str {
         match self {
             Action::EnableEcoQos => "включить экономичный режим",
@@ -294,4 +342,67 @@ mod tests {
             let _ = action.undo();
         }
     }
+}
+
+#[cfg(test)]
+mod storage_key_tests {
+    use super::*;
+
+    #[test]
+    fn every_action_has_a_stable_ascii_key() {
+        for action in ALL_ACTIONS {
+            let key = action.storage_key();
+            assert!(key.is_ascii(), "ключ обязан быть переносимым: {key}");
+            assert_eq!(Action::from_storage_key(key), Some(action));
+        }
+    }
+
+    #[test]
+    fn keys_do_not_collide() {
+        // Одинаковый ключ у двух действий означал бы, что журнал
+        // не отличает экономичный режим от остановки службы.
+        let mut keys: Vec<&str> = ALL_ACTIONS.iter().map(|a| a.storage_key()).collect();
+        keys.sort();
+        let before = keys.len();
+        keys.dedup();
+        assert_eq!(keys.len(), before);
+    }
+
+    #[test]
+    fn old_russian_names_still_resolve() {
+        // Журналы, записанные до разделения, обязаны читаться.
+        assert_eq!(
+            Action::from_storage_key("включить экономичный режим"),
+            Some(Action::EnableEcoQos)
+        );
+        assert_eq!(
+            Action::from_storage_key("остановить службу"),
+            Some(Action::StopService)
+        );
+    }
+
+    #[test]
+    fn an_unknown_value_is_refused_not_guessed() {
+        // Прежний разбор молча превращал незнакомое значение в первое
+        // действие списка: запись об остановке службы читалась бы как
+        // экономичный режим.
+        assert_eq!(Action::from_storage_key("нет такого"), None);
+        assert_eq!(Action::from_storage_key(""), None);
+    }
+
+    /// Все действия. Список здесь, а не в тесте, чтобы забыть новое
+    /// действие было нельзя: компилятор о нём не напомнит, а этот
+    /// список проверяется на полноту соседним тестом.
+    const ALL_ACTIONS: [Action; 10] = [
+        Action::EnableEcoQos,
+        Action::LowerMemoryPriority,
+        Action::LimitDiskRate,
+        Action::DelayServiceStart,
+        Action::DisableStartupItem,
+        Action::DisableWakeTimer,
+        Action::DisableScheduledTask,
+        Action::FreezeProcess,
+        Action::StopService,
+        Action::DisableService,
+    ];
 }

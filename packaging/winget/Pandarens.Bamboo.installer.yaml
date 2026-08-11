@@ -1,5 +1,5 @@
 PackageIdentifier: Pandarens.Bamboo
-PackageVersion: 0.9.0-beta.3
+PackageVersion: 0.9.0-beta.4
 InstallerType: portable
 # Установщика у Bamboo нет и не нужно: это один файл, который никуда
 # себя не прописывает. Автозапуск включается в самой программе, и делать
@@ -9,7 +9,7 @@ Commands:
 ReleaseDate: 2026-08-10
 Installers:
   - Architecture: x64
-    InstallerUrl: https://github.com/Pandarens/Bamboo/releases/download/v0.9.0-beta.3/bamboo-agent.exe
-    InstallerSha256: B151E07B2060BE8F075EC5B56C6F5DDE72A152519F6A13FFEE5194F75C370A48
+    InstallerUrl: https://github.com/Pandarens/Bamboo/releases/download/v0.9.0-beta.4/bamboo-agent.exe
+    InstallerSha256: 4AAC382551274BE01934A212853C159C25BD9EDD9CB952254F9BDF2C01046DDB
 ManifestType: installer
 ManifestVersion: 1.6.0

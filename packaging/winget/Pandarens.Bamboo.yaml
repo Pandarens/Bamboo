@@ -2,7 +2,7 @@
 # в microsoft/winget-pkgs, и там требуется подписанный установщик —
 # см. packaging/README.md. Файл готов заранее, но не подан намеренно.
 PackageIdentifier: Pandarens.Bamboo
-PackageVersion: 0.9.0-beta.3
+PackageVersion: 0.9.0-beta.4
 DefaultLocale: ru-RU
 ManifestType: version
 ManifestVersion: 1.6.0

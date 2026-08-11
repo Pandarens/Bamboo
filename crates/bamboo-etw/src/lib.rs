@@ -21,6 +21,9 @@ pub mod recorder;
 pub mod tracker;
 
 #[cfg(windows)]
+pub mod investigate;
+
+#[cfg(windows)]
 pub mod session;
 
 pub use dump::{render as render_dump, write_dump};
@@ -29,4 +32,5 @@ pub use recorder::{Conditions, Dump, Recorder, TriggerReason};
 pub use tracker::{ImageSummary, ProcessTracker};
 
 #[cfg(windows)]
+pub use investigate::{clamp_duration, Investigation, Subject};
 pub use session::{stop_stale, ProcessTrace, SESSION_NAME};

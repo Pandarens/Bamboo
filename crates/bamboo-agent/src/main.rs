@@ -23,6 +23,8 @@ mod collector;
 #[cfg(windows)]
 mod gamemode;
 #[cfg(windows)]
+mod history;
+#[cfg(windows)]
 mod mainwin;
 #[cfg(windows)]
 mod session;
@@ -164,6 +166,25 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let autopilot_holds: std::rc::Rc<
         std::cell::RefCell<std::collections::HashMap<(u32, &'static str), i64>>,
     > = std::rc::Rc::new(std::cell::RefCell::new(std::collections::HashMap::new()));
+
+    // История наблюдений на диске. Без неё выводы о росте памяти
+    // начинались заново после каждого перезапуска, а недельный отчёт
+    // строить было не из чего.
+    let mut history = match history::History::open(0) {
+        Ok(history) => Some(history),
+        Err(error) => {
+            // Наблюдение продолжается и без истории, но молчать нельзя.
+            eprintln!("история наблюдений недоступна: {error}");
+            None
+        }
+    };
+
+    // Уведомления. Своя скрытая иконка: чужую, которую держит трей,
+    // трогать нельзя, а вторая видимая панда человеку не нужна.
+    // Отсутствие иконки не беда — тогда о подвисании скажет виджет.
+    let notifier = bamboo_sys::Notifier::new().ok();
+    // О чём уже говорили: одно подвисание не должно всплывать дважды.
+    let mut last_notified = String::new();
 
     // Отказы человека. Читаются с диска при запуске: без этого
     // «больше не предлагать никогда» жило бы до выхода из программы,
@@ -1182,6 +1203,46 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             if let Some(snapshot) = latest {
                 apply_snapshot(&widget, &snapshot, &processes, &spark, &spark_cpu);
 
+                // История: копим каждый тик, пишем раз в несколько часов.
+                if let Some(history) = &mut history {
+                    let now = started.elapsed().as_millis() as u64;
+                    history.observe(&snapshot, now);
+                    if history.due(now) {
+                        if let Err(error) = history.flush(now) {
+                            eprintln!("историю записать не удалось: {error}");
+                        }
+                    }
+
+                    // Свой расход показываем наравне с чужим.
+                    if let Some(main) = main_weak.upgrade() {
+                        if main.window().is_visible() && main.get_section() == 5 {
+                            main.set_history_note(SharedString::from(format!(
+                                "База наблюдений занимает {}. Запись идёт раз в                                  несколько часов пачкой, а не постоянно: Bamboo считает                                  чужой износ накопителя и не имеет права изнашивать его                                  сам. Ждёт записи программ: {}.",
+                                history.size(),
+                                history.pending_apps(),
+                            )));
+                        }
+                    }
+                }
+
+                // Подвисание всплывает уведомлением. Не всегда: пока
+                // человек играет или показывает презентацию, всплывать
+                // поверх игры — ровно то поведение, за которое такие
+                // программы и не любят.
+                if let (Some(notifier), Some(freeze)) = (&notifier, &snapshot.freeze) {
+                    if *freeze != last_notified && bamboo_sys::notification_state().may_notify() {
+                        last_notified = freeze.clone();
+                        // Текст обрезаем сами: в подсказку влезает
+                        // немного, и обрывать её на полуслове нельзя.
+                        let short = shorten(freeze, 240);
+                        let _ = notifier.show(
+                            "Bamboo: система подвисала",
+                            &short,
+                            bamboo_sys::Importance::Warning,
+                        );
+                    }
+                }
+
                 // Запись наблюдения кормится из того же снимка: отдельного
                 // опроса системы ей не нужно, данные уже есть.
                 if let Some(recording) = tick_recording.borrow_mut().as_mut() {
@@ -1323,6 +1384,22 @@ fn remedy_key(remedy: bamboo_analyze::suggest::Remedy) -> &'static str {
         Remedy::ThrottleDisk => "диск",
         Remedy::JustSaying => "ничего",
     }
+}
+
+/// Обрезает текст по границе слова.
+///
+/// В подсказку области уведомлений влезает немного, а обрыв на полуслове
+/// читается как поломка. Режем по пробелу и ставим многоточие — тогда
+/// видно, что текст продолжается, и где именно.
+#[cfg(windows)]
+fn shorten(text: &str, limit: usize) -> String {
+    if text.chars().count() <= limit {
+        return text.to_string();
+    }
+
+    let cut: String = text.chars().take(limit).collect();
+    let at = cut.rfind(' ').unwrap_or(cut.len());
+    format!("{}…", cut[..at].trim_end_matches([',', '.', ' ', '—']))
 }
 
 /// Короткое имя средства для списка отказов.

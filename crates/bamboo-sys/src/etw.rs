@@ -29,6 +29,35 @@ pub const KEYWORD_PROCESS: u64 = 0x10;
 pub const EVENT_PROCESS_START: u16 = 1;
 pub const EVENT_PROCESS_STOP: u16 = 2;
 
+// Провайдеры расследования (ТЗ, раздел 7.3). Включаются не постоянно,
+// а по триггеру: поток событий от них на порядки плотнее, чем от запуска
+// процессов, и держать их всё время означало бы стать той нагрузкой,
+// с которой Bamboo борется.
+
+/// Провайдер `Microsoft-Windows-Kernel-Disk`.
+pub const KERNEL_DISK_GUID: GUID = GUID::from_u128(0xC7BDE69A_E1E0_4177_B6EF_283AD1525271);
+/// Провайдер `Microsoft-Windows-Kernel-File`.
+pub const KERNEL_FILE_GUID: GUID = GUID::from_u128(0xEDD08927_9CC4_4E65_B970_C2560FB5C289);
+/// Провайдер `Microsoft-Windows-Kernel-Network`.
+pub const KERNEL_NETWORK_GUID: GUID = GUID::from_u128(0x7DD42A49_5329_4832_8DFD_43D979153A88);
+
+/// Ключевые слова Kernel-File: имена файлов и изменяющие операции.
+///
+/// Чтения намеренно нет: их на живой машине десятки тысяч в секунду,
+/// а расследованию интересно, кто **пишет** и удаляет.
+pub const KEYWORD_FILE_NAME: u64 = 0x10;
+pub const KEYWORD_FILE_CREATE: u64 = 0x80;
+pub const KEYWORD_FILE_WRITE: u64 = 0x200;
+pub const KEYWORD_FILE_DELETE: u64 = 0x400;
+pub const KEYWORD_FILE_RENAME: u64 = 0x800;
+
+/// Ключевые слова Kernel-Network: обе версии протокола.
+pub const KEYWORD_NET_IPV4: u64 = 0x10;
+pub const KEYWORD_NET_IPV6: u64 = 0x20;
+
+/// У Kernel-Disk тематических ключевых слов нет: включается целиком.
+pub const KEYWORD_DISK_ALL: u64 = 0;
+
 /// Размер буфера сессии. Больше не нужно: событий десятки в минуту.
 const BUFFER_SIZE_KB: u32 = 64;
 const MIN_BUFFERS: u32 = 4;
@@ -51,6 +80,43 @@ pub struct EventHeader {
     pub thread_id: u32,
     /// Время события, миллисекунды эпохи Unix.
     pub at_unix_ms: i64,
+    /// Кто прислал событие.
+    ///
+    /// Числом, а не структурой `GUID`: та не умеет ни сравниваться,
+    /// ни печататься, а заголовок события и сравнивают, и печатают —
+    /// в дампах видеорегистратора.
+    ///
+    /// Без этого поля сессия из нескольких провайдеров молча путала бы
+    /// события: номера 10 и 11 есть и у диска, и у файлов, и у сети,
+    /// и означают у каждого своё. Пока провайдер был один, поле было
+    /// не нужно; с тремя оно обязательно.
+    pub provider: u128,
+    /// Версия шаблона события.
+    ///
+    /// У Kernel-File шаблонов две, и поля в них разные. Разбор по имени
+    /// это переживает, а вот кэш разбора по одному лишь номеру события —
+    /// нет.
+    pub version: u8,
+}
+
+impl EventHeader {
+    /// От какого провайдера событие.
+    pub fn is_from(&self, provider: &GUID) -> bool {
+        self.provider == guid_to_u128(provider)
+    }
+}
+
+/// Переводит `GUID` в число.
+///
+/// Обратная к `GUID::from_u128`, которой в windows-sys нет. Раскладка
+/// полей у GUID закреплена стандартом и не меняется.
+pub fn guid_to_u128(guid: &GUID) -> u128 {
+    let mut bytes = [0u8; 16];
+    bytes[..4].copy_from_slice(&guid.data1.to_be_bytes());
+    bytes[4..6].copy_from_slice(&guid.data2.to_be_bytes());
+    bytes[6..8].copy_from_slice(&guid.data3.to_be_bytes());
+    bytes[8..].copy_from_slice(&guid.data4);
+    u128::from_be_bytes(bytes)
 }
 
 /// Доступ к полям события. Живёт только внутри обработчика.
@@ -69,6 +135,26 @@ impl EventFields {
             8 => u64::from_le_bytes(bytes[..8].try_into().ok()?),
             _ => return None,
         })
+    }
+
+    /// Сетевой порт.
+    ///
+    /// Отдельно от `number`, и это не придирка: у Kernel-Network порты
+    /// и адреса лежат в сетевом порядке байт, а `number` собирает число
+    /// из младшего. Прочитанный как обычное число порт 80 превратился бы
+    /// в 20480 — и расследование указало бы не на тот порт.
+    pub fn port(&self, name: &str) -> Option<u16> {
+        let bytes = self.raw(name)?;
+        (bytes.len() >= 2).then(|| u16::from_be_bytes([bytes[0], bytes[1]]))
+    }
+
+    /// Адрес IPv4 в привычном виде «1.2.3.4».
+    ///
+    /// Тот же довод: адрес приходит в сетевом порядке, и читать его
+    /// как число нельзя.
+    pub fn ipv4(&self, name: &str) -> Option<String> {
+        let bytes = self.raw(name)?;
+        (bytes.len() >= 4).then(|| format!("{}.{}.{}.{}", bytes[0], bytes[1], bytes[2], bytes[3]))
     }
 
     /// Строковое поле в UTF-16.
@@ -347,6 +433,8 @@ unsafe extern "system" fn event_callback(record: *mut EVENT_RECORD) {
         process_id: (*record).EventHeader.ProcessId,
         thread_id: (*record).EventHeader.ThreadId,
         at_unix_ms: bamboo_core::time::filetime_to_unix_ms((*record).EventHeader.TimeStamp),
+        provider: guid_to_u128(&(*record).EventHeader.ProviderId),
+        version: descriptor.Version,
     };
 
     let fields = EventFields { record };
@@ -404,5 +492,77 @@ mod tests {
     #[test]
     fn stopping_a_session_that_does_not_exist_is_an_error_not_a_crash() {
         assert!(stop_stale("bamboo-такой-сессии-нет").is_err());
+    }
+}
+
+#[cfg(test)]
+mod provider_tests {
+    use super::*;
+
+    #[test]
+    fn a_guid_survives_the_round_trip() {
+        // Обратного перевода в windows-sys нет, а раскладка полей у GUID
+        // такова, что перепутать порядок байт легко: первые три поля
+        // хранятся числами, последнее — массивом.
+        for guid in [
+            KERNEL_PROCESS_GUID,
+            KERNEL_DISK_GUID,
+            KERNEL_FILE_GUID,
+            KERNEL_NETWORK_GUID,
+        ] {
+            let number = guid_to_u128(&guid);
+            let back = GUID::from_u128(number);
+            assert_eq!(guid_to_u128(&back), number);
+        }
+    }
+
+    #[test]
+    fn the_provider_guids_are_all_different() {
+        // Ошибка в одной цифре превратила бы сессию по диску в сессию
+        // по файлам, и заметить это было бы нелегко.
+        let all = [
+            guid_to_u128(&KERNEL_PROCESS_GUID),
+            guid_to_u128(&KERNEL_DISK_GUID),
+            guid_to_u128(&KERNEL_FILE_GUID),
+            guid_to_u128(&KERNEL_NETWORK_GUID),
+        ];
+        for (index, one) in all.iter().enumerate() {
+            for other in &all[index + 1..] {
+                assert_ne!(one, other);
+            }
+        }
+    }
+
+    #[test]
+    fn a_header_tells_its_provider_apart_from_the_others() {
+        // Ради этого поле и заведено: номера 10 и 11 есть у всех трёх
+        // провайдеров расследования и означают у каждого своё.
+        let header = EventHeader {
+            event_id: 10,
+            process_id: 100,
+            thread_id: 200,
+            at_unix_ms: 0,
+            provider: guid_to_u128(&KERNEL_NETWORK_GUID),
+            version: 0,
+        };
+
+        assert!(header.is_from(&KERNEL_NETWORK_GUID));
+        assert!(!header.is_from(&KERNEL_DISK_GUID));
+        assert!(!header.is_from(&KERNEL_FILE_GUID));
+    }
+
+    #[test]
+    fn the_file_keywords_do_not_include_reads() {
+        // Чтений на живой машине десятки тысяч в секунду. Включить их
+        // значило бы утопить сессию в шуме и стать той нагрузкой,
+        // с которой Bamboo борется.
+        let all = KEYWORD_FILE_NAME
+            | KEYWORD_FILE_CREATE
+            | KEYWORD_FILE_WRITE
+            | KEYWORD_FILE_DELETE
+            | KEYWORD_FILE_RENAME;
+        /// Ключевое слово чтения у Kernel-File.
+        const KEYWORD_FILE_READ: u64 = 0x100;
+        assert_eq!(all & KEYWORD_FILE_READ, 0);
     }
 }
