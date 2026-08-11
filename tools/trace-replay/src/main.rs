@@ -191,3 +191,64 @@ mod tests {
         assert_eq!(image_name_for(&trace, "c:\\app\\teams.exe:?"), "teams.exe");
     }
 }
+
+#[cfg(test)]
+mod fixture_tests {
+    use super::*;
+
+    /// Где лежат эталонные трассы, снятые на живых машинах.
+    fn fixtures() -> std::path::PathBuf {
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("..")
+            .join("fixtures")
+            .join("traces")
+    }
+
+    #[test]
+    fn a_calm_machine_yields_no_observations() {
+        // Самый ценный вид эталона, и вот почему. Проверить, что Bamboo
+        // находит настоящую утечку, можно и на синтетике. А вот что он
+        // НЕ находит проблем там, где их нет, — только на живой машине.
+        //
+        // Утилита, которая всегда находит десять проблем, просто набивает
+        // себе цену; это ровно то, чем занимаются «оптимизаторы»
+        // из раздела 11.5 ТЗ. Эта трасса — полторы минуты обычной работы,
+        // 18 кадров, 113 приложений — сторожит от такого сползания.
+        let path = fixtures().join("рабочий-день.trace");
+        let file = std::fs::File::open(&path).expect("эталонная трасса на месте");
+        let trace = Trace::read_from(std::io::BufReader::new(file)).expect("трасса читается");
+
+        assert!(trace.frame_count() >= 10, "трасса слишком коротка");
+        assert!(trace.app_keys().len() > 50, "приложений подозрительно мало");
+
+        let observations = analyze(&trace);
+        assert!(
+            observations.is_empty(),
+            "на спокойной машине выдумано {} наблюдений: {:?}",
+            observations.len(),
+            observations
+                .iter()
+                .map(|o| o.summary.as_str())
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn the_recorded_trace_survives_a_round_trip() {
+        // Формат трассы — то, чем эталоны переживают смену версий.
+        // Если запись и чтение разойдутся, все эталоны разом станут
+        // нечитаемыми, и заметить это надо здесь, а не на чужой машине.
+        let path = fixtures().join("рабочий-день.trace");
+        let file = std::fs::File::open(&path).expect("эталонная трасса на месте");
+        let trace = Trace::read_from(std::io::BufReader::new(file)).expect("трасса читается");
+
+        let mut buffer = Vec::new();
+        trace.write_to(&mut buffer).expect("трасса пишется");
+        let again = Trace::read_from(buffer.as_slice()).expect("перечитывается");
+
+        assert_eq!(again.frame_count(), trace.frame_count());
+        assert_eq!(again.interval_ms, trace.interval_ms);
+        assert_eq!(again.app_keys().len(), trace.app_keys().len());
+    }
+}
