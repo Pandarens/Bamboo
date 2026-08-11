@@ -1,0 +1,30 @@
+PackageIdentifier: Pandarens.Bamboo
+PackageVersion: 0.9.0-beta.3
+PackageLocale: ru-RU
+Publisher: Pandarens
+PublisherUrl: https://github.com/Pandarens
+PackageName: Bamboo
+PackageUrl: https://github.com/Pandarens/Bamboo
+License: GPL-3.0-or-later
+LicenseUrl: https://github.com/Pandarens/Bamboo/blob/main/LICENSE
+ShortDescription: Наблюдает за Windows и объясняет, что с ней происходит
+Description: |-
+  Bamboo смотрит за системой и отвечает на вопросы, на которые не отвечает
+  диспетчер задач: почему браузер занимает восемь гигабайт, кто на самом
+  деле забил диск, из-за чего система подвисала минуту назад и чего не
+  хватает игре, когда в ней проседают кадры.
+
+  Чего Bamboo не делает: не «чистит» оперативную память, не отключает
+  службы пачками, не «дефрагментирует реестр» и не рисует выдуманный балл
+  здоровья системы. Всё это либо не работает, либо изнашивает накопитель.
+
+  Каждое действие обратимо, записывается в журнал и откатывается.
+Moniker: bamboo
+Tags:
+  - monitoring
+  - performance
+  - windows
+  - диагностика
+  - производительность
+ManifestType: defaultLocale
+ManifestVersion: 1.6.0

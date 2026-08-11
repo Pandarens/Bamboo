@@ -1,0 +1,92 @@
+# Сборка выпуска с подтверждением происхождения (ТЗ, раздел 17).
+#
+# Ключевое здесь — что сборка идёт ВНУТРИ этого прогона. Подтверждение
+# происхождения привязывается к артефакту, произведённому конкретным
+# прогоном; файл, собранный на чьей-то машине и залитый руками, подтвердить
+# нечем в принципе. Первые беты именно так и собирались, поэтому у них
+# провенанса нет и задним числом не появится.
+#
+# Про подпись — прямо. Её здесь нет: нужен сертификат, а его у проекта нет.
+# Самоподписанный не помогает против SmartScreen и Defender и был бы
+# плацебо в смысле раздела 11.5. Вместо неё — подтверждение происхождения
+# и SHA-256, и в описании выпуска это названо своими именами.
+
+name: Выпуск
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+  # Нужны, чтобы приложить подтверждение происхождения к артефакту.
+  id-token: write
+  attestations: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: Сборка и публикация
+    runs-on: windows-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Кэш
+        uses: Swatinem/rust-cache@v2
+
+      # Проверки перед выпуском те же, что в CI: выпускать несобирающееся
+      # или непроходящее тесты нельзя, даже если тег уже поставлен.
+      - name: Форматирование
+        run: cargo fmt --all --check
+
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: Тесты
+        run: cargo test --workspace
+
+      - name: Сборка
+        run: cargo build --release -p bamboo-agent
+
+      - name: Подтверждение происхождения
+        uses: actions/attest-build-provenance@v1
+        with:
+          subject-path: target/release/bamboo-agent.exe
+
+      # Сумму считаем здесь же и кладём рядом: это то, чем человек без
+      # GitHub CLI может проверить загрузку.
+      - name: Контрольная сумма
+        shell: pwsh
+        run: |
+          $hash = (Get-FileHash target/release/bamboo-agent.exe -Algorithm SHA256).Hash.ToLower()
+          $hash | Out-File -FilePath sha256.txt -Encoding ascii -NoNewline
+          "SHA256=$hash" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          Write-Host "SHA256: $hash"
+
+      - name: Выпуск
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            target/release/bamboo-agent.exe
+            sha256.txt
+          # Все выпуски до 1.0 — предварительные, и помечать их иначе
+          # было бы неправдой.
+          prerelease: true
+          body: |
+            Сборка из коммита ${{ github.sha }}.
+
+            SHA256: ${{ env.SHA256 }}
+
+            Файл собран этим прогоном и снабжён подтверждением
+            происхождения GitHub. Проверить: `gh attestation verify
+            bamboo-agent.exe --repo ${{ github.repository }}`.
+
+            Подписи у файла нет — Windows покажет SmartScreen. Это
+            ожидаемо: сертификата у проекта нет, а самоподписанный
+            от SmartScreen не спасает.

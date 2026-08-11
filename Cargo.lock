@@ -394,7 +394,7 @@ dependencies = [
 
 [[package]]
 name = "bamboo-actuate"
-version = "0.9.0-beta.2"
+version = "0.9.0-beta.3"
 dependencies = [
  "bamboo-core",
  "bamboo-journal",
@@ -404,7 +404,7 @@ dependencies = [
 
 [[package]]
 name = "bamboo-agent"
-version = "0.9.0-beta.2"
+version = "0.9.0-beta.3"
 dependencies = [
  "bamboo-actuate",
  "bamboo-analyze",
@@ -421,14 +421,14 @@ dependencies = [
 
 [[package]]
 name = "bamboo-analyze"
-version = "0.9.0-beta.2"
+version = "0.9.0-beta.3"
 dependencies = [
  "bamboo-core",
 ]
 
 [[package]]
 name = "bamboo-cli"
-version = "0.9.0-beta.2"
+version = "0.9.0-beta.3"
 dependencies = [
  "bamboo-actuate",
  "bamboo-analyze",
@@ -443,7 +443,7 @@ dependencies = [
 
 [[package]]
 name = "bamboo-collect"
-version = "0.9.0-beta.2"
+version = "0.9.0-beta.3"
 dependencies = [
  "bamboo-analyze",
  "bamboo-core",
@@ -452,11 +452,11 @@ dependencies = [
 
 [[package]]
 name = "bamboo-core"
-version = "0.9.0-beta.2"
+version = "0.9.0-beta.3"
 
 [[package]]
 name = "bamboo-etw"
-version = "0.9.0-beta.2"
+version = "0.9.0-beta.3"
 dependencies = [
  "bamboo-core",
  "bamboo-sys",
@@ -464,7 +464,7 @@ dependencies = [
 
 [[package]]
 name = "bamboo-ipc"
-version = "0.9.0-beta.2"
+version = "0.9.0-beta.3"
 dependencies = [
  "bamboo-core",
  "bamboo-policy",
@@ -474,7 +474,7 @@ dependencies = [
 
 [[package]]
 name = "bamboo-journal"
-version = "0.9.0-beta.2"
+version = "0.9.0-beta.3"
 dependencies = [
  "bamboo-core",
  "bamboo-policy",
@@ -483,7 +483,7 @@ dependencies = [
 
 [[package]]
 name = "bamboo-policy"
-version = "0.9.0-beta.2"
+version = "0.9.0-beta.3"
 dependencies = [
  "bamboo-core",
  "serde",
@@ -491,7 +491,7 @@ dependencies = [
 
 [[package]]
 name = "bamboo-service"
-version = "0.9.0-beta.2"
+version = "0.9.0-beta.3"
 dependencies = [
  "bamboo-actuate",
  "bamboo-collect",
@@ -504,7 +504,7 @@ dependencies = [
 
 [[package]]
 name = "bamboo-store"
-version = "0.9.0-beta.2"
+version = "0.9.0-beta.3"
 dependencies = [
  "bamboo-core",
  "bincode 1.3.3",
@@ -515,7 +515,7 @@ dependencies = [
 
 [[package]]
 name = "bamboo-sys"
-version = "0.9.0-beta.2"
+version = "0.9.0-beta.3"
 dependencies = [
  "bamboo-core",
  "windows-sys 0.61.2",
@@ -5352,7 +5352,7 @@ checksum = "7d56353a2a665ad0f41a421187180aab746c8c325620617ad883a99a1cbe66d2"
 
 [[package]]
 name = "trace-replay"
-version = "0.9.0-beta.2"
+version = "0.9.0-beta.3"
 dependencies = [
  "bamboo-analyze",
  "bamboo-core",

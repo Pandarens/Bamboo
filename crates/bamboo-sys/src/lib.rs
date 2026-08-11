@@ -30,6 +30,7 @@ pub mod pipe;
 pub mod power;
 pub mod process;
 pub mod restore;
+pub mod schedtask;
 pub mod service;
 pub mod services;
 mod settings;
@@ -61,6 +62,7 @@ pub use process::{
 pub use restore::{
     create_restore_point, has_recent_restore_point, last_restore_point_ms, RestoreOutcome,
 };
+pub use schedtask::{channel_enabled, recent_task_starts, started_by_task, StartedByTask};
 pub use service::{
     install as install_service, service_start, set_service_start, uninstall as uninstall_service,
     ServiceStart, StopSignal,
