@@ -32,5 +32,7 @@ pub use recorder::{Conditions, Dump, Recorder, TriggerReason};
 pub use tracker::{ImageSummary, ProcessTracker};
 
 #[cfg(windows)]
-pub use investigate::{clamp_duration, Investigation, Subject};
+pub use investigate::{
+    clamp_duration, stop_stale as stop_stale_investigation, Investigation, Subject,
+};
 pub use session::{stop_stale, ProcessTrace, SESSION_NAME};

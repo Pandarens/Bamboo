@@ -19,6 +19,7 @@ bamboo-core.workspace = true
 bamboo-collect.workspace = true
 bamboo-sys.workspace = true
 bamboo-analyze.workspace = true
+bamboo-etw.workspace = true
 bamboo-journal.workspace = true
 # Действия уровня 1 (экономичный режим, приоритет памяти) агент применяет
 # сам: прав администратора они не требуют, а путь через журнал и откат

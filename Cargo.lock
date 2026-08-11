@@ -410,6 +410,7 @@ dependencies = [
  "bamboo-analyze",
  "bamboo-collect",
  "bamboo-core",
+ "bamboo-etw",
  "bamboo-journal",
  "bamboo-policy",
  "bamboo-store",
