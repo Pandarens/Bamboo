@@ -27,6 +27,8 @@ mod history;
 #[cfg(windows)]
 mod mainwin;
 #[cfg(windows)]
+mod selfwatch;
+#[cfg(windows)]
 mod session;
 #[cfg(windows)]
 mod tray;
@@ -161,6 +163,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     main_window.set_extensions(ModelRc::new(VecModel::from(Vec::<ExtensionRow>::new())));
     main_window.set_targets(ModelRc::new(VecModel::from(Vec::<TargetRow>::new())));
     main_window.set_boots(ModelRc::new(VecModel::from(Vec::<BootRow>::new())));
+    main_window.set_budget(ModelRc::new(VecModel::from(Vec::<BudgetRow>::new())));
     main_window.set_startup(ModelRc::new(VecModel::from(Vec::<StartupRow>::new())));
     main_window.set_record_cpu(ModelRc::new(VecModel::from(Vec::<f32>::new())));
     main_window.set_record_memory(ModelRc::new(VecModel::from(Vec::<f32>::new())));
@@ -187,6 +190,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let autopilot_holds: std::rc::Rc<
         std::cell::RefCell<std::collections::HashMap<(u32, &'static str), i64>>,
     > = std::rc::Rc::new(std::cell::RefCell::new(std::collections::HashMap::new()));
+
+    // Самозамер бюджета. ТЗ требует суточного прогона «в CI на выделенной
+    // машине»; машины нет, и она не нужна: резидентную утилиту правильнее
+    // мерить ею самой на живой машине под настоящей нагрузкой. Стерильный
+    // раннер такого не покажет, да и задание там убивают на шести часах.
+    let mut selfwatch = selfwatch::SelfWatch::new();
+    let written_at_start = bamboo_sys::budget::own_memory()
+        .map(|_| own_written())
+        .unwrap_or(0);
 
     // История наблюдений на диске. Без неё выводы о росте памяти
     // начинались заново после каждого перезапуска, а недельный отчёт
@@ -1366,6 +1378,26 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             if let Some(snapshot) = latest {
                 apply_snapshot(&widget, &snapshot, &processes, &spark, &spark_cpu);
 
+                // Самозамер: сколько Bamboo стоит машине. Меряем каждым
+                // тиком, судим — только когда наблюдения хватит.
+                if let Ok(own) = bamboo_sys::budget::own_memory() {
+                    let me = std::process::id();
+                    let cpu = snapshot
+                        .top
+                        .iter()
+                        .find(|line| line.pid == me)
+                        .map(|line| f64::from(line.cpu_percent))
+                        .unwrap_or(0.0);
+
+                    selfwatch.observe(
+                        own.working_set.as_u64(),
+                        own.private_bytes.as_u64(),
+                        cpu,
+                        own_written().saturating_sub(written_at_start),
+                        started.elapsed().as_millis() as u64,
+                    );
+                }
+
                 // История: копим каждый тик, пишем раз в несколько часов.
                 if let Some(history) = &mut history {
                     let now = started.elapsed().as_millis() as u64;
@@ -1379,6 +1411,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     // Свой расход показываем наравне с чужим.
                     if let Some(main) = main_weak.upgrade() {
                         if main.window().is_visible() && main.get_section() == 5 {
+                            fill_budget(&main, &selfwatch);
                             main.set_history_note(SharedString::from(format!(
                                 "База наблюдений занимает {}. Запись идёт раз в                                  несколько часов пачкой, а не постоянно: Bamboo считает                                  чужой износ накопителя и не имеет права изнашивать его                                  сам. Ждёт записи программ: {}.",
                                 history.size(),
@@ -1563,6 +1596,39 @@ fn shorten(text: &str, limit: usize) -> String {
     let cut: String = text.chars().take(limit).collect();
     let at = cut.rfind(' ').unwrap_or(cut.len());
     format!("{}…", cut[..at].trim_end_matches([',', '.', ' ', '—']))
+}
+
+/// Сколько Bamboo записал на диск за свою жизнь.
+///
+/// Счётчик самой Windows, а не наш подсчёт: считать самому значило бы
+/// доверять своей же бухгалтерии в вопросе, ради которого замер и делается.
+#[cfg(windows)]
+fn own_written() -> u64 {
+    bamboo_sys::budget::own_write_bytes().unwrap_or(0)
+}
+
+/// Показывает отчёт о собственном бюджете.
+#[cfg(windows)]
+fn fill_budget(main: &MainWindow, watch: &selfwatch::SelfWatch) {
+    let rows: Vec<BudgetRow> = watch
+        .report()
+        .into_iter()
+        .map(|line| BudgetRow {
+            metric: SharedString::from(line.metric),
+            measured: SharedString::from(line.measured),
+            limit: SharedString::from(line.limit),
+            // Три состояния, а не два: «уложились», «вышли» и «судить рано».
+            // Последнее нельзя показывать как успех.
+            state: match line.within {
+                Some(true) => 1,
+                Some(false) => 2,
+                None => 0,
+            },
+        })
+        .collect();
+
+    replace(&main.get_budget(), rows);
+    main.set_budget_verdict(SharedString::from(watch.verdict()));
 }
 
 /// Короткое имя средства для списка отказов.

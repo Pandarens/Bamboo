@@ -165,3 +165,42 @@ mod tests {
         );
     }
 }
+
+/// Сколько наш процесс записал на диск за свою жизнь.
+///
+/// Счётчик самой Windows, а не наша бухгалтерия. Считать записанное
+/// самому значило бы в вопросе «не слишком ли много Bamboo пишет»
+/// довериться тому же коду, который и пишет.
+pub fn own_write_bytes() -> Result<u64> {
+    use windows_sys::Win32::System::Threading::IO_COUNTERS;
+    use windows_sys::Win32::System::Threading::{GetCurrentProcess, GetProcessIoCounters};
+
+    let mut counters: IO_COUNTERS = unsafe { core::mem::zeroed() };
+    let ok = unsafe { GetProcessIoCounters(GetCurrentProcess(), &mut counters) };
+    if ok == 0 {
+        return Err(Error::Win32 {
+            call: "GetProcessIoCounters",
+            code: unsafe { windows_sys::Win32::Foundation::GetLastError() },
+        });
+    }
+    Ok(counters.WriteTransferCount)
+}
+
+#[cfg(test)]
+mod write_counter_tests {
+    use super::*;
+
+    #[test]
+    fn the_counter_is_readable_and_only_grows() {
+        // Счётчик накопительный: убывание означало бы, что мы читаем
+        // не то поле, и весь замер записи оказался бы враньём.
+        let before = own_write_bytes().expect("счётчик записи читается");
+
+        let path = std::env::temp_dir().join("bamboo-проверка-записи.tmp");
+        std::fs::write(&path, vec![0u8; 256 * 1024]).ok();
+        let _ = std::fs::remove_file(&path);
+
+        let after = own_write_bytes().expect("счётчик записи читается");
+        assert!(after >= before, "счётчик убыл: {before} -> {after}");
+    }
+}

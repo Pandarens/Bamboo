@@ -520,3 +520,7 @@ msgstr "Using the most"
 msgctxt "Widget"
 msgid "Bamboo пока только наблюдает. Действия появятся на этапе 0.4."
 msgstr "Bamboo only watches for now. Actions arrive in stage 0.4."
+
+msgctxt "MainWindow"
+msgid "Собственный бюджет"
+msgstr "Own resource budget"

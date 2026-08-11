@@ -85,6 +85,15 @@ struct ExtensionRow {
 // программа. Одним списком, потому что человеку это одно и то же — то,
 // за чем он хочет понаблюдать.
 // Загрузка системы.
+// Строка отчёта о собственном бюджете.
+struct BudgetRow {
+    metric: string,
+    measured: string,
+    limit: string,
+    // 0 — судить рано, 1 — уложились, 2 — вышли за предел.
+    state: int,
+}
+
 struct BootRow {
     when: string,
     total: string,
@@ -405,6 +414,8 @@ export component MainWindow inherits Window {
     callback toggle-language();
     in property <string> history-note: "";
     in property <[BootRow]> boots: [];
+    in property <[BudgetRow]> budget: [];
+    in property <string> budget-verdict: "";
     in property <string> boot-note: "";
     in property <[StartupRow]> startup: [];
     in property <string> startup-note: "";
@@ -1910,6 +1921,46 @@ export component MainWindow inherits Window {
                 if root.section == 5: VerticalLayout {
                     spacing: 10px;
                     Text { text: @tr("Настройки"); font-size: 20px; color: #e8f0ec; }
+
+                    // Собственный расход. Утилита, которая считает чужие
+                    // ресурсы и молчит про свои, занимается двойной моралью.
+                    if root.budget.length > 0: Rectangle {
+                        background: #1e2a24; border-radius: 8px;
+                        height: budgetbox.preferred-height;
+                        budgetbox := VerticalLayout {
+                            padding: 12px; spacing: 6px;
+                            Text {
+                                text: @tr("Собственный бюджет");
+                                font-size: 13px; color: #e8f0ec;
+                            }
+                            for row in root.budget: HorizontalLayout {
+                                spacing: 8px;
+                                Text {
+                                    text: row.metric;
+                                    font-size: 11px; color: #9fb3a8;
+                                    horizontal-stretch: 1;
+                                }
+                                Text {
+                                    text: row.measured;
+                                    font-size: 11px;
+                                    color: row.state == 2 ? #e0724a
+                                        : (row.state == 1 ? #6fb58a : #62736a);
+                                    width: 150px;
+                                    horizontal-alignment: right;
+                                }
+                                Text {
+                                    text: "\u{2264} " + row.limit;
+                                    font-size: 11px; color: #4d5b53;
+                                    width: 90px;
+                                    horizontal-alignment: right;
+                                }
+                            }
+                            Text {
+                                text: root.budget-verdict;
+                                font-size: 11px; color: #7d8f86; wrap: word-wrap;
+                            }
+                        }
+                    }
 
                     // Язык интерфейса.
                     Rectangle {
