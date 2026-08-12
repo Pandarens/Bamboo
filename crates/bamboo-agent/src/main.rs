@@ -158,6 +158,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     main_window.set_autostart(bamboo_sys::is_in_startup());
     main_window.set_app_version(SharedString::from(update::CURRENT));
     main_window.set_language(SharedString::from(language.clone()));
+    // Права проверяем один раз при запуске: по ходу работы они не меняются.
+    main_window.set_scheduled_logon(bamboo_sys::is_scheduled_at_logon());
+    if !bamboo_sys::is_elevated() {
+        main_window.set_rights_note(SharedString::from(bamboo_sys::what_needs_elevation()));
+    }
     main_window.set_update_status(SharedString::from("Проверяю обновления…"));
     main_window.set_show_widget_on_start(bamboo_sys::show_widget_on_start());
     main_window.set_processes(main_processes.clone());
@@ -276,6 +281,47 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             if let Some(snapshot) = snapshot.borrow().as_ref() {
                 fill_processes(&win, snapshot, &rows, &limits.borrow());
             }
+        });
+    }
+
+    // Автозапуск с правами через задачу планировщика.
+    {
+        let weak = main_window.as_weak();
+        main_window.on_toggle_scheduled_logon(move || {
+            let Some(win) = weak.upgrade() else {
+                return;
+            };
+
+            let wanted = !win.get_scheduled_logon();
+            let outcome = if wanted {
+                bamboo_sys::schedule_at_logon()
+            } else {
+                bamboo_sys::unschedule_at_logon()
+            };
+
+            // Отвечаем по факту, а не по намерению: планировщик может
+            // и отказать, и человек должен видеть, что вышло.
+            let done = bamboo_sys::is_scheduled_at_logon();
+            win.set_scheduled_logon(done);
+
+            let note = match outcome {
+                Ok(()) if done => bamboo_core::pick(
+                    "Готово: при входе Bamboo поднимется со всеми правами.                      Обычную запись автозапуска можно выключить — она больше                      не нужна.",
+                    "Done: Bamboo will start at logon with full rights. The plain                      autostart entry can be turned off — it is no longer needed.",
+                )
+                .to_string(),
+                Ok(()) => bamboo_core::pick(
+                    "Задача убрана. При входе Bamboo больше сам не запустится                      с правами.",
+                    "The task is removed. Bamboo will no longer start with rights                      at logon.",
+                )
+                .to_string(),
+                Err(error) => bamboo_core::say(
+                    "Не вышло: {why}",
+                    "Did not work: {why}",
+                    &[("why", &error.to_string())],
+                ),
+            };
+            win.set_action_note(SharedString::from(note));
         });
     }
 

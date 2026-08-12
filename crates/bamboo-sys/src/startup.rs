@@ -218,10 +218,21 @@ fn wide(text: &str) -> Vec<u16> {
 
 /// Стоит ли Bamboo в автозапуске.
 pub fn is_in_startup() -> bool {
-    let Ok(run) = Key::open(RUN_KEY, KEY_READ) else {
-        return false;
-    };
-    read_value(&run, STARTUP_NAME).is_some()
+    startup_command(STARTUP_NAME).is_some()
+}
+
+/// Что записано в автозапуске под этим именем.
+///
+/// Нужно не только для проверки. Тест, который правит настоящий автозапуск,
+/// обязан вернуть **прежнее значение**, а не просто «запись была». Разница
+/// не теоретическая: прошлая редакция теста помнила один лишь признак
+/// и восстанавливала запись вызовом `add_to_startup()` — то есть подставляла
+/// путь к самому тестовому бинарнику. Настоящая запись пользователя
+/// затиралась, а тестовый файл при следующей сборке исчезал, и автозапуск
+/// переставал работать молча.
+pub fn startup_command(name: &str) -> Option<String> {
+    let run = Key::open(RUN_KEY, KEY_READ).ok()?;
+    read_value(&run, name)
 }
 
 /// Добавляет Bamboo в автозапуск текущего пользователя.
@@ -234,10 +245,19 @@ pub fn add_to_startup() -> Result<()> {
         .map_err(|_| Error::Unsupported("не удалось определить путь к себе"))?;
     // Путь в кавычках: без них пробел в пути превратит команду в две.
     let command = format!("\"{}\"", exe.to_string_lossy());
+    set_startup_command(STARTUP_NAME, &command)
+}
 
+/// Записывает произвольную команду в автозапуск под данным именем.
+///
+/// Отдельно от `add_to_startup`, чтобы тесты могли пользоваться **своим**
+/// именем и не трогать запись пользователя вовсе. Это не удобство,
+/// а исправление настоящей поломки: тесты, писавшие в боевое имя, ломали
+/// автозапуск на машине разработчика.
+pub fn set_startup_command(name: &str, command: &str) -> Result<()> {
     let run = Key::open(RUN_KEY, KEY_SET_VALUE)?;
-    let name = wide(STARTUP_NAME);
-    let value = wide(&command);
+    let name = wide(name);
+    let value = wide(command);
 
     let status = unsafe {
         RegSetValueExW(
@@ -260,10 +280,15 @@ pub fn add_to_startup() -> Result<()> {
 
 /// Убирает Bamboo из автозапуска.
 pub fn remove_from_startup() -> Result<()> {
+    remove_startup_command(STARTUP_NAME)
+}
+
+/// Убирает запись автозапуска по имени.
+pub fn remove_startup_command(name: &str) -> Result<()> {
     use windows_sys::Win32::System::Registry::RegDeleteValueW;
 
     let run = Key::open(RUN_KEY, KEY_SET_VALUE)?;
-    let name = wide(STARTUP_NAME);
+    let name = wide(name);
 
     let status = unsafe { RegDeleteValueW(run.0, name.as_ptr()) };
     // Значения не было — цель достигнута, это не ошибка.
@@ -308,35 +333,284 @@ mod autostart_tests {
     /// гонялись бы за него и мешали друг другу, поэтому сериализуем.
     static REGISTRY_LOCK: Mutex<()> = Mutex::new(());
 
+    /// Имя, под которым пишут тесты.
+    ///
+    /// Своё, а не боевое, и это исправление настоящей поломки. Прежняя
+    /// редакция писала в боевое имя и «восстанавливала» запись вызовом
+    /// `add_to_startup()` — то есть подставляла путь к тестовому бинарнику
+    /// вместо пути пользователя. Тестовый файл при следующей сборке
+    /// исчезал, и автозапуск переставал работать молча: запись есть,
+    /// а запускать нечего.
+    const TEST_NAME: &str = "Bamboo-проверка";
+
     #[test]
     fn adding_and_removing_autostart_works() {
         let _guard = REGISTRY_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        // Проверяем на живом реестре: раздел пользователя, прав не нужно.
-        // Прибираем за собой в любом случае.
-        let was_there = is_in_startup();
 
-        add_to_startup().expect("добавление в автозапуск не удалось");
-        assert!(is_in_startup(), "после добавления запись должна быть");
+        set_startup_command(TEST_NAME, "\"C:\\нет\\такого.exe\"").expect("запись");
+        assert!(startup_command(TEST_NAME).is_some(), "запись должна быть");
 
-        remove_from_startup().expect("удаление из автозапуска не удалось");
-        assert!(!is_in_startup(), "после удаления записи быть не должно");
-
-        // Возвращаем как было, чтобы тест не менял настройки машины.
-        if was_there {
-            add_to_startup().ok();
-        }
+        remove_startup_command(TEST_NAME).expect("удаление");
+        assert!(
+            startup_command(TEST_NAME).is_none(),
+            "записи быть не должно"
+        );
     }
 
     #[test]
     fn removing_what_is_not_there_is_not_an_error() {
         let _guard = REGISTRY_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let was_there = is_in_startup();
-        remove_from_startup().expect("первое удаление");
-        // Повторное удаление — цель уже достигнута.
-        remove_from_startup().expect("повторное удаление не должно падать");
 
-        if was_there {
-            add_to_startup().ok();
+        remove_startup_command(TEST_NAME).expect("первое удаление");
+        // Повторное удаление — цель уже достигнута.
+        remove_startup_command(TEST_NAME).expect("повторное удаление не должно падать");
+    }
+
+    #[test]
+    fn tests_never_touch_the_real_autostart_entry() {
+        // Сторож от той самой поломки. Настоящая запись пользователя
+        // после прогона тестов обязана остаться нетронутой — и по факту
+        // наличия, и по содержимому.
+        let _guard = REGISTRY_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let before = startup_command(STARTUP_NAME);
+
+        set_startup_command(TEST_NAME, "\"C:\\нет\\такого.exe\"").ok();
+        remove_startup_command(TEST_NAME).ok();
+
+        assert_eq!(
+            startup_command(STARTUP_NAME),
+            before,
+            "тест изменил настоящую запись автозапуска"
+        );
+    }
+
+    #[test]
+    fn a_real_entry_would_point_at_an_existing_file() {
+        // Запись, указывающая на несуществующий файл, — это молчаливо
+        // сломанный автозапуск: Windows ничего не запустит и не скажет.
+        // Ровно так и выглядела поломка, оставленная прежними тестами.
+        let _guard = REGISTRY_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let Some(command) = startup_command(STARTUP_NAME) else {
+            return; // Автозапуск не настроен — проверять нечего.
+        };
+
+        let path = command.trim_matches('"');
+        assert!(
+            std::path::Path::new(path).exists(),
+            "автозапуск указывает на несуществующий файл: {path}"
+        );
+
+        // И на нужный файл. Существующий, но чужой — та же поломка:
+        // при входе запустится не то, а человек этого не увидит.
+        let file = std::path::Path::new(path)
+            .file_name()
+            .map(|name| name.to_string_lossy().to_lowercase())
+            .unwrap_or_default();
+        assert!(
+            file.starts_with("bamboo-agent"),
+            "автозапуск указывает не на Bamboo, а на {file}"
+        );
+    }
+}
+
+/// Запущен ли Bamboo с правами администратора.
+///
+/// Проверять надо, потому что без них он молча делает меньше: не читает
+/// журнал загрузок и здоровье накопителя, не поднимает сессии трассировки,
+/// не трогает чужие процессы, запущенные от администратора. Программа,
+/// которая в таком состоянии показывает пустые разделы и не объясняет
+/// почему, выглядит сломанной — а она просто не может.
+pub fn is_elevated() -> bool {
+    use windows_sys::Win32::Foundation::{CloseHandle, HANDLE};
+    use windows_sys::Win32::Security::{GetTokenInformation, TokenElevation, TOKEN_ELEVATION};
+    use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
+
+    let mut token: HANDLE = core::ptr::null_mut();
+    // TOKEN_QUERY
+    let ok = unsafe { OpenProcessToken(GetCurrentProcess(), 0x0008, &mut token) };
+    if ok == 0 {
+        return false;
+    }
+
+    let mut elevation: TOKEN_ELEVATION = unsafe { core::mem::zeroed() };
+    let mut returned: u32 = 0;
+    let ok = unsafe {
+        GetTokenInformation(
+            token,
+            TokenElevation,
+            (&mut elevation as *mut TOKEN_ELEVATION).cast(),
+            core::mem::size_of::<TOKEN_ELEVATION>() as u32,
+            &mut returned,
+        )
+    };
+    unsafe { CloseHandle(token) };
+
+    ok != 0 && elevation.TokenIsElevated != 0
+}
+
+/// Что теряется без прав администратора.
+///
+/// Список конкретный, а не «часть возможностей недоступна»: человек должен
+/// понимать, чего именно он не увидит, и решать, стоит ли это повышения.
+pub fn what_needs_elevation() -> &'static str {
+    bamboo_core::pick(
+        "Bamboo запущен без прав администратора. Так он всё равно наблюдает \
+         за системой, но не сможет показать историю загрузок, здоровье \
+         накопителя и имена задач планировщика, а действия над процессами, \
+         запущенными от администратора, будут отклонены. Чтобы получить всё, \
+         запускайте его от администратора.",
+        "Bamboo is running without administrator rights. It still watches the \
+         system, but it cannot show the boot history, drive health or scheduled \
+         task names, and actions on processes started as administrator will be \
+         refused. To get everything, run it as administrator.",
+    )
+}
+
+#[cfg(test)]
+mod elevation_tests {
+    use super::*;
+
+    #[test]
+    fn the_elevation_state_is_answered_without_error() {
+        // Ответ зависит от того, как запущен тест, — важно, что он есть.
+        let _ = is_elevated();
+    }
+
+    #[test]
+    fn the_explanation_names_what_is_lost() {
+        // «Часть возможностей недоступна» — не объяснение. Человек должен
+        // понимать, чего именно не увидит.
+        let text = what_needs_elevation();
+        for word in ["истори", "накопител", "планировщик"] {
+            assert!(text.contains(word), "не назван потерянный раздел: {word}");
         }
+        // И что с этим делать.
+        assert!(text.contains("от администратора"), "{text}");
+    }
+
+    #[test]
+    fn the_explanation_speaks_both_languages() {
+        use bamboo_core::{set_language, Language};
+        set_language(Language::English);
+        let english = what_needs_elevation();
+        set_language(Language::Russian);
+
+        assert!(english.contains("administrator"), "{english}");
+        assert!(
+            !english
+                .chars()
+                .any(|c| ('\u{0410}'..='\u{044f}').contains(&c)),
+            "в английском тексте осталась кириллица"
+        );
+    }
+}
+
+/// Имя задачи планировщика, запускающей Bamboo при входе.
+const TASK_NAME: &str = "Bamboo";
+
+/// Стоит ли Bamboo в автозапуске через задачу планировщика.
+pub fn is_scheduled_at_logon() -> bool {
+    std::process::Command::new("schtasks.exe")
+        .args(["/query", "/tn", TASK_NAME])
+        .creation_flags(CREATE_NO_WINDOW)
+        .output()
+        .map(|out| out.status.success())
+        .unwrap_or(false)
+}
+
+/// Окно консоли не показывать: иначе при каждом обращении мигало бы
+/// чёрное окно.
+const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+
+use std::os::windows::process::CommandExt;
+
+/// Заводит автозапуск при входе с правами администратора.
+///
+/// Обычная запись в разделе `Run` этого не умеет: программа, требующая
+/// повышения, оттуда просто не стартует, а не требующая — стартует
+/// без прав. Задача планировщика с наивысшими правами решает обе беды
+/// разом и не спрашивает подтверждения при каждом входе.
+///
+/// Требует прав администратора **один раз**, при создании.
+pub fn schedule_at_logon() -> Result<()> {
+    let exe = std::env::current_exe()
+        .map_err(|_| Error::Unsupported("не удалось определить путь к себе"))?;
+
+    let output = std::process::Command::new("schtasks.exe")
+        .args([
+            "/create",
+            "/tn",
+            TASK_NAME,
+            "/tr",
+            &format!("\"{}\"", exe.to_string_lossy()),
+            "/sc",
+            "onlogon",
+            // Наивысшие права — то, ради чего всё и затевалось.
+            "/rl",
+            "highest",
+            // Перезаписать существующую: повторное включение не должно
+            // спотыкаться о прошлую задачу.
+            "/f",
+        ])
+        .creation_flags(CREATE_NO_WINDOW)
+        .output()
+        .map_err(|_| Error::Unsupported("не удалось вызвать планировщик заданий"))?;
+
+    if !output.status.success() {
+        return Err(Error::Unsupported(
+            "создать задачу не удалось: нужны права администратора",
+        ));
+    }
+    Ok(())
+}
+
+/// Убирает задачу автозапуска.
+pub fn unschedule_at_logon() -> Result<()> {
+    let output = std::process::Command::new("schtasks.exe")
+        .args(["/delete", "/tn", TASK_NAME, "/f"])
+        .creation_flags(CREATE_NO_WINDOW)
+        .output()
+        .map_err(|_| Error::Unsupported("не удалось вызвать планировщик заданий"))?;
+
+    // Задачи не было — цель достигнута.
+    if !output.status.success() && is_scheduled_at_logon() {
+        return Err(Error::Unsupported(
+            "удалить задачу не удалось: нужны права администратора",
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod scheduled_startup_tests {
+    use super::*;
+
+    #[test]
+    fn the_state_of_the_task_is_answerable() {
+        // Запрос к планировщику не должен падать оттого, что задачи нет.
+        let _ = is_scheduled_at_logon();
+    }
+
+    #[test]
+    fn removing_a_task_that_is_not_there_is_not_an_error() {
+        // Только если её и правда нет: удалять чужую настройку
+        // ради теста нельзя.
+        if !is_scheduled_at_logon() {
+            unschedule_at_logon().expect("удаление отсутствующей задачи");
+        }
+    }
+
+    #[test]
+    fn scheduling_needs_rights_and_says_so() {
+        // Без прав создание обязано отказать с объяснением, а не сделать
+        // вид, что получилось.
+        if is_elevated() || is_scheduled_at_logon() {
+            return; // С правами проверять нечего, чужую задачу не трогаем.
+        }
+        let error = schedule_at_logon().expect_err("без прав задача не создаётся");
+        assert!(
+            error.to_string().contains("администратора"),
+            "отказ обязан назвать причину: {error}"
+        );
     }
 }

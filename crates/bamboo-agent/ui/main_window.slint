@@ -413,6 +413,9 @@ export component MainWindow inherits Window {
     in-out property <string> language: "ru";
     callback toggle-language();
     in property <string> history-note: "";
+    in property <string> rights-note: "";
+    in property <bool> scheduled-logon: false;
+    callback toggle-scheduled-logon();
     in property <[BootRow]> boots: [];
     in property <[BudgetRow]> budget: [];
     in property <string> budget-verdict: "";
@@ -755,6 +758,21 @@ export component MainWindow inherits Window {
                 spacing: 12px;
 
                 // --- Обзор ---
+                // Права. Показываем поверх всего и во всех разделах:
+                // без них половина разделов пуста, и человек должен знать
+                // причину, а не решить, что программа сломана.
+                if root.rights-note != "": Rectangle {
+                    background: #2e2320; border-radius: 8px;
+                    height: rightsbox.preferred-height;
+                    rightsbox := VerticalLayout {
+                        padding: 12px;
+                        Text {
+                            text: root.rights-note;
+                            font-size: 11px; color: #d8c4a8; wrap: word-wrap;
+                        }
+                    }
+                }
+
                 if root.update-version != "": Rectangle {
                     background: #1d2c38; border-radius: 8px;
                     height: updbox.preferred-height;
@@ -1958,6 +1976,38 @@ export component MainWindow inherits Window {
                             Text {
                                 text: root.budget-verdict;
                                 font-size: 11px; color: #7d8f86; wrap: word-wrap;
+                            }
+                        }
+                    }
+
+                    // Автозапуск с правами. Обычная запись в Run их не даёт,
+                    // и Bamboo при входе поднимается урезанным.
+                    Rectangle {
+                        background: #1e2a24; border-radius: 8px;
+                        height: schedbox.preferred-height;
+                        schedbox := HorizontalLayout {
+                            padding: 12px; spacing: 12px;
+                            VerticalLayout {
+                                spacing: 3px;
+                                horizontal-stretch: 1;
+                                Text {
+                                    text: @tr("Запускать с правами администратора");
+                                    font-size: 13px; color: #e8f0ec;
+                                }
+                                Text {
+                                    text: root.scheduled-logon
+                                        ? @tr("Bamboo поднимется при входе со всеми правами и без запроса подтверждения.")
+                                        : @tr("Обычный автозапуск прав не даёт: Bamboo стартует урезанным и не покажет историю загрузок, здоровье накопителя и имена задач. Задача планировщика решает это — подтверждение потребуется один раз, сейчас.");
+                                    font-size: 11px; color: #7d8f86; wrap: word-wrap;
+                                }
+                            }
+                            VerticalLayout {
+                                alignment: center;
+                                RowButton {
+                                    label: root.scheduled-logon ? @tr("Выключить") : @tr("Включить");
+                                    width: 110px;
+                                    pressed => { root.toggle-scheduled-logon(); }
+                                }
                             }
                         }
                     }

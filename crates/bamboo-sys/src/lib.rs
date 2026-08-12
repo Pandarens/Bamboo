@@ -78,8 +78,9 @@ pub use settings::{
     show_widget_on_start,
 };
 pub use startup::{
-    add_to_startup, is_in_startup, remove_from_startup, set_startup_enabled, user_startup_items,
-    StartupItem,
+    add_to_startup, is_elevated, is_in_startup, is_scheduled_at_logon, remove_from_startup,
+    remove_startup_command, schedule_at_logon, set_startup_command, set_startup_enabled,
+    startup_command, unschedule_at_logon, user_startup_items, what_needs_elevation, StartupItem,
 };
 pub use storage::{enumerate as enumerate_drives, read_smart, Drive};
 pub use user::{double_click_time_ms, idle_ms, notification_state, NotificationState};
