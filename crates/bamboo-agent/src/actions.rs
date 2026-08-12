@@ -44,6 +44,15 @@ impl RowAction {
 }
 
 fn journal_path() -> std::path::PathBuf {
+    // Переменная BAMBOO_DATA_DIR уводит данные в другой каталог. Заведена
+    // для тестов, и это не удобство, а исправление двух настоящих бед:
+    // тесты писали в живой журнал пользователя, а на раннере CI они же,
+    // идя параллельно, сталкивались на одном файле — SQLite при риске
+    // взаимной блокировки возвращает «database is locked» сразу, не давая
+    // busy-handler'у подождать.
+    if let Ok(dir) = std::env::var("BAMBOO_DATA_DIR") {
+        return std::path::PathBuf::from(dir).join("journal.db");
+    }
     let base = std::env::var("LOCALAPPDATA").unwrap_or_else(|_| ".".to_string());
     std::path::PathBuf::from(base)
         .join("Bamboo")
@@ -414,6 +423,36 @@ pub fn terminate(pid: u32, image_name: &str) -> String {
 mod tests {
     use super::*;
 
+    /// Журнал один на процесс, а тесты идут параллельно. Каждый тест,
+    /// который его трогает, берёт замок и уводит данные в собственную
+    /// папку: без замка тесты сталкивались на одном файле (на раннере CI —
+    /// стабильно, «database is locked»), без своей папки — писали в живой
+    /// журнал пользователя на машине разработчика.
+    static JOURNAL_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// Держит замок и переменную каталога, возвращая всё при сбросе.
+    struct OwnJournal {
+        _guard: std::sync::MutexGuard<'static, ()>,
+    }
+
+    impl OwnJournal {
+        fn take(name: &str) -> OwnJournal {
+            let guard = JOURNAL_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+            let dir = std::env::temp_dir()
+                .join("bamboo-тесты")
+                .join(format!("{name}-{}", std::process::id()));
+            let _ = std::fs::create_dir_all(&dir);
+            std::env::set_var("BAMBOO_DATA_DIR", &dir);
+            OwnJournal { _guard: guard }
+        }
+    }
+
+    impl Drop for OwnJournal {
+        fn drop(&mut self) {
+            std::env::remove_var("BAMBOO_DATA_DIR");
+        }
+    }
+
     #[test]
     fn limiting_a_system_process_is_refused() {
         let mut limits = IoLimits::new();
@@ -424,6 +463,7 @@ mod tests {
 
     #[test]
     fn toggling_a_missing_process_reports_failure() {
+        let _journal = OwnJournal::take("toggling_a_missing_process_reports_failure");
         let mut limits = IoLimits::new();
         let note = limits.toggle(0xFFFF_FFF0, "нет-такого.exe");
         assert!(note.contains("не удалось"), "получили: {note}");
@@ -432,6 +472,7 @@ mod tests {
 
     #[test]
     fn a_limit_can_be_applied_and_lifted() {
+        let _journal = OwnJournal::take("a_limit_can_be_applied_and_lifted");
         let child = std::process::Command::new("cmd.exe")
             .args(["/c", "ping -n 5 127.0.0.1 > nul"])
             .spawn();
@@ -485,6 +526,7 @@ mod tests {
 
     #[test]
     fn a_protected_process_is_refused_with_an_explanation() {
+        let _journal = OwnJournal::take("a_protected_process_is_refused_with_an_explanation");
         // lsass.exe в неизменяемом белом списке: политика обязана отказать,
         // и отказ обязан быть объяснён.
         let note = apply(4, "lsass.exe", RowAction::EcoQos);
