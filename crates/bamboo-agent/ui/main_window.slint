@@ -86,6 +86,12 @@ struct ExtensionRow {
 // за чем он хочет понаблюдать.
 // Загрузка системы.
 // Строка отчёта о собственном бюджете.
+// Запись автозагрузки, замедляющая включение компьютера.
+struct SlowStartRow {
+    name: string,
+    reason: string,
+}
+
 struct BudgetRow {
     metric: string,
     measured: string,
@@ -419,6 +425,7 @@ export component MainWindow inherits Window {
     in property <[BootRow]> boots: [];
     in property <[BudgetRow]> budget: [];
     in property <string> budget-verdict: "";
+    in property <[SlowStartRow]> slow-starters: [];
     in property <string> boot-note: "";
     in property <[StartupRow]> startup: [];
     in property <string> startup-note: "";
@@ -1816,6 +1823,40 @@ export component MainWindow inherits Window {
                             + @tr("по вашему решению и записывается в журнал — откатить можно ")
                             + @tr("в любой момент.");
                         font-size: 11px; color: #62736a; wrap: word-wrap;
+                    }
+
+                    // Долгая загрузка: измеренная цена записей автозагрузки.
+                    // Первым делом, потому что это самое ценное предложение
+                    // из возможных — с числом из журнала диагностики,
+                    // а не с гаданием.
+                    if root.slow-starters.length > 0: Rectangle {
+                        background: #1d2c38; border-radius: 8px;
+                        height: slowbox.preferred-height;
+                        slowbox := VerticalLayout {
+                            padding: 12px; spacing: 8px;
+                            Text {
+                                text: @tr("Долгая загрузка");
+                                font-size: 13px; color: #8fc4f0;
+                            }
+                            for starter in root.slow-starters: HorizontalLayout {
+                                spacing: 10px;
+                                Text {
+                                    text: starter.reason;
+                                    font-size: 11px; color: #9fb3c4; wrap: word-wrap;
+                                    horizontal-stretch: 1;
+                                }
+                                VerticalLayout {
+                                    alignment: center;
+                                    RowButton {
+                                        label: @tr("Выключить");
+                                        width: 110px;
+                                        pressed => {
+                                            root.toggle-startup(starter.name, false);
+                                        }
+                                    }
+                                }
+                            }
+                        }
                     }
 
                     // Самостоятельная оптимизация. Право вмешиваться даётся

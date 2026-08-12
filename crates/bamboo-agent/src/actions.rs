@@ -771,3 +771,43 @@ fn record_limit_lifted(journal_id: i64) {
         let _ = journal.mark_reverted(journal_id, "человек снял ограничение");
     }
 }
+
+/// Возвращает всё, что автоматика придержала и не вернула.
+///
+/// Вызывается при запуске. Обещание автопилота — «тронули мышь, и всё
+/// вернулось» — держится на живом агенте: убитый или упавший агент Drop
+/// не выполняет, и придержанные процессы оставались придержанными
+/// до собственного перезапуска. По журналу их видно: записи от имени
+/// автоматики со статусом «применено». Возвращаем их первым делом —
+/// раз агент перезапустился, того отсутствия человека, под которое
+/// придерживалось, давно нет.
+pub fn revert_stale_auto_holds() -> usize {
+    let Some(journal) = open_journal() else {
+        return 0;
+    };
+    let Ok(entries) = journal.active() else {
+        return 0;
+    };
+
+    let mut reverted = 0;
+    for entry in entries {
+        if entry.actor != bamboo_journal::Actor::Auto {
+            continue;
+        }
+        if entry.status != bamboo_journal::Status::Applied {
+            continue;
+        }
+        // Только то, что автоматика вообще умеет применять.
+        if !matches!(
+            entry.action,
+            Action::EnableEcoQos | Action::LowerMemoryPriority
+        ) {
+            continue;
+        }
+        if revert_automatically(entry.id, "агент перезапускался — придержанное возвращено")
+        {
+            reverted += 1;
+        }
+    }
+    reverted
+}

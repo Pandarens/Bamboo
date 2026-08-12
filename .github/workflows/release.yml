@@ -55,7 +55,7 @@ jobs:
         run: cargo build --release -p bamboo-agent
 
       - name: Подтверждение происхождения
-        uses: actions/attest-build-provenance@v1
+        uses: actions/attest-build-provenance@v4
         with:
           subject-path: target/release/bamboo-agent.exe
 
@@ -75,9 +75,11 @@ jobs:
           files: |
             target/release/bamboo-agent.exe
             sha256.txt
-          # Все выпуски до 1.0 — предварительные, и помечать их иначе
-          # было бы неправдой.
-          prerelease: true
+          # Предвыпуск определяется по дефису в теге: v0.9.0-beta.1 — бета,
+          # v0.9.0 — выпуск. Прежде здесь стояло жёсткое true, и выпуск
+          # v0.9.0 не стал бы «Latest» на GitHub — а на «Latest» смотрит
+          # и человек, и checkver у scoop.
+          prerelease: ${{ contains(github.ref_name, '-') }}
           body: |
             Сборка из коммита ${{ github.sha }}.
 
@@ -97,14 +99,21 @@ jobs:
     name: Подача в winget
     needs: build
     runs-on: ubuntu-latest
-    # Только для окончательных выпусков. Каталог winget — не место
-    # для бет: люди ставят оттуда не глядя, и подсовывать им
-    # предварительную сборку нечестно.
-    if: ${{ !contains(github.ref_name, 'beta') }}
+    # Только для окончательных выпусков (по дефису: ловит и beta, и rc) —
+    # каталог winget не место для предвыпусков, оттуда ставят не глядя.
+    # И только при заведённом секрете: без него шаг упал бы, утянув за
+    # собой вид всего прогона, хотя сам выпуск уже опубликован.
+    #
+    # Первая подача пакета — только руками: это действие умеет лишь
+    # обновлять уже существующий в каталоге пакет. Порядок первой подачи
+    # описан в packaging/README.md.
+    if: ${{ !contains(github.ref_name, '-') && secrets.WINGET_TOKEN != '' }}
 
     steps:
       - name: Отправить обновление
-        uses: vedantmgoyal9/winget-releaser@main
+        # Прибит к версии: плавающий main в шаге, которому доверен личный
+        # токен, — приглашение чужому коду в наши секреты.
+        uses: vedantmgoyal9/winget-releaser@v2
         with:
           identifier: Pandarens.Bamboo
           installers-regex: 'bamboo-agent\.exe$'

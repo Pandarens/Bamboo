@@ -19,6 +19,7 @@ pub mod origin;
 pub mod record;
 pub mod regression;
 pub mod report;
+pub mod slowstart;
 pub mod spike;
 pub mod suggest;
 pub mod sysdiff;
@@ -37,6 +38,7 @@ pub use origin::{attribute, Origin, ProcessDescriptor};
 pub use record::{analyse as analyse_recording, Bottleneck, Sample, Verdict};
 pub use regression::{fit, Trend};
 pub use report::{weekly_html, weekly_json, weekly_markdown, ActionEffect, WeeklyData};
+pub use slowstart::{slow_starters, BootCost, SlowStarter, StartupEntry};
 pub use spike::SpikeInput;
 pub use suggest::{suggest, Remedy, Situation, Suggestion};
 pub use sysdiff::{diff as system_diff, SystemDiff, SystemSnapshot};
@@ -44,13 +46,19 @@ pub use systemio::{explain as explain_system_io, Bystanders, SystemIoCause, Syst
 pub use tbw::{rating_for, TbwRating};
 pub use wear::{WearInput, WearVerdict};
 
+/// Замок языка для тестов.
+///
+/// Язык — одно значение на процесс, а тестовый бинарник крейта гоняет
+/// модули параллельно. Замок в каждом модуле по отдельности не защищает
+/// от соседнего, поэтому он один на крейт.
+#[cfg(test)]
+pub(crate) static LANGUAGE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 #[cfg(test)]
 mod translation_tests {
     use bamboo_core::{set_language, Language};
-    use std::sync::Mutex;
 
-    /// Язык один на процесс: тесты, меняющие его, нельзя пускать разом.
-    static LANGUAGE_LOCK: Mutex<()> = Mutex::new(());
+    use crate::LANGUAGE_LOCK;
 
     /// Прогоняет каждое объяснение на обоих языках.
     ///

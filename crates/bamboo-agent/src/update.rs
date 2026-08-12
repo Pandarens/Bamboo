@@ -62,15 +62,45 @@ pub struct UpdateState {
 /// а тащить разборщик ради них — плохой размен, тот же довод, что и для
 /// манифестов расширений.
 pub fn parse_release(json: &str) -> Option<Release> {
+    parse_release_for(json, !CURRENT.contains('-'))
+}
+
+/// То же с явным признаком «пользователь на стабильной версии».
+///
+/// Признак вынесен параметром не только ради тестов: без него правила
+/// разбора зависели бы от версии самой сборки, и тесты, написанные при
+/// бете, молча меняли бы смысл после выпуска — ровно это и случилось.
+fn parse_release_for(json: &str, stable_user: bool) -> Option<Release> {
     // Ответ бывает и списком, и одиночным выпуском. Список разбираем
     // поэлементно: искать поля во всём тексте разом нельзя — метка версии
     // взялась бы из первого выпуска, а файл из второго.
+    //
+    // Из подходящих берётся САМЫЙ НОВЫЙ ПО ВЕРСИИ, а не первый по списку.
+    // GitHub сортирует по дате создания, и первым может оказаться хотфикс
+    // старой линии: выпусти мы v0.8.1 после v0.9.0 — прежний разбор
+    // предложил бы всем «последнюю версию» 0.8.1.
+    //
+    // И второе правило: тому, кто стоит на выпуске, беты не предлагаются.
+    // Человек, поставивший стабильную версию, выбрал стабильность, и
+    // затягивать его обратно в предвыпуски без спроса нельзя. Тем, кто
+    // уже на бете, предлагается всё: они на этот риск согласились.
+    let mut best: Option<Release> = None;
     for element in top_level_objects(json) {
-        if let Some(release) = parse_one(element) {
-            return Some(release);
+        let Some(release) = parse_one(element) else {
+            continue;
+        };
+        if stable_user && release.version.contains('-') {
+            continue;
+        }
+        let newer = match &best {
+            Some(known) => is_newer(&release.version, &known.version),
+            None => true,
+        };
+        if newer {
+            best = Some(release);
         }
     }
-    None
+    best
 }
 
 /// Разбивает ответ на верхнеуровневые объекты.
@@ -229,12 +259,35 @@ pub fn is_newer(candidate: &str, current: &str) -> bool {
             (None, Some(_)) => true,
             (Some(_), None) => false,
             (None, None) => false,
-            // Предвыпуски одной версии сравниваем как есть: «beta.2»
-            // после «beta.1». Порядок по строке здесь работает, потому
-            // что имена у них одинаковой формы.
-            (Some(one), Some(other)) => one > other,
+            // Предвыпуски одной версии сравниваем по числам в хвосте.
+            // Прежнее сравнение по строке было ошибкой, дремавшей
+            // до двузначного номера: «beta.10» строкой меньше «beta.9»,
+            // и все, кто на девятой бете, никогда не увидели бы десятую.
+            (Some(one), Some(other)) => prerelease_rank(one) > prerelease_rank(other),
         },
     }
+}
+
+/// Порядковый вид предвыпускной части: слово и числа отдельно.
+///
+/// «beta.10» → («beta», [10]), и сравнение кортежей даёт правильный
+/// порядок: beta.9 < beta.10 < rc.1.
+fn prerelease_rank(pre: &str) -> (String, Vec<u32>) {
+    let mut word = String::new();
+    let mut numbers = Vec::new();
+
+    for part in pre.split(['.', '-']) {
+        match part.parse::<u32>() {
+            Ok(number) => numbers.push(number),
+            Err(_) => {
+                if !word.is_empty() {
+                    word.push('.');
+                }
+                word.push_str(&part.to_lowercase());
+            }
+        }
+    }
+    (word, numbers)
 }
 
 fn split_prerelease(version: &str) -> (&str, Option<&str>) {
@@ -437,7 +490,8 @@ mod tests {
             ]
         }"#;
 
-        let release = parse_release(json).expect("выпуск должен разобраться");
+        // Пользователь на бете: предвыпуски ему видны.
+        let release = parse_release_for(json, false).expect("выпуск должен разобраться");
         assert_eq!(release.version, "0.9.0-beta.1", "ведущая v должна уйти");
         assert_eq!(
             release.download_url, "https://example.com/bamboo-agent.exe",
@@ -463,7 +517,8 @@ mod tests {
              "assets":[{"browser_download_url":"https://example.com/old.exe"}]}
         ]"#;
 
-        let release = parse_release(json).unwrap();
+        // Пользователь на бете: ему предлагается и предвыпуск.
+        let release = parse_release_for(json, false).unwrap();
         assert_eq!(release.version, "0.9.0-beta.1");
         assert_eq!(release.download_url, "https://example.com/new.exe");
     }
@@ -514,7 +569,8 @@ mod tests {
 SHA256: 4d427149e96c088247715c646a366ce34e33c4899bd2f5a9256a66569ab8dc8b
 "}]"#;
 
-        let release = parse_release(json).expect("живой ответ обязан разбираться");
+        // Живой ответ состоит из бет — читаем как пользователь беты.
+        let release = parse_release_for(json, false).expect("живой ответ обязан разбираться");
         assert_eq!(release.version, "0.9.0-beta.1");
         assert_eq!(
             release.download_url,
@@ -542,7 +598,7 @@ SHA256: 4d427149e96c088247715c646a366ce34e33c4899bd2f5a9256a66569ab8dc8b
         // это ухудшение, а не отказ.
         let json = r#"{"tag_name":"v1.0.0","body":"без суммы",
             "assets":[{"browser_download_url":"https://example.com/a.exe"}]}"#;
-        let release = parse_release(json).unwrap();
+        let release = parse_release_for(json, false).unwrap();
         assert_eq!(release.sha256, None);
     }
 
@@ -605,5 +661,54 @@ SHA256: 4d427149e96c088247715c646a366ce34e33c4899bd2f5a9256a66569ab8dc8b
     fn our_own_version_is_never_newer_than_itself() {
         // Иначе Bamboo предлагал бы обновиться на себя же, бесконечно.
         assert!(!is_newer(CURRENT, CURRENT));
+    }
+}
+
+#[cfg(test)]
+mod audit_fix_tests {
+    use super::*;
+
+    #[test]
+    fn beta_ten_is_newer_than_beta_nine() {
+        // Ошибка, дремавшая до двузначного номера: строкой «beta.10»
+        // меньше «beta.9», и все на девятой бете застряли бы навсегда.
+        assert!(is_newer("0.9.0-beta.10", "0.9.0-beta.9"));
+        assert!(!is_newer("0.9.0-beta.9", "0.9.0-beta.10"));
+        assert!(is_newer("0.9.0-beta.2", "0.9.0-beta.1"));
+    }
+
+    #[test]
+    fn a_stable_user_is_not_dragged_back_into_betas() {
+        // Человек, поставивший стабильную версию, выбрал стабильность.
+        let json = r#"[
+            {"tag_name":"v9.9.9-beta.1","body":"",
+             "assets":[{"browser_download_url":"https://example.com/beta.exe"}]},
+            {"tag_name":"v0.1.0","body":"",
+             "assets":[{"browser_download_url":"https://example.com/old.exe"}]}
+        ]"#;
+        let release = parse_release_for(json, true).expect("стабильный выпуск найден");
+        assert_eq!(release.version, "0.1.0", "бета не должна была выбраться");
+    }
+
+    #[test]
+    fn the_best_version_wins_not_the_first_listed() {
+        // GitHub сортирует по дате создания: первым может оказаться
+        // хотфикс старой линии. Прежний разбор взял бы его и сказал
+        // «установлена последняя версия».
+        let json = r#"[
+            {"tag_name":"v0.8.1","body":"хотфикс старой линии",
+             "assets":[{"browser_download_url":"https://example.com/hotfix.exe"}]},
+            {"tag_name":"v0.9.0","body":"",
+             "assets":[{"browser_download_url":"https://example.com/new.exe"}]}
+        ]"#;
+        let release = parse_release(json).unwrap();
+        assert_eq!(release.version, "0.9.0");
+        assert_eq!(release.download_url, "https://example.com/new.exe");
+    }
+
+    #[test]
+    fn rc_comes_after_any_beta() {
+        assert!(is_newer("1.0.0-rc.1", "1.0.0-beta.12"));
+        assert!(!is_newer("1.0.0-beta.12", "1.0.0-rc.1"));
     }
 }

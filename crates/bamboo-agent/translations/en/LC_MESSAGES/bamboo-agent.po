@@ -518,8 +518,8 @@ msgid "Больше всего потребляют"
 msgstr "Using the most"
 
 msgctxt "Widget"
-msgid "Bamboo пока только наблюдает. Действия появятся на этапе 0.4."
-msgstr "Bamboo only watches for now. Actions arrive in stage 0.4."
+msgid "Действия — в главном окне: двойной щелчок по значку в трее."
+msgstr "Actions live in the main window: double-click the tray icon."
 
 msgctxt "MainWindow"
 msgid "Собственный бюджет"
@@ -536,3 +536,7 @@ msgstr "Bamboo will start at logon with full rights and without a prompt."
 msgctxt "MainWindow"
 msgid "Обычный автозапуск прав не даёт: Bamboo стартует урезанным и не покажет историю загрузок, здоровье накопителя и имена задач. Задача планировщика решает это — подтверждение потребуется один раз, сейчас."
 msgstr "Plain autostart gives no rights: Bamboo starts reduced and will not show the boot history, drive health or task names. A scheduler task solves this — confirmation is needed once, now."
+
+msgctxt "MainWindow"
+msgid "Долгая загрузка"
+msgstr "Slow startup"

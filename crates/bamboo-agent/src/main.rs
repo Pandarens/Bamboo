@@ -173,6 +173,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     main_window.set_targets(ModelRc::new(VecModel::from(Vec::<TargetRow>::new())));
     main_window.set_boots(ModelRc::new(VecModel::from(Vec::<BootRow>::new())));
     main_window.set_budget(ModelRc::new(VecModel::from(Vec::<BudgetRow>::new())));
+    main_window.set_slow_starters(ModelRc::new(VecModel::from(Vec::<SlowStartRow>::new())));
     main_window.set_startup(ModelRc::new(VecModel::from(Vec::<StartupRow>::new())));
     main_window.set_record_cpu(ModelRc::new(VecModel::from(Vec::<f32>::new())));
     main_window.set_record_memory(ModelRc::new(VecModel::from(Vec::<f32>::new())));
@@ -227,6 +228,47 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let notifier = bamboo_sys::Notifier::new().ok();
     // О чём уже говорили: одно подвисание не должно всплывать дважды.
     let mut last_notified = String::new();
+
+    // Хвосты автоматики после падения. Убитый агент Drop не выполняет,
+    // и придержанные им процессы оставались придержанными. Возвращаем
+    // в фоне: журнал на диске, а задерживать запуск из-за него незачем.
+    std::thread::spawn(|| {
+        let reverted = actions::revert_stale_auto_holds();
+        if reverted > 0 {
+            eprintln!("возвращено придержанных с прошлого запуска: {reverted}");
+        }
+    });
+
+    // Виновники долгой загрузки. Читаются из журнала диагностики один раз
+    // при запуске, в фоне: чтение требует прав и занимает время, а меняется
+    // список только после перезагрузки.
+    let boot_costs: std::sync::Arc<std::sync::Mutex<Vec<bamboo_analyze::BootCost>>> =
+        std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    {
+        let weak = main_window.as_weak();
+        let costs = boot_costs.clone();
+        std::thread::spawn(move || {
+            // Без прав журнал закрыт — тогда список пуст, и предложений
+            // по загрузке просто не будет. Полоса о правах уже объясняет.
+            let found: Vec<bamboo_analyze::BootCost> = bamboo_sys::boot::boot_culprits(20)
+                .unwrap_or_default()
+                .into_iter()
+                .map(|culprit| bamboo_analyze::BootCost {
+                    name: culprit.name,
+                    total_ms: culprit.total_ms,
+                })
+                .collect();
+            if let Ok(mut slot) = costs.lock() {
+                *slot = found;
+            }
+            let costs = costs.clone();
+            let _ = slint::invoke_from_event_loop(move || {
+                if let Some(win) = weak.upgrade() {
+                    fill_slow_starters(&win, &costs);
+                }
+            });
+        });
+    }
 
     // Отказы человека. Читаются с диска при запуске: без этого
     // «больше не предлагать никогда» жило бы до выхода из программы,
@@ -453,12 +495,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Включение и выключение записи автозагрузки.
     {
         let weak = main_window.as_weak();
+        let startup_costs = boot_costs.clone();
         main_window.on_toggle_startup(move |name, wanted| {
             let Some(win) = weak.upgrade() else {
                 return;
             };
 
-            let note = match bamboo_sys::set_startup_enabled(&name, wanted) {
+            let outcome = bamboo_sys::set_startup_enabled(&name, wanted);
+            // Список «долгая загрузка» пересобирается тут же: выключенная
+            // запись обязана исчезнуть из предложений, иначе кнопка
+            // выглядит несработавшей.
+            fill_slow_starters(&win, &startup_costs);
+            let note = match outcome {
                 // Отвечаем по факту, а не по намерению: Windows может
                 // и отказать, и человек должен видеть, что вышло.
                 Ok(true) if wanted => format!("{name}: будет запускаться вместе с Windows."),
@@ -1503,18 +1551,26 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 // Автоматика работает независимо от окна: когда человека
                 // нет, окна тоже нет, а придерживать фоновую работу надо
                 // именно тогда.
+                //
+                // Выключенная автоматика не стоит ничего: прежде и при ней
+                // каждый тик открывалась база журнала ради списка, который
+                // никуда не шёл. Проверка нужна и на удержанное — если
+                // автоматику выключили, пока она что-то держала, вернуть
+                // обязаны.
                 {
-                    let applied = actions::AppliedActions::load();
-                    let limits = io_limits.borrow();
-                    let raw = mainwin::suggestions_for(&snapshot, &|pid| {
-                        limits.is_limited(pid) || !applied.marks(pid, false).is_empty()
-                    });
-                    drop(limits);
-
                     let mut pilot = tick_pilot.borrow_mut();
-                    let plan = pilot.decide(snapshot.user_idle_ms, &raw);
-                    if !plan.is_empty() {
-                        apply_autopilot_plan(&mut pilot, plan, &tick_holds);
+                    if pilot.enabled() || pilot.holding() > 0 {
+                        let applied = actions::AppliedActions::load();
+                        let limits = io_limits.borrow();
+                        let raw = mainwin::suggestions_for(&snapshot, &|pid| {
+                            limits.is_limited(pid) || !applied.marks(pid, false).is_empty()
+                        });
+                        drop(limits);
+
+                        let plan = pilot.decide(snapshot.user_idle_ms, &raw);
+                        if !plan.is_empty() {
+                            apply_autopilot_plan(&mut pilot, plan, &tick_holds);
+                        }
                     }
                 }
 
@@ -1693,6 +1749,40 @@ fn remedy_name(action: i32) -> &'static str {
         2 => "диск",
         _ => "прочее",
     }
+}
+
+/// Наполняет предложения «долгая загрузка»: измеренная цена записей
+/// автозагрузки из журнала диагностики.
+#[cfg(windows)]
+fn fill_slow_starters(main: &MainWindow, costs: &std::sync::Mutex<Vec<bamboo_analyze::BootCost>>) {
+    let costs = match costs.lock() {
+        Ok(costs) => costs,
+        Err(_) => return,
+    };
+    if costs.is_empty() {
+        return;
+    }
+
+    // Записи автозагрузки перечитываются на каждый вызов: это реестр,
+    // он дешёвый, а список обязан отражать только что выключенное.
+    let startup: Vec<bamboo_analyze::StartupEntry> = bamboo_sys::user_startup_items()
+        .unwrap_or_default()
+        .into_iter()
+        .map(|item| bamboo_analyze::StartupEntry {
+            name: item.name,
+            command: item.command,
+            enabled: item.enabled,
+        })
+        .collect();
+
+    let rows: Vec<SlowStartRow> = bamboo_analyze::slow_starters(&costs, &startup)
+        .into_iter()
+        .map(|starter| SlowStartRow {
+            name: SharedString::from(starter.startup_name),
+            reason: SharedString::from(starter.reason),
+        })
+        .collect();
+    replace(&main.get_slow_starters(), rows);
 }
 
 /// Наполняет список того, за чем можно понаблюдать.

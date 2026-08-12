@@ -1511,14 +1511,34 @@ fn rows_from(
 
     let note = if suggestions.is_empty() {
         if snapshot.user_idle_ms < bamboo_analyze::suggest::IDLE_BEFORE_SUGGESTING_MS {
-            "Пока вы за компьютером, Bamboo не предлагает придерживать программы: \
-             любая из них может понадобиться вам сию секунду. Предложения появятся, \
-             если система будет чем-то занята в ваше отсутствие."
-                .to_string()
+            // Честно про устройство раздела. Прежняя редакция обещала, что
+            // «предложения появятся в ваше отсутствие», — но появиться-то
+            // они появятся, а увидеть их человек не может: первое же
+            // движение мыши сбрасывает простой, и на следующем тике строки
+            // исчезают. Обещание, которое нельзя застать, — обман.
+            bamboo_core::pick(
+                "Пока вы за компьютером, Bamboo не предлагает придерживать \
+                 программы: любая может понадобиться вам сию секунду. Такие \
+                 предложения выполняет автопилот в ваше отсутствие — если он \
+                 включён ниже, — и каждое его действие остаётся в журнале. \
+                 А то, что можно улучшить прямо сейчас, показано выше: \
+                 например, измеренная цена автозагрузки.",
+                "While you are at the computer, Bamboo does not offer to hold \
+                 programs back: any of them may be needed this very second. \
+                 Such actions are carried out by the autopilot while you are \
+                 away — if it is enabled below — and each one is journaled. \
+                 What can be improved right now is shown above: for example, \
+                 the measured cost of autostart entries.",
+            )
+            .to_string()
         } else {
-            "Улучшать нечего: никто не шумит в фоне. Это нормальный исход, \
-             а не признак того, что Bamboo плохо посмотрел."
-                .to_string()
+            bamboo_core::pick(
+                "Улучшать нечего: никто не шумит в фоне. Это нормальный исход, \
+                 а не признак того, что Bamboo плохо посмотрел.",
+                "Nothing to improve: nothing is making noise in the background. \
+                 That is a normal outcome, not a sign Bamboo looked poorly.",
+            )
+            .to_string()
         }
     } else {
         String::new()

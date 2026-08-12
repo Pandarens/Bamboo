@@ -11,8 +11,8 @@
 use bamboo_core::{Error, Result};
 use windows_sys::Win32::Foundation::ERROR_SUCCESS;
 use windows_sys::Win32::System::Registry::{
-    RegCloseKey, RegEnumValueW, RegOpenKeyExW, RegQueryValueExW, RegSetValueExW, HKEY,
-    HKEY_CURRENT_USER, KEY_READ, KEY_SET_VALUE, REG_BINARY, REG_SZ,
+    RegCloseKey, RegCreateKeyExW, RegEnumValueW, RegOpenKeyExW, RegQueryValueExW, RegSetValueExW,
+    HKEY, HKEY_CURRENT_USER, KEY_READ, KEY_SET_VALUE, REG_BINARY, REG_SZ,
 };
 
 const RUN_KEY: &str = "Software\\Microsoft\\Windows\\CurrentVersion\\Run";
@@ -35,6 +35,38 @@ pub struct StartupItem {
 struct Key(HKEY);
 
 impl Key {
+    /// Открывает ключ, создавая его при отсутствии.
+    ///
+    /// Нужен для записи в `StartupApproved`: у человека, который ни разу
+    /// не выключал автозагрузку — ни диспетчером задач, ни чем-то ещё, —
+    /// этого раздела попросту нет, и открытие без создания падает
+    /// с «кодом 2». Вскрылось на свежем раннере CI, но касается и живых
+    /// машин: кнопка «Выключить» в разделе «Автозапуск» падала бы так же.
+    fn open_or_create(path: &str, access: u32) -> Result<Key> {
+        let wide: Vec<u16> = path.encode_utf16().chain(core::iter::once(0)).collect();
+        let mut handle: HKEY = core::ptr::null_mut();
+        let status = unsafe {
+            RegCreateKeyExW(
+                HKEY_CURRENT_USER,
+                wide.as_ptr(),
+                0,
+                core::ptr::null(),
+                0,
+                access,
+                core::ptr::null(),
+                &mut handle,
+                core::ptr::null_mut(),
+            )
+        };
+        if status != ERROR_SUCCESS {
+            return Err(Error::Win32 {
+                call: "RegCreateKeyExW",
+                code: status,
+            });
+        }
+        Ok(Key(handle))
+    }
+
     fn open(path: &str, access: u32) -> Result<Key> {
         let wide: Vec<u16> = path.encode_utf16().chain(core::iter::once(0)).collect();
         let mut handle: HKEY = core::ptr::null_mut();
@@ -139,7 +171,9 @@ fn is_enabled(name: &str) -> Result<bool> {
 pub fn set_startup_enabled(name: &str, enabled: bool) -> Result<bool> {
     let before = is_enabled(name)?;
 
-    let approved = Key::open(APPROVED_KEY, KEY_SET_VALUE)?;
+    // Создаём раздел, если его нет: у человека, ни разу не выключавшего
+    // автозагрузку, StartupApproved не существует.
+    let approved = Key::open_or_create(APPROVED_KEY, KEY_SET_VALUE)?;
     let wide: Vec<u16> = name.encode_utf16().chain(core::iter::once(0)).collect();
 
     // 12 байт, как пишет диспетчер задач: маркер и время отключения.
