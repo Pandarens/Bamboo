@@ -1499,7 +1499,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 // История: копим каждый тик, пишем раз в несколько часов.
                 if let Some(history) = &mut history {
                     let now = started.elapsed().as_millis() as u64;
-                    history.observe(&snapshot, now);
+                    history.observe(&snapshot);
                     if history.due(now) {
                         if let Err(error) = history.flush(now) {
                             eprintln!("историю записать не удалось: {error}");

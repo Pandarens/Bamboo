@@ -89,7 +89,7 @@ impl History {
     /// Только копит: на диск ничего не идёт до сброса. Писать каждый тик
     /// значило бы тысячи мелких записей в час — то самое изнашивание,
     /// за которое Bamboo ругает других.
-    pub fn observe(&mut self, snapshot: &Snapshot, now_ms: u64) {
+    pub fn observe(&mut self, snapshot: &Snapshot) {
         let mut top: Vec<&crate::collector::ProcessLine> = snapshot.top.iter().collect();
         top.sort_by_key(|line| core::cmp::Reverse(line.memory.as_u64()));
 
@@ -131,7 +131,7 @@ impl History {
             // и пределы Bucket::merge взвешивает по числу замеров.
             let empty = bamboo_store::Bucket {
                 samples: 0,
-                ..bucket.clone()
+                ..bucket
             };
             let slot = self
                 .pending
@@ -139,7 +139,7 @@ impl History {
                 .or_default()
                 .entry(bucket_ms)
                 .or_insert(empty);
-            *slot = slot.clone().merge(bucket);
+            *slot = slot.merge(bucket);
         }
     }
 
@@ -224,8 +224,8 @@ mod tests {
             ..Default::default()
         };
 
-        for tick in 0..3600 {
-            history.observe(&snapshot, tick * 1000);
+        for _ in 0..3600 {
+            history.observe(&snapshot);
         }
 
         let buckets: usize = history.pending.values().map(|by| by.len()).sum();
@@ -253,8 +253,8 @@ mod tests {
             ..Default::default()
         };
 
-        for tick in 0..100 {
-            history.observe(&snapshot, tick * 1000);
+        for _ in 0..100 {
+            history.observe(&snapshot);
         }
         assert_eq!(history.pending_apps(), 1, "накоплено, но не записано");
         assert!(!history.due(99_000), "сброс раньше срока");
@@ -267,13 +267,10 @@ mod tests {
         // вместо обещанных двадцати. Бюджет важнее буквы, и проверяем
         // это через поведение, а не сравнением константы с числом.
         let mut history = history();
-        history.observe(
-            &Snapshot {
-                top: vec![line("chrome.exe", 4000)],
-                ..Default::default()
-            },
-            0,
-        );
+        history.observe(&Snapshot {
+            top: vec![line("chrome.exe", 4000)],
+            ..Default::default()
+        });
         // Через час после запуска сбрасывать ещё рано.
         assert!(!history.due(60 * 60 * 1000));
     }
@@ -287,13 +284,10 @@ mod tests {
             .map(|n| line(&format!("процесс{n}.exe"), n))
             .collect();
 
-        history.observe(
-            &Snapshot {
-                top: many,
-                ..Default::default()
-            },
-            0,
-        );
+        history.observe(&Snapshot {
+            top: many,
+            ..Default::default()
+        });
         assert_eq!(history.pending_apps(), TOP_APPS);
     }
 
@@ -307,13 +301,10 @@ mod tests {
             .collect();
         many.push(line("важный.exe", 100_000));
 
-        history.observe(
-            &Snapshot {
-                top: many,
-                ..Default::default()
-            },
-            0,
-        );
+        history.observe(&Snapshot {
+            top: many,
+            ..Default::default()
+        });
         assert_eq!(history.pending_apps(), TOP_APPS);
         assert!(history.pending.contains_key("важный.exe"));
     }
@@ -321,13 +312,10 @@ mod tests {
     #[test]
     fn a_flush_writes_and_empties_the_buffer() {
         let mut history = history();
-        history.observe(
-            &Snapshot {
-                top: vec![line("chrome.exe", 4000), line("code.exe", 2000)],
-                ..Default::default()
-            },
-            0,
-        );
+        history.observe(&Snapshot {
+            top: vec![line("chrome.exe", 4000), line("code.exe", 2000)],
+            ..Default::default()
+        });
 
         assert_eq!(history.flush(1000).unwrap(), 2);
         assert_eq!(history.pending_apps(), 0, "после сброса копить заново");
