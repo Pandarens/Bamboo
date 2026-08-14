@@ -42,8 +42,16 @@ const TOP_APPS: usize = 50;
 /// Накопитель наблюдений между сбросами.
 pub struct History {
     store: Store,
-    /// Что накопилось с прошлого сброса: приложение и его точки.
-    pending: std::collections::HashMap<String, Vec<bamboo_store::Bucket>>,
+    /// Что накопилось с прошлого сброса: по приложению — корзины,
+    /// разложенные по началу 15-минутного интервала.
+    ///
+    /// Именно корзины, а не сырые точки. Первая редакция копила по точке
+    /// на тик и сбрасывала их как есть — по строке в секунду на каждое
+    /// из полусотни приложений. Сутки работы дали 181 тысячу строк
+    /// и девять мегабайт: за месяц база вылезла бы за предел в 200 МБ
+    /// из раздела 8 ТЗ. Замер с живой машины, не прикидка.
+    pending:
+        std::collections::HashMap<String, std::collections::HashMap<i64, bamboo_store::Bucket>>,
     /// Когда сбрасывали в последний раз, по монотонным часам.
     flushed_at: u64,
 }
@@ -85,10 +93,16 @@ impl History {
         let mut top: Vec<&crate::collector::ProcessLine> = snapshot.top.iter().collect();
         top.sort_by_key(|line| core::cmp::Reverse(line.memory.as_u64()));
 
+        // Начало 15-минутного интервала — то же выравнивание, что у уровня
+        // L2 в хранилище. Время по стенным часам: корзины в базе живут
+        // в них, а монотонные часы начинаются с запуска агента.
+        let wall_ms = bamboo_core::SampleTime::wall_clock_now();
+        let bucket_ms = bamboo_store::bucket_start(wall_ms, bamboo_store::L2_BUCKET_MS);
+
         for line in top.into_iter().take(TOP_APPS) {
             let memory_kib = (line.memory.as_u64() / 1024) as u32;
             let bucket = bamboo_store::Bucket {
-                start_ms: now_ms as i64,
+                start_ms: bucket_ms,
                 samples: 1,
                 // Доля процессора в миллисекундах за тик. Тик секундный,
                 // поэтому проценты и миллисекунды сходятся один к одному.
@@ -113,10 +127,19 @@ impl History {
                     max: line.threads,
                 },
             };
-            self.pending
+            // Слияние в корзину интервала, а не накопление точек: средние
+            // и пределы Bucket::merge взвешивает по числу замеров.
+            let empty = bamboo_store::Bucket {
+                samples: 0,
+                ..bucket.clone()
+            };
+            let slot = self
+                .pending
                 .entry(line.name.clone())
                 .or_default()
-                .push(bucket);
+                .entry(bucket_ms)
+                .or_insert(empty);
+            *slot = slot.clone().merge(bucket);
         }
     }
 
@@ -138,11 +161,13 @@ impl History {
         let pending = core::mem::take(&mut self.pending);
         let written = pending.len();
 
-        for (name, buckets) in pending {
+        for (name, by_interval) in pending {
             let app_id = self
                 .store
                 .app_id(&name, &name, now_ms as i64)
                 .map_err(|error| error.to_string())?;
+            let mut buckets: Vec<bamboo_store::Bucket> = by_interval.into_values().collect();
+            buckets.sort_by_key(|bucket| bucket.start_ms);
             self.store
                 .write_buckets(Level::L2, app_id, &buckets)
                 .map_err(|error| error.to_string())?;
@@ -186,6 +211,36 @@ mod tests {
             pending: std::collections::HashMap::new(),
             flushed_at: 0,
         }
+    }
+
+    #[test]
+    fn hours_of_ticks_collapse_into_quarter_hour_buckets() {
+        // Ошибка, найденная замером на живой машине: сырые точки давали
+        // 181 тысячу строк за сутки. Час тиков раз в секунду обязан
+        // схлопнуться в считанные корзины на приложение, а не в 3600.
+        let mut history = history();
+        let snapshot = Snapshot {
+            top: vec![line("chrome.exe", 4000)],
+            ..Default::default()
+        };
+
+        for tick in 0..3600 {
+            history.observe(&snapshot, tick * 1000);
+        }
+
+        let buckets: usize = history.pending.values().map(|by| by.len()).sum();
+        assert!(
+            buckets <= 6,
+            "час наблюдения дал {buckets} корзин — точки не слились"
+        );
+        // И замеры не потерялись: их число сохранено внутри корзин.
+        let samples: u32 = history
+            .pending
+            .values()
+            .flat_map(|by| by.values())
+            .map(|bucket| bucket.samples)
+            .sum();
+        assert_eq!(samples, 3600, "слияние потеряло замеры");
     }
 
     #[test]
