@@ -30,6 +30,11 @@ pub struct DiskCounters {
     pub query_time: i64,
     /// Сколько запросов ждёт очереди прямо сейчас.
     pub queue_depth: u32,
+    /// Сколько операций чтения и записи накопитель выполнил всего.
+    /// Нужны, чтобы поделить на них время и получить задержку одной
+    /// операции — то, что человек и чувствует.
+    pub read_count: u32,
+    pub write_count: u32,
 }
 
 /// Что происходило с накопителем между двумя замерами.
@@ -42,6 +47,19 @@ pub struct DiskActivity {
     pub read_per_second: Bytes,
     pub write_per_second: Bytes,
     pub queue_depth: u32,
+    /// Сколько в среднем занимает одна операция, миллисекунды.
+    ///
+    /// Честный признак «диск не успевает», в отличие от длины очереди.
+    /// Очередь сама по себе ничего не значит: у NVMe их десятки штук
+    /// по тысяче команд, и глубокая очередь там — признак хорошей
+    /// пропускной способности, а не беды. А вот когда одна операция
+    /// занимает сто миллисекунд, ждёт всё, что к диску обратилось,
+    /// и человек это видит.
+    ///
+    /// Ноль означает «за интервал не было ни одной операции», а не
+    /// «мгновенно»: делить на ноль и выдавать результат за измерение
+    /// нельзя.
+    pub latency_ms: f64,
 }
 
 impl DiskActivity {
@@ -79,6 +97,8 @@ pub fn read_counters(drive: &Drive) -> Result<DiskCounters> {
         idle_time: raw.IdleTime,
         query_time: raw.QueryTime,
         queue_depth: raw.QueueDepth,
+        read_count: raw.ReadCount,
+        write_count: raw.WriteCount,
     })
 }
 
@@ -108,12 +128,29 @@ pub fn activity_between(before: DiskCounters, after: DiskCounters) -> Option<Dis
     let read = after.bytes_read.saturating_sub(before.bytes_read);
     let written = after.bytes_written.saturating_sub(before.bytes_written);
 
+    // Задержка одной операции: всё время обслуживания, поделённое на число
+    // обслуженных запросов. Счётчики 32-разрядные и переполняются, поэтому
+    // разность берём с переносом — иначе на переполнении вышло бы огромное
+    // отрицательное число операций и бессмысленная задержка.
+    let operations = after
+        .read_count
+        .wrapping_sub(before.read_count)
+        .saturating_add(after.write_count.wrapping_sub(before.write_count));
+    let latency_ms = if operations == 0 {
+        0.0
+    } else {
+        // Времена в единицах по 100 нс: делим на 10 000, чтобы получить
+        // миллисекунды.
+        busy_time as f64 / operations as f64 / 10_000.0
+    };
+
     Some(DiskActivity {
         index: after.index,
         busy,
         read_per_second: Bytes((read as f64 / seconds) as u64),
         write_per_second: Bytes((written as f64 / seconds) as u64),
         queue_depth: after.queue_depth,
+        latency_ms,
     })
 }
 
@@ -241,6 +278,8 @@ mod tests {
             idle_time: 0,
             query_time: at,
             queue_depth: 0,
+            read_count: 0,
+            write_count: 0,
         }
     }
 

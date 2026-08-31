@@ -2016,6 +2016,7 @@ mod explain_tests {
                 read_per_second: bamboo_core::Bytes(0),
                 write_per_second: bamboo_core::Bytes(0),
                 queue_depth: 0,
+                latency_ms: 0.0,
                 saturated: true,
             }],
             ..Default::default()

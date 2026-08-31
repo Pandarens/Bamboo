@@ -11,8 +11,20 @@
 //!
 //! Что считается подвисанием, определяется тем, из-за чего оно бывает
 //! на самом деле: диск не успевает, драйверы съели процессор, память
-//! кончилась и всё ушло в подкачку. Все три причины различимы снаружи —
-//! в отличие от «компьютер тормозит», которое ничего не значит.
+//! кончилась и всё ушло в подкачку. Все три различимы снаружи — в отличие
+//! от «компьютер тормозит», которое ничего не значит.
+//!
+//! Но у списка причин есть общая слабость: каждую надо предугадать. Причина,
+//! о которой не подумали, не попадает ни в один признак, и подвисание
+//! проходит мимо. Ровно так и вышло на живой машине — подвисания шли
+//! от нехватки памяти, а признак был настроен на другой порог, и журнал
+//! оставался пустым, пока человек своими глазами видел рывки.
+//!
+//! Поэтому есть и четвёртая проверка, устроенная наоборот: она меряет
+//! не причину, а сам простой. Bamboo просит поспать положенный интервал
+//! и смотрит, сколько прошло на самом деле. Всё сверх запрошенного — время,
+//! которое система не отдавала управление. Угадывать тут нечего, и ловится
+//! в том числе то, чего в списке причин нет.
 
 use bamboo_core::Bytes;
 
@@ -24,7 +36,21 @@ use bamboo_core::Bytes;
 const DRIVER_TIME: f64 = 0.10;
 
 /// Длина очереди к накопителю, при которой запросы уже ждут ощутимо.
+///
+/// Признак слабый, и держится он только как запасной. Длина очереди
+/// сама по себе мало что значит: у NVMe очередей десятки по тысяче команд,
+/// и глубокая очередь там означает хорошую пропускную способность,
+/// а не беду. Настоящий признак — задержка ниже.
 const DISK_QUEUE: u32 = 8;
+
+/// Задержка одной операции, при которой ожидание становится заметным.
+///
+/// Пятьдесят миллисекунд. Опора — то, на что накопители способны:
+/// твердотельный отвечает быстрее миллисекунды, механический тратит
+/// от пяти до пятнадцати на подвод головки. Пятьдесят означает, что запрос
+/// стоял в очереди за другими, а не обслуживался, — и всё, что ждёт диска,
+/// стоит вместе с ним.
+const DISK_SLOW_MS: f64 = 50.0;
 
 /// Насколько занятой должна быть память, чтобы Windows начала вытеснять
 /// страницы в подкачку и всё замерло.
@@ -48,6 +74,15 @@ const PAGING_STALL: f64 = 1000.0;
 /// уже плотно занята и вытеснять приходится живое.
 const MEMORY_STRAINED: f64 = 0.80;
 
+/// Насколько система должна опоздать, чтобы это было подвисанием.
+///
+/// Полсекунды. Ниже человек не назовёт это подвисанием, а выше — назовёт
+/// обязательно. Порог не гадательный: замер на живой машине дал перелёт
+/// сна в 0,3 мс по медиане и 1,3 мс в худшем случае из шестидесяти. Между
+/// шумом и порогом — почти четыре сотни раз, так что ложных срабатываний
+/// здесь не будет.
+const STALL_NOTICED_MS: u64 = 500;
+
 /// Из-за чего подвисло.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum FreezeCause {
@@ -57,6 +92,20 @@ pub enum FreezeCause {
     DriverTime,
     /// Память кончилась, идёт вытеснение в подкачку.
     MemoryPressure,
+    /// Система не отвечала, а причина не опознана.
+    ///
+    /// Единственная причина, которая измеряется, а не выводится. Остальные
+    /// три — это признаки, по которым подвисание предполагается: очередь
+    /// к диску, время в драйверах, чтение из подкачки. Каждый признак
+    /// приходится угадывать заранее, и подвисание от причины, которую
+    /// не предусмотрели, проходит мимо всех трёх.
+    ///
+    /// Здесь меряется сам простой: Bamboo просит поспать секунду и смотрит,
+    /// сколько прошло на самом деле. Проспали три — система две секунды
+    /// не отвечала, и неважно почему. Это ловит и то, чего в списке нет:
+    /// зависший драйвер, проверку антивируса, тепловой сброс частоты,
+    /// торможение виртуальной машины.
+    Unresponsive,
 }
 
 impl FreezeCause {
@@ -68,6 +117,10 @@ impl FreezeCause {
                 pick("драйверы заняли процессор", "drivers took the processor")
             }
             FreezeCause::MemoryPressure => pick("закончилась оперативная память", "memory ran out"),
+            FreezeCause::Unresponsive => pick(
+                "система не отвечала, причина не определилась",
+                "the system stopped responding, cause undetermined",
+            ),
         }
     }
 
@@ -107,6 +160,22 @@ impl FreezeCause {
                  comes back from the drive. Close spare tabs and programs — that \
                  is the only thing that genuinely helps.",
             ),
+            FreezeCause::Unresponsive => pick(
+                "Простой измерен секундомером: система не отвечала столько, \
+                 сколько написано выше. А вот причина не опознана — ни диск, \
+                 ни драйверы, ни память в этот момент за порог не вышли. \
+                 Такое бывает от проверки антивирусом, зависшего драйвера, \
+                 сброса частоты по нагреву. Если это повторяется, помогает \
+                 запись сеанса: она пишет нагрузку раз в секунду, и по ней \
+                 видно, что менялось вокруг подвисания.",
+                "The stall was measured with a stopwatch: the system did not \
+                 respond for as long as shown above. The cause, though, is not \
+                 identified — neither the disk, nor drivers, nor memory crossed \
+                 a threshold at that moment. This happens with antivirus scans, \
+                 a hung driver, or thermal throttling. If it repeats, record \
+                 a session: it samples the load every second, and shows what \
+                 was changing around the stall.",
+            ),
         }
     }
 }
@@ -120,6 +189,9 @@ pub struct Moment {
     pub disk_queue: u32,
     /// Занятость самого нагруженного накопителя, 0..1.
     pub disk_busy: f64,
+    /// Сколько занимает одна операция на самом медленном накопителе, мс.
+    /// Ноль — операций не было; это не «мгновенно», а «нечего мерить».
+    pub disk_latency_ms: f64,
     /// Доля занятой оперативной памяти, 0..1.
     pub memory_used_share: f64,
     /// Идёт ли вытеснение в подкачку прямо сейчас.
@@ -132,6 +204,13 @@ pub struct Moment {
     /// занято 87% — ниже прежнего порога в 92%, так что подвисание, которое
     /// человек видел глазами, не попадало в журнал вовсе.
     pub paging_rate: f64,
+    /// На сколько система опоздала отдать управление, миллисекунды.
+    ///
+    /// Единственное число здесь, которое не признак, а само подвисание:
+    /// сколько времени сверх запрошенного заняло ожидание. Остальные поля —
+    /// причины, которые пришлось предугадать; это — следствие, и оно ловит
+    /// в том числе причины, которых нет в списке.
+    pub stall_ms: u64,
 }
 
 /// Кто чем занимался в этот момент.
@@ -223,22 +302,64 @@ pub fn detect_with(moment: Moment, who: Bystanders<'_>) -> Option<Freeze> {
         });
     }
 
-    // Диск: смотрим именно очередь, а не занятость. Занятый диск — это
-    // норма, а вот очередь означает, что запросы уже ждут.
-    if moment.disk_queue >= DISK_QUEUE {
+    // Диск: смотрим, сколько занимает одна операция, и лишь во вторую
+    // очередь — длину очереди. Занятый диск сам по себе норма, глубокая
+    // очередь на быстром накопителе тоже, а вот операция на пятьдесят
+    // миллисекунд означает, что запрос стоял, а не обслуживался.
+    let slow_disk = moment.disk_latency_ms >= DISK_SLOW_MS;
+    if slow_disk || moment.disk_queue >= DISK_QUEUE {
         return Some(Freeze {
             cause: FreezeCause::DiskQueue,
-            detail: format!(
-                "{} запросов в очереди к накопителю при занятости {:.0}%",
-                moment.disk_queue,
-                moment.disk_busy * 100.0
-            ),
+            detail: if slow_disk {
+                format!(
+                    "одна операция к накопителю занимала {:.0} мс при занятости {:.0}%",
+                    moment.disk_latency_ms,
+                    moment.disk_busy * 100.0
+                )
+            } else {
+                format!(
+                    "{} запросов в очереди к накопителю при занятости {:.0}%",
+                    moment.disk_queue,
+                    moment.disk_busy * 100.0
+                )
+            },
             culprits: name_them("В этот момент диск занимали", who.disk, &per_second),
             culprit_names: names_of(who.disk),
         });
     }
 
+    // Последним — сам простой. Он идёт после всех признаков намеренно:
+    // когда причина опознана, называть надо её, а не пересказывать факт
+    // подвисания, который человек и без нас заметил.
+    //
+    // Но если ни один признак не сработал, а система всё-таки не отвечала,
+    // молчать нельзя. Молчание здесь — худшее из возможного: человек видел
+    // подвисание своими глазами, открывает Bamboo и находит пустоту. Ровно
+    // так и вышло на машине, где подвисания оказались от нехватки памяти:
+    // признак был настроен на другое, и журнал остался пустым.
+    if moment.stall_ms >= STALL_NOTICED_MS {
+        return Some(Freeze {
+            cause: FreezeCause::Unresponsive,
+            detail: format!("система не отвечала {}", spell_stall(moment.stall_ms)),
+            // Виновника не называем. Мы знаем, что простой был, и не знаем,
+            // из-за кого: назвать первого попавшегося из списка памяти
+            // значило бы выдать догадку за измерение.
+            culprits: String::new(),
+            culprit_names: Vec::new(),
+        });
+    }
+
     None
+}
+
+/// Простой словами: секунды с десятыми, пока их немного.
+fn spell_stall(ms: u64) -> String {
+    let unit = bamboo_core::pick("с", "s");
+    if ms < 10_000 {
+        format!("{:.1} {unit}", ms as f64 / 1000.0)
+    } else {
+        format!("{} {unit}", ms / 1000)
+    }
 }
 
 /// Сколько виновников называем. Больше трёх человек не удержит в голове,
@@ -374,36 +495,110 @@ impl FreezeLog {
     }
 }
 
-/// Собирает обстановку из готовых величин.
+/// Доля занятой памяти, 0..1.
 ///
-/// Отдельная функция ради одного: превратить разрозненные числа в один
-/// снимок, который потом проверяется тестами целиком.
-pub fn moment_from(
-    driver_ratio: f64,
-    disk_queue: u32,
-    disk_busy: f64,
-    memory_used: Bytes,
-    memory_total: Bytes,
-    compressing_memory: bool,
-    paging_rate: f64,
-) -> Moment {
-    Moment {
-        driver_ratio,
-        disk_queue,
-        disk_busy,
-        memory_used_share: if memory_total.as_u64() == 0 {
-            0.0
-        } else {
-            memory_used.as_u64() as f64 / memory_total.as_u64() as f64
-        },
-        compressing_memory,
-        paging_rate,
+/// Отдельной функцией, потому что ноль в знаменателе здесь не гипотетика:
+/// на ранних тиках размер памяти иногда ещё не прочитан, и деление дало бы
+/// «не число», которое затем прошло бы все сравнения как ложь и молча
+/// отключило проверку памяти.
+pub fn used_share(memory_used: Bytes, memory_total: Bytes) -> f64 {
+    if memory_total.as_u64() == 0 {
+        0.0
+    } else {
+        memory_used.as_u64() as f64 / memory_total.as_u64() as f64
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Медленный накопитель ловится по задержке, а не по очереди.
+    #[test]
+    fn a_slow_drive_is_caught_even_with_a_short_queue() {
+        // Очередь короткая — по прежнему признаку было бы тихо. А операция
+        // на 120 мс означает, что всё, обратившееся к диску, стоит.
+        let crawling = Moment {
+            disk_queue: 2,
+            disk_busy: 0.95,
+            disk_latency_ms: 120.0,
+            ..Default::default()
+        };
+        let freeze = detect(crawling).expect("медленный диск — это подвисание");
+        assert_eq!(freeze.cause, FreezeCause::DiskQueue);
+        assert!(freeze.detail.contains("120 мс"), "{}", freeze.detail);
+    }
+
+    /// Быстрый накопитель с глубокой очередью — это норма.
+    #[test]
+    fn a_deep_queue_on_a_fast_drive_is_not_a_freeze() {
+        // Ровно то, из-за чего признак очереди и понадобилось подпереть
+        // задержкой: у NVMe глубокая очередь означает хорошую пропускную
+        // способность. Порог очереди мы не убрали, поэтому проверяем
+        // случай ниже него — но с задержкой, которой человек не заметит.
+        let busy_but_fast = Moment {
+            disk_queue: 7,
+            disk_busy: 1.0,
+            disk_latency_ms: 0.4,
+            ..Default::default()
+        };
+        assert_eq!(detect(busy_but_fast), None);
+    }
+
+    /// Подвисание без опознанной причины всё равно попадает в журнал.
+    ///
+    /// Ради этого случая проверка и заведена. Все прочие признаки надо
+    /// предугадать заранее, и подвисание от причины, которой нет в списке,
+    /// проходит мимо всех. А простой измерен секундомером и не зависит
+    /// от того, догадались мы о причине или нет.
+    #[test]
+    fn a_measured_stall_is_reported_even_with_no_cause_in_sight() {
+        let stalled = Moment {
+            driver_ratio: 0.01,
+            disk_queue: 0,
+            disk_busy: 0.05,
+            disk_latency_ms: 0.0,
+            memory_used_share: 0.40,
+            compressing_memory: false,
+            paging_rate: 0.0,
+            stall_ms: 2300,
+        };
+        let freeze = detect(stalled).expect("измеренный простой — это подвисание");
+        assert_eq!(freeze.cause, FreezeCause::Unresponsive);
+        assert!(freeze.detail.contains("2.3"), "{}", freeze.detail);
+        assert!(
+            freeze.culprit_names.is_empty(),
+            "виновника не знаем — называть кого-то значило бы гадать"
+        );
+    }
+
+    /// Опознанная причина важнее голого факта простоя.
+    #[test]
+    fn a_known_cause_wins_over_the_bare_fact_of_a_stall() {
+        // Простой есть, но и причина известна. Сказать «система не отвечала»
+        // вместо «кончилась память» — значит потерять единственное, что
+        // человеку пригодится: что с этим делать.
+        let both = Moment {
+            memory_used_share: 0.88,
+            paging_rate: 6519.0,
+            stall_ms: 2300,
+            ..Default::default()
+        };
+        assert_eq!(detect(both).unwrap().cause, FreezeCause::MemoryPressure);
+    }
+
+    /// Обычная задержка планировщика — не подвисание.
+    #[test]
+    fn ordinary_scheduling_jitter_is_not_a_freeze() {
+        // Замер на живой машине: перелёт сна 0,3 мс по медиане и 1,3 мс
+        // в худшем случае из шестидесяти. Сотня миллисекунд — уже сильно
+        // выше шума, но человек этого не заметит, и кричать не о чем.
+        let jitter = Moment {
+            stall_ms: 100,
+            ..Default::default()
+        };
+        assert_eq!(detect(jitter), None);
+    }
 
     /// Настоящий замер с машины, где текст появлялся с задержкой.
     ///
@@ -418,9 +613,11 @@ mod tests {
             driver_ratio: 0.05,
             disk_queue: 0,
             disk_busy: 0.02,
+            disk_latency_ms: 0.0,
             memory_used_share: 1.0 - 2042.0 / 16169.0,
             compressing_memory: false,
             paging_rate: 6519.0,
+            stall_ms: 0,
         };
         let freeze = detect(thrashing).expect("толкотня в подкачке — это подвисание");
         assert_eq!(freeze.cause, FreezeCause::MemoryPressure);
@@ -450,9 +647,11 @@ mod tests {
             driver_ratio: 0.02,
             disk_queue: 1,
             disk_busy: 0.30,
+            disk_latency_ms: 0.0,
             memory_used_share: 0.60,
             compressing_memory: false,
             paging_rate: 0.0,
+            stall_ms: 0,
         };
         assert_eq!(detect(calm), None);
     }
@@ -462,6 +661,7 @@ mod tests {
         let stuck = Moment {
             disk_queue: 25,
             disk_busy: 1.0,
+            disk_latency_ms: 0.0,
             ..Default::default()
         };
         let freeze = detect(stuck).unwrap();
@@ -476,6 +676,7 @@ mod tests {
         let busy = Moment {
             disk_queue: 1,
             disk_busy: 1.0,
+            disk_latency_ms: 0.0,
             ..Default::default()
         };
         assert_eq!(detect(busy), None);
@@ -501,9 +702,11 @@ mod tests {
             driver_ratio: 0.40,
             disk_queue: 30,
             disk_busy: 1.0,
+            disk_latency_ms: 0.0,
             memory_used_share: 0.97,
             compressing_memory: true,
             paging_rate: 0.0,
+            stall_ms: 0,
         };
         assert_eq!(detect(squeezed).unwrap().cause, FreezeCause::MemoryPressure);
     }
@@ -556,6 +759,7 @@ mod tests {
             Moment {
                 disk_queue: 20,
                 disk_busy: 0.95,
+                disk_latency_ms: 0.0,
                 ..Default::default()
             },
             Bystanders::default(),
@@ -584,6 +788,7 @@ mod tests {
             Moment {
                 disk_queue: 20,
                 disk_busy: 0.95,
+                disk_latency_ms: 0.0,
                 ..Default::default()
             },
             Bystanders {

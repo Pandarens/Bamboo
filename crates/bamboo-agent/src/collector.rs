@@ -118,6 +118,10 @@ pub struct DiskLine {
     pub read_per_second: Bytes,
     pub write_per_second: Bytes,
     pub queue_depth: u32,
+    /// Сколько занимает одна операция, миллисекунды. Честный признак
+    /// «диск не успевает»: длина очереди на быстром накопителе означает
+    /// пропускную способность, а задержка — ожидание.
+    pub latency_ms: f64,
     /// Занят настолько, что это уже мешает.
     pub saturated: bool,
 }
@@ -217,6 +221,9 @@ fn run(sender: Sender<Snapshot>, visible: WidgetVisible) {
     // потому что подвисания начинаются задолго до того, как она упрётся
     // в потолок.
     let mut paging_counter = bamboo_sys::paging::PagingCounter::open().ok();
+    // Простой, измеренный на прошлом сне. Ноль до первого сна: мерить
+    // ещё нечего, а выдумывать число нельзя.
+    let mut stall_ms: u64 = 0;
 
     loop {
         collector.set_widget_open(visible.load(Ordering::Relaxed));
@@ -227,6 +234,10 @@ fn run(sender: Sender<Snapshot>, visible: WidgetVisible) {
                 // Разовый сбой опроса не повод убивать поток: следующий тик
                 // почти наверняка пройдёт.
                 std::thread::sleep(collector.next_interval());
+                // Простой с прошлого сна отдавать некуда — тик не состоялся.
+                // Перенести его на следующий значило бы приписать подвисание
+                // не тому моменту.
+                stall_ms = 0;
                 continue;
             }
         };
@@ -312,6 +323,12 @@ fn run(sender: Sender<Snapshot>, visible: WidgetVisible) {
 
         // Проверяем обстановку на подвисание каждым тиком.
         let busiest = disks.iter().max_by(|a, b| a.busy.total_cmp(&b.busy));
+        // Самый медленный, а не самый занятый: занятость и медлительность —
+        // разные вещи. Накопитель бывает занят на сто процентов и при этом
+        // отвечать мгновенно, а бывает почти свободен и тормозить.
+        let slowest = disks
+            .iter()
+            .max_by(|a, b| a.latency_ms.total_cmp(&b.latency_ms));
         let compressing = top.iter().any(|line| {
             line.name.contains("Memory Compression") && line.memory.as_u64() > (128 << 20)
         });
@@ -323,15 +340,16 @@ fn run(sender: Sender<Snapshot>, visible: WidgetVisible) {
             .and_then(|counter| counter.read().ok())
             .unwrap_or(0.0);
 
-        let moment = bamboo_analyze::moment_from(
-            tick.driver_time(),
-            busiest.map_or(0, |disk| disk.queue_depth),
-            busiest.map_or(0.0, |disk| disk.busy),
-            used,
-            tick.system.memory.physical_total,
-            compressing,
+        let moment = bamboo_analyze::Moment {
+            driver_ratio: tick.driver_time(),
+            disk_queue: busiest.map_or(0, |disk| disk.queue_depth),
+            disk_busy: busiest.map_or(0.0, |disk| disk.busy),
+            disk_latency_ms: slowest.map_or(0.0, |disk| disk.latency_ms),
+            memory_used_share: bamboo_analyze::used_share(used, tick.system.memory.physical_total),
+            compressing_memory: compressing,
             paging_rate,
-        );
+            stall_ms,
+        };
         // Виновников снимаем здесь же, а не потом: пока человек откроет
         // окно, подвисание кончится и виновник разойдётся.
         let mut disk_hogs: Vec<(String, u64)> = top
@@ -409,7 +427,25 @@ fn run(sender: Sender<Snapshot>, visible: WidgetVisible) {
             return;
         }
 
-        std::thread::sleep(collector.next_interval());
+        // Спим — и заодно меряем подвисание. Приём прост до неприличия:
+        // просим поспать положенный интервал и смотрим, сколько прошло
+        // на самом деле. Всё, что сверх запрошенного, — это время, когда
+        // система нам управление не отдавала.
+        //
+        // Ценно это тем, что меряет подвисание, а не признак подвисания.
+        // Очередь к диску, время в драйверах, чтение из подкачки — каждый
+        // такой признак надо предугадать, и подвисание от непредугаданной
+        // причины проходит мимо всех. Простой не проходит мимо: он и есть
+        // то, что человек видит глазами.
+        //
+        // Часы берём без учёта сна: иначе ночь в спящем режиме превратится
+        // в восьмичасовое подвисание.
+        let asked = collector.next_interval();
+        let before_sleep = bamboo_sys::clock::unbiased_ms();
+        std::thread::sleep(asked);
+        stall_ms = bamboo_sys::clock::unbiased_ms()
+            .saturating_sub(before_sleep)
+            .saturating_sub(asked.as_millis() as u64);
     }
 }
 
@@ -532,6 +568,7 @@ fn read_disks(
                     read_per_second: activity.read_per_second,
                     write_per_second: activity.write_per_second,
                     queue_depth: activity.queue_depth,
+                    latency_ms: activity.latency_ms,
                     saturated: activity.is_saturated(),
                 });
             }
@@ -680,6 +717,7 @@ mod pressure_tests {
             read_per_second: Bytes::ZERO,
             write_per_second: Bytes::ZERO,
             queue_depth: 0,
+            latency_ms: 0.0,
             saturated: busy >= 0.85,
         }
     }

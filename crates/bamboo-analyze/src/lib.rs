@@ -30,7 +30,7 @@ pub mod wear;
 pub use baseline::{Baseline, Learning};
 pub use boot::{BootPoint, BootVerdict};
 pub use driver::DriverInput;
-pub use freeze::{moment_from, FreezeCause, FreezeLog, Moment};
+pub use freeze::{used_share, FreezeCause, FreezeLog, Moment};
 pub use growth::{memory_trend, GrowthInput, MemoryTrend, Point};
 pub use idle::IdleInput;
 pub use observation::{Observation, ObservationKind, Severity};
