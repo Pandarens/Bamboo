@@ -636,6 +636,47 @@ pub fn pagefiles(files: &[bamboo_sys::storage::Pagefile]) {
     }
 }
 
+/// Подвисания: сводка по причинам и последние события.
+///
+/// Сводка идёт первой намеренно. Список событий отвечает на «что было
+/// вчера в три», а вопрос обычно другой: «на что жаловаться». Отвечает
+/// на него счёт по причинам, и он же показывает, стоит ли вообще
+/// беспокоиться: три подвисания за неделю — это не повод.
+pub fn freezes(days: u32, counts: &[(String, u32)], recent: &[bamboo_store::FreezeEntry]) {
+    if counts.is_empty() {
+        println!("За {days} сут. подвисаний не записано.");
+        println!();
+        println!("Это хороший исход, а не пустой ответ: Bamboo меряет простой");
+        println!("секундомером и записал бы даже подвисание от неизвестной причины.");
+        return;
+    }
+
+    let total: u32 = counts.iter().map(|(_, count)| count).sum();
+    println!("Подвисаний за {days} сут.: {total}");
+    println!();
+    for (key, count) in counts {
+        let name = bamboo_analyze::FreezeCause::from_storage_key(key)
+            .map(|cause| cause.name())
+            // Незнакомый ключ — запись от версии новее нашей. Показываем
+            // как есть: врать про причину хуже, чем показать ключ.
+            .unwrap_or(key.as_str());
+        println!("  {count:>4}   {name}");
+    }
+
+    println!();
+    println!("Последние:");
+    for entry in recent.iter().take(10) {
+        let name = bamboo_analyze::FreezeCause::from_storage_key(&entry.cause)
+            .map(|cause| cause.name())
+            .unwrap_or(entry.cause.as_str());
+        println!("  {}   {name}", date(entry.at_unix_ms));
+        println!("      {}", entry.detail);
+        if !entry.culprits.trim().is_empty() {
+            println!("     {}", entry.culprits.trim());
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -30,6 +30,7 @@ fn main() {
         "budget" => commands::budget(&args[1..]),
         "disk" => commands::disk(),
         "boot" => commands::boot(),
+        "freezes" => commands::freezes(&args[1..]),
         "power" => commands::power(),
         "trace" => commands::trace(&args[1..]),
         "leaks" => commands::leaks(&args[1..]),
@@ -66,6 +67,7 @@ Bamboo {} — наблюдатель за системой
   bamboo watch [--every N]   непрерывное наблюдение, выход по Ctrl+C
   bamboo disk                накопители: здоровье, износ, ресурс
   bamboo boot                время загрузки и что его удлиняет
+  bamboo freezes [--days N]  подвисания за период: счёт по причинам
   bamboo power               пробуждения из сна и их причины
   bamboo trace [--for N] [--dump]  короткоживущие процессы; --dump пишет
                              ретроспективу буфера на диск
@@ -200,6 +202,48 @@ mod commands {
         let culprits = bamboo_sys::boot_culprits(40).unwrap_or_default();
         render::boot(&history, &culprits);
         Ok(())
+    }
+
+    /// Подвисания за период: сводка по причинам и последние события.
+    ///
+    /// Ради этого подвисания и начали складываться на диск. Одно
+    /// подвисание — случайность, а «сорок за неделю, все от памяти» —
+    /// это уже вывод, и увидеть его можно только по накопленному.
+    pub fn freezes(args: &[String]) -> Result<()> {
+        let days = flag_number(args, "--days").unwrap_or(7).clamp(1, 30);
+        let path = std::path::PathBuf::from(
+            std::env::var("LOCALAPPDATA").unwrap_or_else(|_| ".".to_string()),
+        )
+        .join("Bamboo")
+        .join("наблюдения.db");
+
+        if !path.exists() {
+            println!("Наблюдений ещё нет: агент не запускался.");
+            return Ok(());
+        }
+
+        // Ошибку базы показываем словами, а не превращаем в чужой тип:
+        // «база занята» и «база повреждена» — разные беды, и человеку
+        // важно, какая именно.
+        let read = || {
+            let store = bamboo_store::Store::open(&path).map_err(|e| e.to_string())?;
+            let now = bamboo_core::SampleTime::wall_clock_now();
+            let from = now - days as i64 * 24 * 60 * 60 * 1000;
+            let counts = store.freeze_counts_since(from).map_err(|e| e.to_string())?;
+            let recent = store.freezes_since(from, 20).map_err(|e| e.to_string())?;
+            Ok::<_, String>((counts, recent))
+        };
+        match read() {
+            Ok((counts, recent)) => render::freezes(days, &counts, &recent),
+            Err(error) => println!("Подвисания прочитать не удалось: {error}"),
+        }
+        Ok(())
+    }
+
+    /// Число после флага: `--days 14`.
+    fn flag_number(args: &[String], flag: &str) -> Option<u32> {
+        let at = args.iter().position(|arg| arg == flag)?;
+        args.get(at + 1)?.parse().ok()
     }
 
     pub fn power() -> Result<()> {

@@ -138,6 +138,37 @@ pub enum FreezeCause {
 }
 
 impl FreezeCause {
+    /// Устойчивый ключ для хранения на диске.
+    ///
+    /// Отдельно от `name`, и это не дублирование. Название переводится
+    /// и переписывается, а по ключу считают, сколько подвисаний какой
+    /// причины было за месяц. Совпади они — смена языка разбила бы
+    /// подсчёт надвое, а правка формулировки потеряла бы прошлое.
+    pub fn storage_key(self) -> &'static str {
+        match self {
+            FreezeCause::DiskQueue => "disk",
+            FreezeCause::DriverTime => "drivers",
+            FreezeCause::MemoryPressure => "memory",
+            FreezeCause::CpuSaturated => "cpu",
+            FreezeCause::Throttled => "throttle",
+            FreezeCause::Unresponsive => "unknown",
+        }
+    }
+
+    /// Разбирает ключ обратно. Незнакомый — `None`: молча подменять
+    /// нехватку памяти нехваткой диска нельзя.
+    pub fn from_storage_key(key: &str) -> Option<FreezeCause> {
+        Some(match key {
+            "disk" => FreezeCause::DiskQueue,
+            "drivers" => FreezeCause::DriverTime,
+            "memory" => FreezeCause::MemoryPressure,
+            "cpu" => FreezeCause::CpuSaturated,
+            "throttle" => FreezeCause::Throttled,
+            "unknown" => FreezeCause::Unresponsive,
+            _ => return None,
+        })
+    }
+
     pub fn name(self) -> &'static str {
         use bamboo_core::pick;
         match self {
@@ -521,10 +552,21 @@ impl FreezeLog {
 
     /// Учитывает очередной замер.
     ///
+    /// Возвращает подвисание, если оно только что записано, — и `None`,
+    /// если замер обычный либо продолжает уже записанное. Возврат нужен
+    /// тем, кто складывает подвисания на диск: писать каждый замер значило
+    /// бы записать одно событие сотню раз.
+    ///
+    /// Прежняя редакция обещала то же самое сигнатурой, а возвращала `None`
+    /// всегда — из-за заимствования, которое мешало отдать ссылку на только
+    /// что добавленную запись. Отдаём копию: она невелика, а молчаливо
+    /// сломанный возврат стоил того, что о новых подвисаниях снаружи
+    /// узнать было нельзя.
+    ///
     /// Одно и то же подвисание длится несколько замеров подряд, и писать
     /// каждый из них незачем: считаем это одним событием, пока причина
     /// не сменилась и не прошло время.
-    pub fn observe(&mut self, moment: Moment, who: Bystanders<'_>, at_ms: u64) -> Option<&Freeze> {
+    pub fn observe(&mut self, moment: Moment, who: Bystanders<'_>, at_ms: u64) -> Option<Freeze> {
         const SAME_EVENT_MS: u64 = 30_000;
 
         let freeze = detect_with(moment, who)?;
@@ -545,7 +587,7 @@ impl FreezeLog {
         if self.entries.len() > REMEMBER {
             self.entries.remove(0);
         }
-        None
+        Some(freeze)
     }
 
     /// Имена виновников последнего подвисания.
@@ -614,6 +656,32 @@ pub fn used_share(memory_used: Bytes, memory_total: Bytes) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Ключи хранения переживают круг и не совпадают между собой.
+    #[test]
+    fn every_cause_survives_a_round_trip_through_its_key() {
+        const ALL: [FreezeCause; 6] = [
+            FreezeCause::DiskQueue,
+            FreezeCause::DriverTime,
+            FreezeCause::MemoryPressure,
+            FreezeCause::CpuSaturated,
+            FreezeCause::Throttled,
+            FreezeCause::Unresponsive,
+        ];
+        let mut seen = std::collections::HashSet::new();
+        for cause in ALL {
+            assert_eq!(
+                FreezeCause::from_storage_key(cause.storage_key()),
+                Some(cause)
+            );
+            assert!(
+                seen.insert(cause.storage_key()),
+                "две причины делят один ключ: {}",
+                cause.storage_key()
+            );
+        }
+        assert_eq!(FreezeCause::from_storage_key("чего-то-нет"), None);
+    }
 
     /// Полный процессор без простоя — это работа, а не подвисание.
     #[test]

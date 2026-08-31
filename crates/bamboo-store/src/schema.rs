@@ -1,7 +1,7 @@
 //! Схема базы и миграции.
 
 /// Версия схемы. Хранится в `PRAGMA user_version`.
-pub const SCHEMA_VERSION: i32 = 1;
+pub const SCHEMA_VERSION: i32 = 2;
 
 /// Длительность интервала уровня L2 — 15 минут.
 pub const L2_BUCKET_MS: i64 = 15 * 60 * 1000;
@@ -12,6 +12,12 @@ pub const L3_BUCKET_MS: i64 = 60 * 60 * 1000;
 pub const L2_RETENTION_MS: i64 = 30 * 24 * 60 * 60 * 1000;
 /// Глубина L3 — 12 месяцев.
 pub const L3_RETENTION_MS: i64 = 365 * 24 * 60 * 60 * 1000;
+
+/// Сколько храним записи о подвисаниях — 30 суток.
+///
+/// Столько же, сколько подробные наблюдения: подвисание без обстановки
+/// вокруг разбирать не по чему, и держать его дольше, чем ряды, незачем.
+pub const FREEZE_RETENTION_MS: i64 = 30 * 24 * 60 * 60 * 1000;
 
 /// Начальная схема.
 ///
@@ -99,4 +105,21 @@ CREATE TABLE user_prefs (
     key   TEXT PRIMARY KEY,
     value TEXT NOT NULL
 );
+"#;
+
+/// Вторая версия: подвисания начали храниться на диске.
+///
+/// До неё они жили только в памяти работающего агента — последний десяток,
+/// и то до перезапуска. Для разбора «что было ночью» этого мало: к утру
+/// десяток вытесняется, а перезапуск стирает и его. Мониторить подвисания,
+/// не сохраняя их, невозможно в принципе.
+pub const V2: &str = r#"
+CREATE TABLE freeze_history (
+    at_ms      INTEGER PRIMARY KEY,
+    cause      TEXT NOT NULL,
+    detail     TEXT NOT NULL,
+    culprits   TEXT NOT NULL,
+    stall_ms   INTEGER NOT NULL
+);
+CREATE INDEX freeze_history_cause ON freeze_history(cause);
 "#;

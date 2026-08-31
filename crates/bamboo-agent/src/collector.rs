@@ -89,6 +89,11 @@ pub struct Snapshot {
     /// Имена виновников последнего подвисания через запятую: по ним
     /// открывается список процессов, отфильтрованный ровно на них.
     pub freeze_culprits: String,
+    /// Подвисание, случившееся именно на этом замере. `None` — обычный
+    /// и самый частый случай. Отдельно от `freeze`, который пересказывает
+    /// последнее известное: на диск надо класть только новое, иначе одно
+    /// событие запишется столько раз, сколько было замеров.
+    pub new_freeze: Option<bamboo_store::FreezeEntry>,
     /// Загрузка видеокарты по процессам. Пусто, если счётчиков в системе
     /// нет — тогда график видеокарты не рисуется, а не показывает нули.
     pub gpu: Vec<(u32, f32)>,
@@ -399,15 +404,26 @@ fn run(sender: Sender<Snapshot>, visible: WidgetVisible) {
         cpu_hogs.sort_by_key(|(_, percent)| core::cmp::Reverse(*percent));
 
         let now_ms = started.elapsed().as_millis() as u64;
-        freezes.observe(
-            moment,
-            bamboo_analyze::freeze::Bystanders {
-                disk: &disk_hogs,
-                memory: &memory_hogs,
-                cpu: &cpu_hogs,
-            },
-            now_ms,
-        );
+        let new_freeze = freezes
+            .observe(
+                moment,
+                bamboo_analyze::freeze::Bystanders {
+                    disk: &disk_hogs,
+                    memory: &memory_hogs,
+                    cpu: &cpu_hogs,
+                },
+                now_ms,
+            )
+            .map(|freeze| bamboo_store::FreezeEntry {
+                // Настенные часы, а не монотонные: запись переживёт
+                // перезапуск, и «через два часа после старта агента»
+                // назавтра не значит ничего.
+                at_unix_ms: bamboo_core::SampleTime::wall_clock_now(),
+                cause: freeze.cause.storage_key().to_string(),
+                detail: freeze.detail.clone(),
+                culprits: freeze.culprits.clone(),
+                stall_ms: moment.stall_ms,
+            });
         let freeze = freezes.summary(now_ms);
         let freeze_culprits = freezes.last_culprits().join(", ");
 
@@ -447,6 +463,7 @@ fn run(sender: Sender<Snapshot>, visible: WidgetVisible) {
             system_io,
             freeze,
             freeze_culprits,
+            new_freeze,
             gpu,
             watching_ms: started.elapsed().as_millis() as u64,
         };

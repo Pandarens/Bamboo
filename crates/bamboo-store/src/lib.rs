@@ -20,6 +20,6 @@ pub mod store;
 pub mod trace;
 
 pub use aggregate::{bucket_start, into_buckets, roll_up, Bucket, SamplePoint, Stat};
-pub use schema::{L2_BUCKET_MS, L2_RETENTION_MS, L3_BUCKET_MS, L3_RETENTION_MS};
-pub use store::{BootEntry, Level, SmartSnapshot, Store};
+pub use schema::{L2_BUCKET_MS, L2_RETENTION_MS, L3_BUCKET_MS, L3_RETENTION_MS, SCHEMA_VERSION};
+pub use store::{BootEntry, FreezeEntry, Level, SmartSnapshot, Store};
 pub use trace::{Trace, TraceFrame, TraceProcess, TRACE_VERSION};

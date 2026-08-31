@@ -7,7 +7,8 @@ use rusqlite::{params, Connection, OptionalExtension};
 
 use crate::aggregate::{roll_up, Bucket, Stat};
 use crate::schema::{
-    L2_BUCKET_MS, L2_RETENTION_MS, L3_BUCKET_MS, L3_RETENTION_MS, SCHEMA_VERSION, V1,
+    FREEZE_RETENTION_MS, L2_BUCKET_MS, L2_RETENTION_MS, L3_BUCKET_MS, L3_RETENTION_MS,
+    SCHEMA_VERSION, V1, V2,
 };
 
 pub type Result<T> = rusqlite::Result<T>;
@@ -66,6 +67,23 @@ pub struct BootEntry {
     pub main_path_ms: u64,
     pub post_boot_ms: u64,
     pub degradation_ms: Option<u64>,
+}
+
+/// Зафиксированное подвисание, как оно ложится на диск.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FreezeEntry {
+    pub at_unix_ms: i64,
+    /// Устойчивый ключ причины, не её название на языке человека.
+    /// Название переводится и меняется, а по ключу считают за месяц.
+    pub cause: String,
+    /// Что намерили — теми же числами, что показали человеку.
+    pub detail: String,
+    /// Кто был рядом. Пусто — законный случай: у части причин
+    /// виновника нет и быть не может.
+    pub culprits: String,
+    /// Измеренный простой. Ноль — подвисание опознано по признаку,
+    /// а секундомер его не застал.
+    pub stall_ms: u64,
 }
 
 pub struct Store {
@@ -262,6 +280,9 @@ impl Store {
         let tx = self.conn.transaction()?;
         if version < 1 {
             tx.execute_batch(V1)?;
+        }
+        if version < 2 {
+            tx.execute_batch(V2)?;
         }
         tx.pragma_update(None, "user_version", SCHEMA_VERSION)?;
         tx.commit()
@@ -529,6 +550,68 @@ impl Store {
             (Some(first), Some(last)) => Ok(last > first),
             _ => Ok(false),
         }
+    }
+
+    /// Записывает подвисание.
+    ///
+    /// Ключ — момент времени, и совпадение затирает прежнюю запись.
+    /// Двух подвисаний в одну миллисекунду не бывает, а вот повторная
+    /// запись того же при перезапуске — бывает.
+    pub fn record_freeze(&self, entry: &FreezeEntry) -> Result<()> {
+        self.conn.execute(
+            "INSERT OR REPLACE INTO freeze_history
+                (at_ms, cause, detail, culprits, stall_ms)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![
+                entry.at_unix_ms,
+                entry.cause,
+                entry.detail,
+                entry.culprits,
+                entry.stall_ms as i64,
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Подвисания за период, от свежих к старым.
+    pub fn freezes_since(&self, from_unix_ms: i64, limit: usize) -> Result<Vec<FreezeEntry>> {
+        let mut statement = self.conn.prepare(
+            "SELECT at_ms, cause, detail, culprits, stall_ms
+             FROM freeze_history WHERE at_ms >= ?1 ORDER BY at_ms DESC LIMIT ?2",
+        )?;
+        let rows = statement.query_map(params![from_unix_ms, limit as i64], |row| {
+            Ok(FreezeEntry {
+                at_unix_ms: row.get(0)?,
+                cause: row.get(1)?,
+                detail: row.get(2)?,
+                culprits: row.get(3)?,
+                stall_ms: row.get::<_, i64>(4)? as u64,
+            })
+        })?;
+        rows.collect()
+    }
+
+    /// Сколько подвисаний какой причины было за период.
+    ///
+    /// Ради этого хранение и заводилось: одно подвисание — случайность,
+    /// а «сорок раз за неделю, все от памяти» — это уже вывод.
+    pub fn freeze_counts_since(&self, from_unix_ms: i64) -> Result<Vec<(String, u32)>> {
+        let mut statement = self.conn.prepare(
+            "SELECT cause, COUNT(*) FROM freeze_history
+             WHERE at_ms >= ?1 GROUP BY cause ORDER BY COUNT(*) DESC",
+        )?;
+        let rows = statement.query_map(params![from_unix_ms], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)? as u32))
+        })?;
+        rows.collect()
+    }
+
+    /// Убирает подвисания старше срока хранения.
+    pub fn prune_freezes(&self, now_unix_ms: i64) -> Result<usize> {
+        self.conn.execute(
+            "DELETE FROM freeze_history WHERE at_ms < ?1",
+            params![now_unix_ms - FREEZE_RETENTION_MS],
+        )
     }
 
     pub fn record_boot(&self, entry: &BootEntry) -> Result<()> {

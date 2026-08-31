@@ -28,7 +28,10 @@ fn point(at_ms: i64, cpu_ms: u32, private_kib: u32) -> SamplePoint {
 #[test]
 fn fresh_database_is_migrated() {
     let store = store();
-    assert_eq!(store.schema_version().unwrap(), 1);
+    assert_eq!(
+        store.schema_version().unwrap(),
+        bamboo_store::SCHEMA_VERSION
+    );
 }
 
 #[test]
@@ -42,7 +45,10 @@ fn opening_twice_does_not_re_run_migrations() {
     }
     {
         let second = Store::open(&dir).unwrap();
-        assert_eq!(second.schema_version().unwrap(), 1);
+        assert_eq!(
+            second.schema_version().unwrap(),
+            bamboo_store::SCHEMA_VERSION
+        );
         assert_eq!(
             second.pref("проверка").unwrap().as_deref(),
             Some("значение"),
@@ -133,7 +139,7 @@ fn a_corrupted_database_is_set_aside_and_rebuilt() {
     let store = Store::open(&path).expect("повреждение не должно ронять Bamboo");
     assert_eq!(
         store.schema_version().unwrap(),
-        1,
+        bamboo_store::SCHEMA_VERSION,
         "после замены база обязана быть рабочей"
     );
     assert!(
@@ -421,4 +427,45 @@ fn preferences_round_trip() {
 
     store.set_pref("профиль", "Обычный").unwrap();
     assert_eq!(store.pref("профиль").unwrap().as_deref(), Some("Обычный"));
+}
+
+/// Подвисания переживают запись и читаются со счётом по причинам.
+///
+/// Ради этого счёта хранение и заведено: одно подвисание — случайность,
+/// а «сорок за неделю, все от памяти» — вывод, который виден только
+/// по накопленному.
+#[test]
+fn freezes_are_stored_and_counted_by_cause() {
+    let store = store();
+    let now = 1_700_000_000_000i64;
+
+    for (offset, cause) in [(0, "memory"), (1000, "memory"), (2000, "disk")] {
+        store
+            .record_freeze(&bamboo_store::FreezeEntry {
+                at_unix_ms: now + offset,
+                cause: cause.to_string(),
+                detail: "подробности".to_string(),
+                culprits: String::new(),
+                stall_ms: 1200,
+            })
+            .unwrap();
+    }
+
+    let counts = store.freeze_counts_since(now - DAY).unwrap();
+    assert_eq!(
+        counts[0],
+        ("memory".to_string(), 2),
+        "счёт по причинам врёт"
+    );
+    assert_eq!(counts.len(), 2);
+
+    let recent = store.freezes_since(now - DAY, 10).unwrap();
+    assert_eq!(recent.len(), 3);
+    assert_eq!(recent[0].at_unix_ms, now + 2000, "порядок не от свежих");
+    assert_eq!(recent[0].stall_ms, 1200);
+
+    // Записи старше срока хранения уходят, свежие остаются.
+    let far_future = now + 40 * DAY;
+    assert_eq!(store.prune_freezes(far_future).unwrap(), 3);
+    assert!(store.freezes_since(0, 10).unwrap().is_empty());
 }

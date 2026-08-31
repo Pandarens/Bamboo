@@ -1496,6 +1496,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     );
                 }
 
+                // Подвисание пишем сразу, а не с историей: их единицы
+                // за сутки, и ждать четырёхчасового сброса значило бы
+                // терять их при каждом перезапуске.
+                if let (Some(history), Some(entry)) = (&history, &snapshot.new_freeze) {
+                    if let Err(error) = history.record_freeze(entry) {
+                        eprintln!("подвисание записать не удалось: {error}");
+                    }
+                }
+
                 // История: копим каждый тик, пишем раз в несколько часов.
                 if let Some(history) = &mut history {
                     let now = started.elapsed().as_millis() as u64;

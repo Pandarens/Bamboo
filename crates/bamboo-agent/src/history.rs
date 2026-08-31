@@ -143,6 +143,17 @@ impl History {
         }
     }
 
+    /// Кладёт подвисание на диск.
+    ///
+    /// Без буфера, сразу: подвисаний за сутки единицы, а не тысячи, и копить
+    /// их до сброса раз в четыре часа значило бы потерять при перезапуске
+    /// ровно то, ради чего они и записываются.
+    pub fn record_freeze(&self, entry: &bamboo_store::FreezeEntry) -> Result<(), String> {
+        self.store
+            .record_freeze(entry)
+            .map_err(|error| error.to_string())
+    }
+
     /// Пора ли сбрасывать.
     pub fn due(&self, now_ms: u64) -> bool {
         now_ms.saturating_sub(self.flushed_at) >= FLUSH_EVERY_MS
@@ -175,8 +186,18 @@ impl History {
 
         // Сворачивание и удаление старого — там же, где запись: иначе база
         // росла бы без предела, а предел в 200 МБ задан разделом 8 ТЗ.
-        let _ = self.store.roll_up_to_l3(now_ms as i64);
-        let _ = self.store.prune(now_ms as i64);
+        //
+        // Часы настенные, и это исправление, а не мелочь. Прежде сюда
+        // передавались монотонные — миллисекунды от запуска агента. Корзины
+        // же лежат в настенных, и «сейчас минус тридцать суток» от числа
+        // вроде трёх миллионов уходило далеко в отрицательные значения:
+        // под удаление не попадало ничего, сворачивать было нечего.
+        // Отсюда и пустой уровень L3 на живой машине при девяти мегабайтах
+        // сырых наблюдений — ни одна из двух чисток ни разу не сработала.
+        let wall_ms = bamboo_core::SampleTime::wall_clock_now();
+        let _ = self.store.roll_up_to_l3(wall_ms);
+        let _ = self.store.prune(wall_ms);
+        let _ = self.store.prune_freezes(wall_ms);
 
         Ok(written)
     }
