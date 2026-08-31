@@ -221,6 +221,10 @@ fn run(sender: Sender<Snapshot>, visible: WidgetVisible) {
     // потому что подвисания начинаются задолго до того, как она упрётся
     // в потолок.
     let mut paging_counter = bamboo_sys::paging::PagingCounter::open().ok();
+    // Частота процессора: без неё сброс по нагреву не отличить от честной
+    // загрузки — в обоих случаях процессор «занят на сто процентов».
+    // Ошибка открытия не беда: тогда о частоте просто молчим.
+    let mut frequency_counter = bamboo_sys::frequency::FrequencyCounter::open().ok();
     // Простой, измеренный на прошлом сне. Ноль до первого сна: мерить
     // ещё нечего, а выдумывать число нельзя.
     let mut stall_ms: u64 = 0;
@@ -339,6 +343,18 @@ fn run(sender: Sender<Snapshot>, visible: WidgetVisible) {
             .as_mut()
             .and_then(|counter| counter.read().ok())
             .unwrap_or(0.0);
+        // Ноль на первом замере означает «ещё нечего мерить», а не
+        // «частота упала в ноль». Отдаём None: пусть детектор молчит,
+        // а не объявляет сброс частоты на ровном месте.
+        let cpu_frequency = frequency_counter
+            .as_mut()
+            .and_then(|counter| counter.read().ok())
+            .filter(|share| *share > 0.0);
+        // На батарее пониженная частота — не поломка, а ровно то, чего
+        // человек и просил, выбрав экономию.
+        let on_battery = bamboo_sys::power::power_status()
+            .map(|status| status.on_battery())
+            .unwrap_or(false);
 
         let moment = bamboo_analyze::Moment {
             driver_ratio: tick.driver_time(),
@@ -349,6 +365,9 @@ fn run(sender: Sender<Snapshot>, visible: WidgetVisible) {
             compressing_memory: compressing,
             paging_rate,
             stall_ms,
+            cpu_busy: tick.cpu_busy(),
+            cpu_frequency,
+            on_battery,
         };
         // Виновников снимаем здесь же, а не потом: пока человек откроет
         // окно, подвисание кончится и виновник разойдётся.
@@ -370,12 +389,22 @@ fn run(sender: Sender<Snapshot>, visible: WidgetVisible) {
             .collect();
         memory_hogs.sort_by_key(|(_, size)| core::cmp::Reverse(*size));
 
+        // Кто занимал процессор. Проценты целые: доли процента в списке
+        // виновников — точность, которой там неоткуда взяться.
+        let mut cpu_hogs: Vec<(String, u64)> = top
+            .iter()
+            .map(|line| (line.name.clone(), line.cpu_percent.round().max(0.0) as u64))
+            .filter(|(_, percent)| *percent > 0)
+            .collect();
+        cpu_hogs.sort_by_key(|(_, percent)| core::cmp::Reverse(*percent));
+
         let now_ms = started.elapsed().as_millis() as u64;
         freezes.observe(
             moment,
             bamboo_analyze::freeze::Bystanders {
                 disk: &disk_hogs,
                 memory: &memory_hogs,
+                cpu: &cpu_hogs,
             },
             now_ms,
         );

@@ -83,6 +83,31 @@ const MEMORY_STRAINED: f64 = 0.80;
 /// здесь не будет.
 const STALL_NOTICED_MS: u64 = 500;
 
+/// Загрузка процессора, при которой очереди на выполнение уже мешают.
+///
+/// Одной этой загрузки мало, и это принципиально. Сборка проекта занимает
+/// сто процентов процессора и подвисанием не является: работа идёт, машина
+/// отвечает. Поэтому загрузка называется причиной только вместе
+/// с измеренным простоем — тогда видно, что процессор не работал,
+/// а не пускал.
+const CPU_CROWDED: f64 = 0.90;
+
+/// Доля номинальной частоты, ниже которой процессор явно придержан.
+///
+/// Семьдесят процентов. Опора — замер на живой машине: под обычной
+/// нагрузкой процессор шёл на 150–165% номинала, то есть в ускорении.
+/// Падение ниже семидесяти — это уже не «не разогнался», а «придержан»:
+/// так бывает при перегреве, упоре в предел питания или схеме
+/// электропитания, выставленной в экономию.
+const FREQUENCY_HELD_BACK: f64 = 0.70;
+
+/// Загрузка, ниже которой о сброшенной частоте говорить нельзя.
+///
+/// На простое процессор снижает частоту нарочно, ради экономии, и это
+/// здоровое поведение. Беда — когда частота низкая, а процессор при этом
+/// просят работать.
+const CPU_WORKING: f64 = 0.50;
+
 /// Из-за чего подвисло.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum FreezeCause {
@@ -92,6 +117,10 @@ pub enum FreezeCause {
     DriverTime,
     /// Память кончилась, идёт вытеснение в подкачку.
     MemoryPressure,
+    /// Процессор занят целиком, и очередь на выполнение мешает.
+    CpuSaturated,
+    /// Процессор работает на пониженной частоте.
+    Throttled,
     /// Система не отвечала, а причина не опознана.
     ///
     /// Единственная причина, которая измеряется, а не выводится. Остальные
@@ -117,6 +146,13 @@ impl FreezeCause {
                 pick("драйверы заняли процессор", "drivers took the processor")
             }
             FreezeCause::MemoryPressure => pick("закончилась оперативная память", "memory ran out"),
+            FreezeCause::CpuSaturated => {
+                pick("процессор занят целиком", "the processor is fully busy")
+            }
+            FreezeCause::Throttled => pick(
+                "процессор работает на пониженной частоте",
+                "the processor is running at a reduced clock",
+            ),
             FreezeCause::Unresponsive => pick(
                 "система не отвечала, причина не определилась",
                 "the system stopped responding, cause undetermined",
@@ -160,6 +196,14 @@ impl FreezeCause {
                  comes back from the drive. Close spare tabs and programs — that \
                  is the only thing that genuinely helps.",
             ),
+            FreezeCause::CpuSaturated => pick(
+                "Процессор занят целиком, и очередь на выполнение дошла                  до того, что обработка ввода стала ждать. Само по себе это                  не беда — сборка проекта тоже занимает процессор полностью,                  и никто не страдает. Здесь беда: простой измерен. Если                  виновник назван выше и его работа не срочная, помогает                  «Экономичный режим» по правой кнопке на строке процесса:                  он уступит процессор тому, что на переднем плане.",
+                "The processor is fully busy, and the run queue has grown to                  where input handling waits. That alone is not trouble —                  building a project also takes the whole processor and nobody                  suffers. Here it is trouble: the stall was measured. If                  a culprit is named above and its work is not urgent, «Eco                  mode» from the row's right-click menu helps: it will yield                  the processor to whatever is in the foreground.",
+            ),
+            FreezeCause::Throttled => pick(
+                "Процессор работает на пониженной частоте: его просят                  работать, а он не может. Причин три, и все проверяемые.                  Перегрев — самая частая: помогает чистка от пыли и замена                  термопасты. Схема электропитания, выставленная в экономию, —                  проверяется в параметрах питания Windows. Упор в предел                  питания — на ноутбуке от слабого блока, на настольном                  от блока не по мощности. Программы тут ни при чём, и                  закрывать их бесполезно.",
+                "The processor is running at a reduced clock: it is being                  asked to work and cannot. There are three causes, all                  checkable. Overheating is the most common: dust removal and                  fresh thermal paste help. A power plan set to saving — check                  Windows power options. Hitting a power limit — on a laptop                  from a weak adapter, on a desktop from an underrated supply.                  Programs have nothing to do with it, and closing them will                  not help.",
+            ),
             FreezeCause::Unresponsive => pick(
                 "Простой измерен секундомером: система не отвечала столько, \
                  сколько написано выше. А вот причина не опознана — ни диск, \
@@ -192,6 +236,15 @@ pub struct Moment {
     /// Сколько занимает одна операция на самом медленном накопителе, мс.
     /// Ноль — операций не было; это не «мгновенно», а «нечего мерить».
     pub disk_latency_ms: f64,
+    /// Загрузка процессора всей машины, 0..1.
+    pub cpu_busy: f64,
+    /// Доля номинальной частоты процессора: 1.0 — номинал, больше —
+    /// ускорение. `None` — счётчика в системе нет, и тогда о сбросе
+    /// частоты мы просто молчим, а не выдумываем.
+    pub cpu_frequency: Option<f64>,
+    /// Работает ли машина от батареи. На батарее пониженная частота —
+    /// это не поломка, а ровно то, чего человек и просил.
+    pub on_battery: bool,
     /// Доля занятой оперативной памяти, 0..1.
     pub memory_used_share: f64,
     /// Идёт ли вытеснение в подкачку прямо сейчас.
@@ -225,6 +278,8 @@ pub struct Bystanders<'a> {
     pub disk: &'a [(String, u64)],
     /// Кто держал память: имя и байты.
     pub memory: &'a [(String, u64)],
+    /// Кто занимал процессор: имя и целые проценты.
+    pub cpu: &'a [(String, u64)],
 }
 
 /// Зафиксированное подвисание.
@@ -328,6 +383,49 @@ pub fn detect_with(moment: Moment, who: Bystanders<'_>) -> Option<Freeze> {
         });
     }
 
+    // Процессор занят целиком — но только вместе с измеренным простоем.
+    // Без простоя это просто работа: сборка проекта занимает процессор
+    // на сто процентов, и подвисанием это не является. Пара «занят
+    // и при этом не пускал» — другое дело.
+    if moment.cpu_busy >= CPU_CROWDED && moment.stall_ms >= STALL_NOTICED_MS {
+        return Some(Freeze {
+            cause: FreezeCause::CpuSaturated,
+            detail: format!(
+                "процессор занят на {:.0}%, система не отвечала {}",
+                moment.cpu_busy * 100.0,
+                spell_stall(moment.stall_ms)
+            ),
+            culprits: name_them("Больше всех процессора занимали", who.cpu, &percent),
+            culprit_names: names_of(who.cpu),
+        });
+    }
+
+    // Сброшенная частота. Три оговорки, и без них признак врал бы
+    // постоянно: на простое частота падает нарочно, на батарее — тоже
+    // нарочно, а без счётчика говорить не о чем.
+    if let Some(frequency) = moment.cpu_frequency {
+        if frequency < FREQUENCY_HELD_BACK
+            && frequency > 0.0
+            && moment.cpu_busy >= CPU_WORKING
+            && !moment.on_battery
+        {
+            return Some(Freeze {
+                cause: FreezeCause::Throttled,
+                detail: format!(
+                    "процессор работает на {:.0}% номинальной частоты при загрузке {:.0}%",
+                    frequency * 100.0,
+                    moment.cpu_busy * 100.0
+                ),
+                // Виновника нет: частоту сбрасывает не программа,
+                // а сам процессор — от нагрева, предела питания или
+                // настройки электропитания. Назвать кого-то из списка
+                // значило бы отправить человека закрывать невиновных.
+                culprits: String::new(),
+                culprit_names: Vec::new(),
+            });
+        }
+    }
+
     // Последним — сам простой. Он идёт после всех признаков намеренно:
     // когда причина опознана, называть надо её, а не пересказывать факт
     // подвисания, который человек и без нас заметил.
@@ -395,6 +493,10 @@ fn names_of(who: &[(String, u64)]) -> Vec<String> {
 
 fn bytes(value: u64) -> String {
     bamboo_core::Bytes(value).to_string()
+}
+
+fn percent(value: u64) -> String {
+    format!("{value}%")
 }
 
 fn per_second(value: u64) -> String {
@@ -513,6 +615,88 @@ pub fn used_share(memory_used: Bytes, memory_total: Bytes) -> f64 {
 mod tests {
     use super::*;
 
+    /// Полный процессор без простоя — это работа, а не подвисание.
+    #[test]
+    fn a_busy_processor_alone_is_work_not_a_freeze() {
+        // Сборка проекта, обработка видео, распаковка архива — всё это
+        // занимает процессор целиком, и никто не страдает. Правило,
+        // которое кричит на такое, обесценивает все остальные.
+        let compiling = Moment {
+            cpu_busy: 1.0,
+            stall_ms: 0,
+            ..Default::default()
+        };
+        assert_eq!(detect(compiling), None);
+    }
+
+    /// Тот же процессор, но система при этом не отвечала.
+    #[test]
+    fn a_busy_processor_with_a_measured_stall_is_a_freeze() {
+        let crowded = Moment {
+            cpu_busy: 0.97,
+            stall_ms: 900,
+            ..Default::default()
+        };
+        let freeze = detect(crowded).expect("занят и не пускал — это подвисание");
+        assert_eq!(freeze.cause, FreezeCause::CpuSaturated);
+        assert!(freeze.detail.contains("97%"), "{}", freeze.detail);
+    }
+
+    /// Сброс частоты под нагрузкой.
+    #[test]
+    fn a_processor_held_below_its_clock_under_load_is_reported() {
+        let hot = Moment {
+            cpu_busy: 0.80,
+            cpu_frequency: Some(0.45),
+            on_battery: false,
+            ..Default::default()
+        };
+        let freeze = detect(hot).expect("придержанный процессор — это причина");
+        assert_eq!(freeze.cause, FreezeCause::Throttled);
+        assert!(freeze.detail.contains("45%"), "{}", freeze.detail);
+        assert!(
+            freeze.culprit_names.is_empty(),
+            "частоту сбрасывает не программа — называть кого-то нельзя"
+        );
+    }
+
+    /// Низкая частота на простое — это экономия, а не беда.
+    #[test]
+    fn a_low_clock_at_idle_is_saving_power_not_throttling() {
+        let idle = Moment {
+            cpu_busy: 0.03,
+            cpu_frequency: Some(0.30),
+            ..Default::default()
+        };
+        assert_eq!(detect(idle), None);
+    }
+
+    /// На батарее пониженная частота — это то, чего человек и просил.
+    #[test]
+    fn a_low_clock_on_battery_is_not_a_complaint() {
+        let saving = Moment {
+            cpu_busy: 0.90,
+            cpu_frequency: Some(0.40),
+            on_battery: true,
+            // Простоя нет: иначе сработало бы правило занятого процессора,
+            // и мы проверили бы не то.
+            stall_ms: 0,
+            ..Default::default()
+        };
+        assert_eq!(detect(saving), None);
+    }
+
+    /// Без счётчика частоты о сбросе молчим, а не выдумываем.
+    #[test]
+    fn a_missing_frequency_counter_produces_silence() {
+        let unknown = Moment {
+            cpu_busy: 0.80,
+            cpu_frequency: None,
+            ..Default::default()
+        };
+        assert_eq!(detect(unknown), None);
+    }
+
     /// Медленный накопитель ловится по задержке, а не по очереди.
     #[test]
     fn a_slow_drive_is_caught_even_with_a_short_queue() {
@@ -561,6 +745,9 @@ mod tests {
             memory_used_share: 0.40,
             compressing_memory: false,
             paging_rate: 0.0,
+            cpu_busy: 0.0,
+            cpu_frequency: None,
+            on_battery: false,
             stall_ms: 2300,
         };
         let freeze = detect(stalled).expect("измеренный простой — это подвисание");
@@ -581,6 +768,9 @@ mod tests {
         let both = Moment {
             memory_used_share: 0.88,
             paging_rate: 6519.0,
+            cpu_busy: 0.0,
+            cpu_frequency: None,
+            on_battery: false,
             stall_ms: 2300,
             ..Default::default()
         };
@@ -617,6 +807,9 @@ mod tests {
             memory_used_share: 1.0 - 2042.0 / 16169.0,
             compressing_memory: false,
             paging_rate: 6519.0,
+            cpu_busy: 0.0,
+            cpu_frequency: None,
+            on_battery: false,
             stall_ms: 0,
         };
         let freeze = detect(thrashing).expect("толкотня в подкачке — это подвисание");
@@ -636,6 +829,9 @@ mod tests {
         let launching = Moment {
             memory_used_share: 0.45,
             paging_rate: 5000.0,
+            cpu_busy: 0.0,
+            cpu_frequency: None,
+            on_battery: false,
             ..Default::default()
         };
         assert_eq!(detect(launching), None);
@@ -651,6 +847,9 @@ mod tests {
             memory_used_share: 0.60,
             compressing_memory: false,
             paging_rate: 0.0,
+            cpu_busy: 0.0,
+            cpu_frequency: None,
+            on_battery: false,
             stall_ms: 0,
         };
         assert_eq!(detect(calm), None);
@@ -706,6 +905,9 @@ mod tests {
             memory_used_share: 0.97,
             compressing_memory: true,
             paging_rate: 0.0,
+            cpu_busy: 0.0,
+            cpu_frequency: None,
+            on_battery: false,
             stall_ms: 0,
         };
         assert_eq!(detect(squeezed).unwrap().cause, FreezeCause::MemoryPressure);
@@ -794,6 +996,7 @@ mod tests {
             Bystanders {
                 disk: &hogs,
                 memory: &[],
+                cpu: &[],
             },
         )
         .unwrap();
@@ -817,6 +1020,7 @@ mod tests {
             Bystanders {
                 disk: &hogs,
                 memory: &hogs,
+                cpu: &[],
             },
         )
         .unwrap();
@@ -836,6 +1040,7 @@ mod tests {
             Bystanders {
                 disk: &[],
                 memory: &hogs,
+                cpu: &[],
             },
         )
         .unwrap();
@@ -874,6 +1079,7 @@ mod tests {
             Bystanders {
                 disk: &many,
                 memory: &[],
+                cpu: &[],
             },
         )
         .unwrap();
@@ -913,6 +1119,7 @@ mod tests {
             Bystanders {
                 disk: &many,
                 memory: &[],
+                cpu: &[],
             },
         )
         .unwrap();
@@ -935,6 +1142,7 @@ mod tests {
             Bystanders {
                 disk: &hogs,
                 memory: &[],
+                cpu: &[],
             },
             0,
         );
