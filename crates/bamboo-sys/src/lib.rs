@@ -28,6 +28,7 @@ mod iolimit;
 pub mod memory;
 pub mod notify;
 pub mod nt;
+pub mod paging;
 pub mod pipe;
 pub mod power;
 pub mod process;

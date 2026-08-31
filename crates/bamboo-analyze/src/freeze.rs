@@ -30,6 +30,24 @@ const DISK_QUEUE: u32 = 8;
 /// страницы в подкачку и всё замерло.
 const MEMORY_TIGHT: f64 = 0.92;
 
+/// Сколько страниц в секунду поднимается с диска, чтобы это стало заметно
+/// человеку.
+///
+/// Тысяча страниц — четыре мегабайта случайного чтения за секунду, которых
+/// программа ждёт, ничего не рисуя. Число взято не из головы: на машине,
+/// где набранный текст появлялся с задержкой, посекундный замер дал ровный
+/// фон около двухсот страниц и всплески до 6519. Порог отделяет всплески
+/// от фона.
+const PAGING_STALL: f64 = 1000.0;
+
+/// Занятость памяти, ниже которой чтение из подкачки — не толкотня.
+///
+/// Само по себе чтение с диска ничего не доказывает: запуск программы тоже
+/// читает страницы её образа, и это здоровое поведение, а не нехватка
+/// памяти. Признаком толкотни чтение становится только тогда, когда память
+/// уже плотно занята и вытеснять приходится живое.
+const MEMORY_STRAINED: f64 = 0.80;
+
 /// Из-за чего подвисло.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum FreezeCause {
@@ -106,6 +124,14 @@ pub struct Moment {
     pub memory_used_share: f64,
     /// Идёт ли вытеснение в подкачку прямо сейчас.
     pub compressing_memory: bool,
+    /// Сколько страниц в секунду поднимается с диска.
+    ///
+    /// Главный признак нехватки памяти, и добавлен он потому, что доля
+    /// занятой памяти оказалась плохим признаком. На машине, где текст
+    /// появлялся с задержкой, в момент чтения 6519 страниц за секунду было
+    /// занято 87% — ниже прежнего порога в 92%, так что подвисание, которое
+    /// человек видел глазами, не попадало в журнал вовсе.
+    pub paging_rate: f64,
 }
 
 /// Кто чем занимался в этот момент.
@@ -149,13 +175,33 @@ pub fn detect(moment: Moment) -> Option<Freeze> {
 pub fn detect_with(moment: Moment, who: Bystanders<'_>) -> Option<Freeze> {
     // Нехватка памяти идёт первой: она порождает и очередь к диску, и
     // время в драйверах, и лечится совсем не там, где видна.
-    if moment.memory_used_share >= MEMORY_TIGHT && moment.compressing_memory {
+    //
+    // Признака два, и они про разное. Чтение из подкачки — это само
+    // подвисание, измеренное напрямую: страницы поднимаются с диска,
+    // и программа стоит, пока они не придут. Вытеснение при почти полной
+    // памяти — состояние, в котором подвисания неизбежны, даже если прямо
+    // в этот миг чтения нет.
+    let thrashing =
+        moment.paging_rate >= PAGING_STALL && moment.memory_used_share >= MEMORY_STRAINED;
+    let squeezed = moment.memory_used_share >= MEMORY_TIGHT && moment.compressing_memory;
+    if thrashing || squeezed {
         return Some(Freeze {
             cause: FreezeCause::MemoryPressure,
-            detail: format!(
-                "занято {:.0}% памяти, идёт вытеснение в подкачку",
-                moment.memory_used_share * 100.0
-            ),
+            // Говорим то, что намерили. Когда есть чтение с диска, называем
+            // именно его: «занято 87%» человека не убеждает, а «поднято
+            // 25 МБ из подкачки за секунду» объясняет застывший курсор.
+            detail: if thrashing {
+                format!(
+                    "занято {:.0}% памяти, с диска поднято {:.0} МБ за секунду",
+                    moment.memory_used_share * 100.0,
+                    moment.paging_rate * 4.0 / 1024.0
+                )
+            } else {
+                format!(
+                    "занято {:.0}% памяти, идёт вытеснение в подкачку",
+                    moment.memory_used_share * 100.0
+                )
+            },
             culprits: name_them("Больше всех памяти держали", who.memory, &bytes),
             culprit_names: names_of(who.memory),
         });
@@ -339,6 +385,7 @@ pub fn moment_from(
     memory_used: Bytes,
     memory_total: Bytes,
     compressing_memory: bool,
+    paging_rate: f64,
 ) -> Moment {
     Moment {
         driver_ratio,
@@ -350,12 +397,52 @@ pub fn moment_from(
             memory_used.as_u64() as f64 / memory_total.as_u64() as f64
         },
         compressing_memory,
+        paging_rate,
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Настоящий замер с машины, где текст появлялся с задержкой.
+    ///
+    /// Числа не выдуманы: 15,8 ГБ памяти, 2042 МБ свободных (занято 87%),
+    /// посекундный замер поймал 6519 страниц в секунду. Процессор при этом
+    /// был занят на 5%, очередь к диску пуста. Прежняя проверка требовала
+    /// 92% занятой памяти и молчала — человек видел подвисание, а журнал
+    /// оставался пустым, и разобраться было не по чему.
+    #[test]
+    fn a_real_paging_storm_below_the_old_threshold_is_a_freeze() {
+        let thrashing = Moment {
+            driver_ratio: 0.05,
+            disk_queue: 0,
+            disk_busy: 0.02,
+            memory_used_share: 1.0 - 2042.0 / 16169.0,
+            compressing_memory: false,
+            paging_rate: 6519.0,
+        };
+        let freeze = detect(thrashing).expect("толкотня в подкачке — это подвисание");
+        assert_eq!(freeze.cause, FreezeCause::MemoryPressure);
+        // В объяснении должны быть мегабайты, а не одни проценты: процент
+        // занятой памяти человеку ничего не говорит, а «25 МБ за секунду»
+        // объясняет застывший курсор.
+        assert!(freeze.detail.contains("25 МБ"), "{}", freeze.detail);
+    }
+
+    /// Обратная сторона: чтение с диска само по себе не беда.
+    #[test]
+    fn paging_with_memory_to_spare_is_just_a_program_starting() {
+        // Запуск программы читает страницы её образа сотнями — при этом
+        // памяти вдоволь, и ничего не подвисает. Считать это подвисанием
+        // значило бы кричать при каждом запуске.
+        let launching = Moment {
+            memory_used_share: 0.45,
+            paging_rate: 5000.0,
+            ..Default::default()
+        };
+        assert_eq!(detect(launching), None);
+    }
 
     #[test]
     fn a_healthy_system_reports_nothing() {
@@ -365,6 +452,7 @@ mod tests {
             disk_busy: 0.30,
             memory_used_share: 0.60,
             compressing_memory: false,
+            paging_rate: 0.0,
         };
         assert_eq!(detect(calm), None);
     }
@@ -415,6 +503,7 @@ mod tests {
             disk_busy: 1.0,
             memory_used_share: 0.97,
             compressing_memory: true,
+            paging_rate: 0.0,
         };
         assert_eq!(detect(squeezed).unwrap().cause, FreezeCause::MemoryPressure);
     }

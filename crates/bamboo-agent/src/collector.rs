@@ -212,6 +212,11 @@ fn run(sender: Sender<Snapshot>, visible: WidgetVisible) {
     // двумя опросами, и разовый замер обязан был бы ждать между ними
     // секунду — секунда блокировки на каждый тик.
     let mut gpu_counter = bamboo_sys::GpuCounter::open().ok();
+    // Чтение из подкачки — по той же причине открытым счётчиком. Это
+    // главный признак нехватки памяти: доля занятой памяти его не заменяет,
+    // потому что подвисания начинаются задолго до того, как она упрётся
+    // в потолок.
+    let mut paging_counter = bamboo_sys::paging::PagingCounter::open().ok();
 
     loop {
         collector.set_widget_open(visible.load(Ordering::Relaxed));
@@ -311,6 +316,13 @@ fn run(sender: Sender<Snapshot>, visible: WidgetVisible) {
             line.name.contains("Memory Compression") && line.memory.as_u64() > (128 << 20)
         });
 
+        // Ошибка счётчика — не повод пропускать тик: нолём мы всего лишь
+        // теряем один признак из двух, а прежде их был всего один.
+        let paging_rate = paging_counter
+            .as_mut()
+            .and_then(|counter| counter.read().ok())
+            .unwrap_or(0.0);
+
         let moment = bamboo_analyze::moment_from(
             tick.driver_time(),
             busiest.map_or(0, |disk| disk.queue_depth),
@@ -318,6 +330,7 @@ fn run(sender: Sender<Snapshot>, visible: WidgetVisible) {
             used,
             tick.system.memory.physical_total,
             compressing,
+            paging_rate,
         );
         // Виновников снимаем здесь же, а не потом: пока человек откроет
         // окно, подвисание кончится и виновник разойдётся.

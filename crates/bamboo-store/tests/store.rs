@@ -53,6 +53,59 @@ fn opening_twice_does_not_re_run_migrations() {
     let _ = std::fs::remove_file(&dir);
 }
 
+/// Повреждённая база не останавливает наблюдение навсегда.
+///
+/// Взято с живой машины: после недели работы база оказалась повреждена,
+/// история молча перестала собираться, а разделы показывали пустоту,
+/// неотличимую от «ещё не накопилось». Файл здесь портится по-настоящему —
+/// поверх страниц пишется мусор, — а не подсовывается заглушка: проверять
+/// надо тот самый путь, которым SQLite сообщает о битом дереве.
+#[test]
+fn a_corrupted_database_is_set_aside_and_rebuilt() {
+    use std::io::{Seek, SeekFrom, Write};
+
+    let dir = std::env::temp_dir().join("bamboo-test-corrupt");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("наблюдения.db");
+
+    // Наполняем настолько, чтобы страниц стало много: порча одной страницы
+    // в почти пустой базе может не задеть ничего живого.
+    {
+        let store = Store::open(&path).unwrap();
+        for number in 0..400 {
+            store
+                .app_id(&format!("c:\\программа{number}.exe:?"), "п.exe", 1000)
+                .unwrap();
+        }
+    }
+
+    // Портим середину файла. Заголовок не трогаем намеренно: испорченный
+    // заголовок даёт «не база данных», а это другая, более простая ошибка.
+    let size = std::fs::metadata(&path).unwrap().len();
+    {
+        let mut file = std::fs::OpenOptions::new().write(true).open(&path).unwrap();
+        file.seek(SeekFrom::Start(size / 2)).unwrap();
+        file.write_all(&[0x5A; 4096]).unwrap();
+    }
+
+    let store = Store::open(&path).expect("повреждение не должно ронять Bamboo");
+    assert_eq!(
+        store.schema_version().unwrap(),
+        1,
+        "после замены база обязана быть рабочей"
+    );
+    assert!(
+        dir.join("наблюдения.повреждена.db").exists(),
+        "повреждённый файл должен остаться рядом — по нему разбираются"
+    );
+    // И новая база действительно пуста и пригодна к записи.
+    store.app_id("c:\\снова.exe:?", "снова.exe", 2000).unwrap();
+
+    drop(store);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 #[test]
 fn app_key_is_stable_across_restarts() {
     let store = store();
