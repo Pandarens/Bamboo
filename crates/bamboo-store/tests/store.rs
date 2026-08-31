@@ -53,6 +53,47 @@ fn opening_twice_does_not_re_run_migrations() {
     let _ = std::fs::remove_file(&dir);
 }
 
+/// Битый журнал не стоит всей истории.
+///
+/// Разница между этим случаем и следующим — в цене ошибки. Повреждение
+/// чаще живёт в журнале WAL, а не в самой базе: на живой машине база,
+/// которую пришлось отодвинуть, после удаления журнала прочиталась
+/// целиком — все 181 600 записей оказались на месте. Значит убирать
+/// сначала надо журнал, и только если это не помогло — базу.
+#[test]
+fn a_broken_journal_costs_the_tail_not_the_history() {
+    use std::io::Write;
+
+    let dir = std::env::temp_dir().join("bamboo-test-wal");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("наблюдения.db");
+
+    {
+        let store = Store::open(&path).unwrap();
+        store.set_pref("накоплено", "до поломки").unwrap();
+    }
+
+    // Кладём рядом заведомо негодный журнал.
+    let mut wal = std::fs::File::create(dir.join("наблюдения.db-wal")).unwrap();
+    wal.write_all(&[0xEE; 64 * 1024]).unwrap();
+    drop(wal);
+
+    let store = Store::open(&path).expect("битый журнал не должен ронять Bamboo");
+    assert_eq!(
+        store.pref("накоплено").unwrap().as_deref(),
+        Some("до поломки"),
+        "историю выбросили из-за журнала — а она была цела"
+    );
+    assert!(
+        !dir.join("наблюдения.повреждена.db").exists(),
+        "базу отодвинули, хотя хватило убрать журнал"
+    );
+
+    drop(store);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// Повреждённая база не останавливает наблюдение навсегда.
 ///
 /// Взято с живой машины: после недели работы база оказалась повреждена,
