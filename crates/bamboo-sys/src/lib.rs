@@ -39,6 +39,7 @@ pub mod schedtask;
 pub mod service;
 pub mod services;
 mod settings;
+pub mod single;
 pub mod startup;
 pub mod storage;
 pub mod user;
