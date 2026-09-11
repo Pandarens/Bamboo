@@ -9,7 +9,7 @@
 //! восстанавливать удалённую команду по памяти.
 
 use bamboo_core::{Error, Result};
-use windows_sys::Win32::Foundation::ERROR_SUCCESS;
+use windows_sys::Win32::Foundation::{ERROR_FILE_NOT_FOUND, ERROR_SUCCESS};
 use windows_sys::Win32::System::Registry::{
     RegCloseKey, RegCreateKeyExW, RegEnumValueW, RegOpenKeyExW, RegQueryValueExW, RegSetValueExW,
     HKEY, HKEY_CURRENT_USER, KEY_READ, KEY_SET_VALUE, REG_BINARY, REG_SZ,
@@ -90,7 +90,19 @@ impl Drop for Key {
 
 /// Перечисляет автозагрузку текущего пользователя.
 pub fn user_startup_items() -> Result<Vec<StartupItem>> {
-    let run = Key::open(RUN_KEY, KEY_READ)?;
+    // Раздела может не быть вовсе — у свежего профиля, где ни одна программа
+    // ещё не прописалась в автозапуск. Это пустой список, а не ошибка.
+    // Вскрылось на чистых машинах CI: тесты автозапуска падали через раз,
+    // смотря на какую машину попадёт прогон, — на одних раздел был,
+    // на других нет.
+    let run = match Key::open(RUN_KEY, KEY_READ) {
+        Ok(run) => run,
+        Err(Error::Win32 {
+            code: ERROR_FILE_NOT_FOUND,
+            ..
+        }) => return Ok(Vec::new()),
+        Err(other) => return Err(other),
+    };
     let mut items = Vec::new();
 
     for index in 0.. {
@@ -289,7 +301,9 @@ pub fn add_to_startup() -> Result<()> {
 /// а исправление настоящей поломки: тесты, писавшие в боевое имя, ломали
 /// автозапуск на машине разработчика.
 pub fn set_startup_command(name: &str, command: &str) -> Result<()> {
-    let run = Key::open(RUN_KEY, KEY_SET_VALUE)?;
+    // Создать, если нет: на свежем профиле раздела автозапуска ещё нет,
+    // и без этого Bamboo не смог бы прописать себя в автозапуск вовсе.
+    let run = Key::open_or_create(RUN_KEY, KEY_SET_VALUE)?;
     let name = wide(name);
     let value = wide(command);
 
@@ -321,12 +335,20 @@ pub fn remove_from_startup() -> Result<()> {
 pub fn remove_startup_command(name: &str) -> Result<()> {
     use windows_sys::Win32::System::Registry::RegDeleteValueW;
 
-    let run = Key::open(RUN_KEY, KEY_SET_VALUE)?;
+    let run = match Key::open(RUN_KEY, KEY_SET_VALUE) {
+        Ok(run) => run,
+        // Нет раздела — нет и записи: удалять нечего, цель достигнута.
+        Err(Error::Win32 {
+            code: ERROR_FILE_NOT_FOUND,
+            ..
+        }) => return Ok(()),
+        Err(other) => return Err(other),
+    };
     let name = wide(name);
 
     let status = unsafe { RegDeleteValueW(run.0, name.as_ptr()) };
     // Значения не было — цель достигнута, это не ошибка.
-    if status != ERROR_SUCCESS && status != 2 {
+    if status != ERROR_SUCCESS && status != ERROR_FILE_NOT_FOUND {
         return Err(Error::Win32 {
             call: "RegDeleteValueW(автозапуск)",
             code: status,
