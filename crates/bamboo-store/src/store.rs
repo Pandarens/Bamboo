@@ -88,6 +88,8 @@ pub struct FreezeEntry {
 
 pub struct Store {
     conn: Connection,
+    /// Что пришлось сделать с базой при открытии. `None` — база была цела.
+    recovery: Option<Recovery>,
 }
 
 /// Размер страницы базы, байт.
@@ -113,6 +115,30 @@ fn looks_corrupt(error: &rusqlite::Error) -> bool {
         ),
         _ => false,
     }
+}
+
+/// Что пришлось сделать с базой при открытии.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Recovery {
+    /// Убран повреждённый журнал. Сама база цела, потерян только
+    /// несброшенный хвост.
+    DroppedJournal,
+    /// База отодвинута, а из неё перенесено всё, что читалось.
+    Rebuilt {
+        /// Сколько строк перенесено.
+        salvaged_rows: usize,
+        /// Сколько частей прочитать не удалось: таблиц целиком или рядов
+        /// наблюдений одной программы.
+        lost_parts: usize,
+    },
+}
+
+/// Похожа ли ошибка на повреждение файла.
+///
+/// Для тех, кто пишет в базу во время работы: повреждение надо узнать
+/// сразу, а не через недели, при следующем запуске.
+pub fn is_corruption(error: &rusqlite::Error) -> bool {
+    looks_corrupt(error)
 }
 
 /// Убирает журнал WAL и разделяемый индекс.
@@ -141,7 +167,7 @@ fn drop_wal(path: &Path) {
 /// Журнал WAL и разделяемый индекс уносятся тоже. Оставить их — значит
 /// дать SQLite наложить старый журнал на новый пустой файл и получить
 /// вторую повреждённую базу вместо чистой.
-fn quarantine(path: &Path) -> Result<()> {
+fn quarantine(path: &Path) -> Result<std::path::PathBuf> {
     let broken = path.with_extension("повреждена.db");
     let _ = std::fs::remove_file(&broken);
     if let Err(error) = std::fs::rename(path, &broken) {
@@ -153,7 +179,7 @@ fn quarantine(path: &Path) -> Result<()> {
         ));
     }
     drop_wal(path);
-    Ok(())
+    Ok(broken)
 }
 
 impl Store {
@@ -162,7 +188,7 @@ impl Store {
     /// Повреждённая база не роняет Bamboo и не остаётся молча лежать.
     /// Сначала убирается журнал WAL — этого хватает почти всегда, и тогда
     /// история остаётся при себе; и лишь если база повреждена сама, она
-    /// отодвигается в сторону, а наблюдения начинают копиться заново.
+    /// отодвигается в сторону, а всё, что в ней читается, переносится в новую.
     ///
     /// Это не выдуманная предосторожность. На машине, где Bamboo проработал
     /// неделю, база оказалась повреждена — `integrity_check` нашёл битые
@@ -185,15 +211,27 @@ impl Store {
                 //
                 // На живой машине повреждённая база после удаления журнала
                 // прочиталась целиком: все 181 600 записей оказались
-                // на месте, битым был хвост журнала. Первая редакция
-                // уносила базу вместе с ним и теряла всё, хотя терять
-                // требовалось только несбросившийся хвост.
+                // на месте, битым был хвост журнала.
                 drop_wal(path);
                 match Self::open_sound(path) {
-                    Ok(store) => Ok(store),
+                    Ok(mut store) => {
+                        store.recovery = Some(Recovery::DroppedJournal);
+                        Ok(store)
+                    }
                     Err(again) if looks_corrupt(&again) => {
-                        quarantine(path)?;
-                        Self::open_sound(path)
+                        // Повреждена сама база. Отодвигаем её — и переносим
+                        // из неё всё, что читается. Второе повреждение на той
+                        // же машине задело одно дерево из десятка: читались
+                        // 119 программ из 120, а прежняя починка выбрасывала
+                        // все шестьсот с лишним тысяч наблюдений разом.
+                        let broken = quarantine(path)?;
+                        let mut store = Self::open_sound(path)?;
+                        let (salvaged_rows, lost_parts) = store.salvage_from(&broken);
+                        store.recovery = Some(Recovery::Rebuilt {
+                            salvaged_rows,
+                            lost_parts,
+                        });
+                        Ok(store)
                     }
                     Err(other) => Err(other),
                 }
@@ -225,6 +263,89 @@ impl Store {
             ));
         }
         Ok(store)
+    }
+
+    /// Открывает базу только для чтения — без проверки, лечения и миграций.
+    ///
+    /// Для командной строки. Лечить базу вправе только агент: командная
+    /// строка работает рядом с живым агентом, и начни она сама отодвигать
+    /// файлы и убирать журнал, пока агент пишет, — сломала бы ровно то,
+    /// что пытается починить.
+    pub fn open_read_only(path: impl AsRef<Path>) -> Result<Store> {
+        let conn = Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+        conn.busy_timeout(std::time::Duration::from_secs(5))?;
+        Ok(Store {
+            conn,
+            recovery: None,
+        })
+    }
+
+    /// Чем кончилось открытие, если базу пришлось лечить.
+    pub fn last_recovery(&self) -> Option<&Recovery> {
+        self.recovery.as_ref()
+    }
+
+    /// Переносит из отодвинутой базы всё, что в ней читается.
+    ///
+    /// Каждая таблица и ряды каждой программы переносятся отдельной
+    /// командой: прочитать не удалось — теряется эта часть, а не всё.
+    /// Возвращает число перенесённых строк и число потерянных частей.
+    fn salvage_from(&mut self, broken: &Path) -> (usize, usize) {
+        let mut rows = 0usize;
+        let mut lost = 0usize;
+        let broken = broken.to_string_lossy().to_string();
+        if self
+            .conn
+            .execute("ATTACH DATABASE ?1 AS broken", params![broken])
+            .is_err()
+        {
+            return (0, 1);
+        }
+
+        // Без общей транзакции, и это не небрежность: ошибка чтения битого
+        // дерева вправе откатить её целиком — вместе с уже перенесёнными
+        // настройками и подвисаниями. Так и вышло в тесте. Каждая команда
+        // здесь сама себе транзакция, а в режиме WAL это дёшево.
+
+        // Программы — первыми и со своими номерами: ряды наблюдений
+        // ссылаются на них по номеру.
+        for table in [
+            "apps",
+            "user_prefs",
+            "boot_history",
+            "smart_history",
+            "freeze_history",
+        ] {
+            let copy = format!("INSERT OR IGNORE INTO main.{table} SELECT * FROM broken.{table}");
+            match self.conn.execute(&copy, []) {
+                Ok(copied) => rows += copied,
+                // Таблицы нет в старой схеме — это не потеря.
+                Err(error) if error.to_string().contains("no such table") => {}
+                Err(_) => lost += 1,
+            }
+        }
+
+        let apps: Vec<i64> = match self.conn.prepare("SELECT id FROM main.apps") {
+            Ok(mut statement) => statement
+                .query_map([], |row| row.get::<_, i64>(0))
+                .map(|found| found.filter_map(|id| id.ok()).collect())
+                .unwrap_or_default(),
+            Err(_) => Vec::new(),
+        };
+        for app in apps {
+            for table in ["samples_l2", "samples_l3"] {
+                let copy = format!(
+                    "INSERT OR IGNORE INTO main.{table} SELECT * FROM broken.{table} WHERE app_id = ?1"
+                );
+                match self.conn.execute(&copy, params![app]) {
+                    Ok(copied) => rows += copied,
+                    Err(_) => lost += 1,
+                }
+            }
+        }
+
+        let _ = self.conn.execute("DETACH DATABASE broken", []);
+        (rows, lost)
     }
 
     /// База в памяти. Нужна тестам.
@@ -263,7 +384,10 @@ impl Store {
         conn.pragma_update(None, "journal_size_limit", 8 * 1024 * 1024)?;
         conn.pragma_update(None, "foreign_keys", "ON")?;
 
-        let mut store = Store { conn };
+        let mut store = Store {
+            conn,
+            recovery: None,
+        };
         store.migrate()?;
         Ok(store)
     }

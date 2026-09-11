@@ -21,5 +21,8 @@ pub mod trace;
 
 pub use aggregate::{bucket_start, into_buckets, roll_up, Bucket, SamplePoint, Stat};
 pub use schema::{L2_BUCKET_MS, L2_RETENTION_MS, L3_BUCKET_MS, L3_RETENTION_MS, SCHEMA_VERSION};
-pub use store::{BootEntry, FreezeEntry, Level, SmartSnapshot, Store};
+pub use store::{is_corruption, BootEntry, FreezeEntry, Level, Recovery, SmartSnapshot, Store};
 pub use trace::{Trace, TraceFrame, TraceProcess, TRACE_VERSION};
+
+/// Результат операций с базой — для тех, кто передаёт их дальше.
+pub use store::Result;

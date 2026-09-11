@@ -226,7 +226,10 @@ mod commands {
         // «база занята» и «база повреждена» — разные беды, и человеку
         // важно, какая именно.
         let read = || {
-            let store = bamboo_store::Store::open(&path).map_err(|e| e.to_string())?;
+            // Только чтение: лечить базу вправе один агент. Командная строка
+            // работает рядом с ним, и лечение отсюда отодвигало бы файлы
+            // прямо под пишущим агентом.
+            let store = bamboo_store::Store::open_read_only(&path).map_err(|e| e.to_string())?;
             let now = bamboo_core::SampleTime::wall_clock_now();
             let from = now - days as i64 * 24 * 60 * 60 * 1000;
             let counts = store.freeze_counts_since(from).map_err(|e| e.to_string())?;

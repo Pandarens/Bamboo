@@ -469,3 +469,135 @@ fn freezes_are_stored_and_counted_by_cause() {
     assert_eq!(store.prune_freezes(far_future).unwrap(), 3);
     assert!(store.freezes_since(0, 10).unwrap().is_empty());
 }
+
+/// Отодвинутая база отдаёт всё, что в ней читается.
+///
+/// Со второго повреждения на живой машине: из базы читались 119 программ
+/// из 120, а прежняя починка выбрасывала все разом — шестьсот с лишним
+/// тысяч наблюдений ради одного битого дерева.
+#[test]
+fn a_rebuilt_database_keeps_what_was_readable() {
+    use std::io::{Seek, SeekFrom, Write};
+
+    let dir = std::env::temp_dir().join("bamboo-test-salvage");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("наблюдения.db");
+
+    {
+        let mut store = Store::open(&path).unwrap();
+        // Настройки и подвисания ложатся в начало файла...
+        store.set_pref("хранится", "да").unwrap();
+        store
+            .record_freeze(&bamboo_store::FreezeEntry {
+                at_unix_ms: 1_700_000_000_000,
+                cause: "memory".to_string(),
+                detail: "подробности".to_string(),
+                culprits: String::new(),
+                stall_ms: 0,
+            })
+            .unwrap();
+        // ...а наблюдения — много страниц после них.
+        for app in 0..40 {
+            let id = store
+                .app_id(&format!("программа{app}"), "п.exe", 0)
+                .unwrap();
+            let points: Vec<SamplePoint> = (0..400)
+                .map(|i| point(i * L2_BUCKET_MS, 100, 50_000))
+                .collect();
+            store
+                .write_buckets(Level::L2, id, &into_buckets(&points, L2_BUCKET_MS))
+                .unwrap();
+        }
+    }
+
+    // Портим хвост: там наблюдения, а настройки и подвисания — в начале.
+    let size = std::fs::metadata(&path).unwrap().len();
+    {
+        let mut file = std::fs::OpenOptions::new().write(true).open(&path).unwrap();
+        file.seek(SeekFrom::Start(size - 16 * 1024)).unwrap();
+        file.write_all(&[0x5A; 8 * 1024]).unwrap();
+    }
+
+    let store = Store::open(&path).expect("повреждение не должно ронять Bamboo");
+    match store.last_recovery() {
+        Some(bamboo_store::Recovery::Rebuilt { salvaged_rows, .. }) => {
+            assert!(*salvaged_rows > 0, "перенесено ноль строк")
+        }
+        other => panic!("ожидалась пересборка с переносом, а вышло {other:?}"),
+    }
+    assert_eq!(
+        store.pref("хранится").unwrap().as_deref(),
+        Some("да"),
+        "настройки потерялись при переносе"
+    );
+    assert_eq!(
+        store.freezes_since(0, 10).unwrap().len(),
+        1,
+        "подвисания потерялись при переносе"
+    );
+
+    drop(store);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Чтение без лечения не трогает файлы.
+///
+/// Командная строка работает рядом с живым агентом. Лечение из неё
+/// отодвигало бы базу и убирало журнал прямо под пишущим агентом.
+#[test]
+fn a_read_only_open_never_repairs() {
+    use std::io::{Seek, SeekFrom, Write};
+
+    let dir = std::env::temp_dir().join("bamboo-test-readonly");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("наблюдения.db");
+    {
+        let store = Store::open(&path).unwrap();
+        for number in 0..400 {
+            store
+                .app_id(&format!(r"c:\программа{number}.exe:?"), "п.exe", 1000)
+                .unwrap();
+        }
+    }
+    let size = std::fs::metadata(&path).unwrap().len();
+    {
+        let mut file = std::fs::OpenOptions::new().write(true).open(&path).unwrap();
+        file.seek(SeekFrom::Start(size / 2)).unwrap();
+        file.write_all(&[0x5A; 4096]).unwrap();
+    }
+
+    let _ = Store::open_read_only(&path);
+    assert!(
+        !dir.join("наблюдения.повреждена.db").exists(),
+        "чтение без лечения отодвинуло базу"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Проверка на настоящей повреждённой базе — запускается вручную.
+///
+/// Синтетическая порча в тестах выше доказывает, что путь лечения
+/// работает; эта проверка — что он справляется с тем, что случилось
+/// на живой машине. Путь к копии базы — в переменной BAMBOO_PROBE_DB.
+/// Копия, а не оригинал: лечение переименовывает файлы.
+#[test]
+#[ignore]
+fn probe_a_real_damaged_database() {
+    let Some(path) = std::env::var_os("BAMBOO_PROBE_DB") else {
+        return;
+    };
+    let started = std::time::Instant::now();
+    let store = Store::open(&path).expect("настоящая повреждённая база не открылась");
+    println!(
+        "лечение: {:?} за {} мс",
+        store.last_recovery(),
+        started.elapsed().as_millis()
+    );
+    println!(
+        "подвисаний после лечения: {}",
+        store.freezes_since(0, 100_000).unwrap().len()
+    );
+    println!("размер после лечения: {}", store.size_bytes().unwrap());
+}
