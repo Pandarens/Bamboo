@@ -19,6 +19,7 @@ pub mod origin;
 pub mod record;
 pub mod regression;
 pub mod report;
+pub mod shield;
 pub mod slowstart;
 pub mod spike;
 pub mod suggest;
