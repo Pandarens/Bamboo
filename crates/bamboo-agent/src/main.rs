@@ -1782,6 +1782,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                                     .map(|line| (line.pid, line.name.clone()))
                             })
                             .collect();
+                        holds.forget_gone(&|pid| snapshot.top.iter().any(|line| line.pid == pid));
                         let step = holds.step(&wanted);
                         for (pid, journal_id) in step.release {
                             holds.release(pid);
@@ -1794,12 +1795,15 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                             }
                         }
                         for (pid, name) in step.apply {
-                            if let Some(journal_id) = actions::apply_automatically(
+                            match actions::apply_automatically(
                                 pid,
                                 &name,
                                 actions::RowAction::LowerMemory,
                             ) {
-                                holds.hold(pid, name, journal_id);
+                                Some(journal_id) => holds.hold(pid, name, journal_id),
+                                // Отказ запоминаем: иначе попытка повторялась бы
+                                // каждый тик, и каждая — запись в журнал на диск.
+                                None => holds.refuse(pid, name),
                             }
                         }
                     } else {

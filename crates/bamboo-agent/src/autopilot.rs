@@ -208,6 +208,15 @@ impl Autopilot {
 pub struct ShieldHolds {
     /// Номер процесса → его имя и запись журнала, которой откатывать.
     held: std::collections::HashMap<u32, (String, i64)>,
+    /// Кому понизить не вышло: отказ в доступе, защищённый процесс.
+    ///
+    /// Отказы — не выдумка: журнал живой машины за неделю записал шесть
+    /// «отказано в доступе» при понижении приоритета памяти. Прежняя
+    /// автоматика натыкалась на них редко, а защита работает каждый тик:
+    /// без этой памяти она пыталась бы снова и снова, и каждая попытка —
+    /// запись в журнал действий с синхронной записью на диск, ровно тот
+    /// износ накопителя, за который Bamboo ругает других.
+    refused: std::collections::HashSet<(u32, String)>,
 }
 
 /// Что сделать с защитой на этом тике.
@@ -235,6 +244,9 @@ impl ShieldHolds {
             }
         }
         for (pid, name) in wanted {
+            if self.refused.contains(&(*pid, name.clone())) {
+                continue;
+            }
             match self.held.get(pid) {
                 Some((held_name, _)) if held_name == name => {}
                 _ => step.apply.push((*pid, name.clone())),
@@ -246,6 +258,17 @@ impl ShieldHolds {
 
     pub fn hold(&mut self, pid: u32, name: String, journal_id: i64) {
         self.held.insert(pid, (name, journal_id));
+    }
+
+    /// Запоминает отказ: этому процессу больше не пытаемся.
+    pub fn refuse(&mut self, pid: u32, name: String) {
+        self.refused.insert((pid, name));
+    }
+
+    /// Забывает отказы завершившихся процессов: номер может достаться
+    /// другому процессу, и тому отказывать не за что.
+    pub fn forget_gone(&mut self, alive: &dyn Fn(u32) -> bool) {
+        self.refused.retain(|(pid, _)| alive(*pid));
     }
 
     pub fn release(&mut self, pid: u32) -> Option<i64> {
@@ -306,6 +329,29 @@ mod shield_hold_tests {
         let step = holds.step(&wanted(&[(21, "other.exe")]));
         assert_eq!(step.release, vec![(21, 7)]);
         assert_eq!(step.apply, vec![(21, "other.exe".to_string())]);
+    }
+
+    #[test]
+    fn a_refused_process_is_not_retried_every_tick() {
+        // Понизить приоритет удаётся не всем: журнал живой машины за неделю
+        // записал шесть отказов в доступе. Без памяти об отказе защита
+        // пыталась бы на каждом тике — и каждый раз запись в журнал.
+        let mut holds = ShieldHolds::default();
+        holds.refuse(700, "protected.exe".into());
+        assert!(
+            holds
+                .step(&wanted(&[(700, "protected.exe")]))
+                .apply
+                .is_empty(),
+            "отказавшему процессу пытаются снова"
+        );
+
+        // Процесс завершился — отказ забыт: номер достанется другому.
+        holds.forget_gone(&|_| false);
+        assert_eq!(
+            holds.step(&wanted(&[(700, "protected.exe")])).apply.len(),
+            1
+        );
     }
 
     #[test]
