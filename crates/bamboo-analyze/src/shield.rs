@@ -43,12 +43,26 @@ use bamboo_core::Bytes;
 /// становится толкотней, а не загрузкой программ (см. детектор подвисаний).
 const ENGAGE_AT: f64 = 0.80;
 
-/// Занятость, ниже которой защита снимается.
+/// Занятость, ниже которой защита может сняться.
 ///
-/// Зазор против дребезга: на машине, где память колеблется около
-/// восьмидесяти, без него защита включалась бы и снималась каждую минуту,
-/// и каждый раз — запись в журнал.
+/// Может — но не сразу, см. `CALM_BEFORE_RELEASE_MS`.
 const RELEASE_BELOW: f64 = 0.72;
+
+/// Сколько память должна пробыть ниже порога снятия, прежде чем защита
+/// снимется.
+///
+/// Зазора в процентах оказалось мало, и показал это первый же час защиты
+/// на живой машине. Сборка в Android Studio подняла память до 85% —
+/// защита прикрыла демон Gradle и службу VPN, память после сборки рухнула
+/// ниже порога, защита снялась, через полторы минуты память снова выросла,
+/// и защита поставилась опять. Каждый шаг — запись в журнал действий
+/// с синхронной записью на диск. Память рабочей машины ходит рывками,
+/// и порог в процентах она перепрыгивает за секунды.
+///
+/// Включаемся сразу — нехватка бьёт по переднему плану немедленно. А снимаем
+/// только после десяти спокойных минут: цена задержки — фоновая программа
+/// без окна десять лишних минут уступает память первой, то есть ничего.
+const CALM_BEFORE_RELEASE_MS: u64 = 10 * 60 * 1000;
 
 /// С какого размера процесс стоит трогать.
 ///
@@ -56,6 +70,11 @@ const RELEASE_BELOW: f64 = 0.72;
 /// встроенный браузер Steam от 480 МБ до полутора гигабайт, помощник
 /// BlueStacks 645 МБ, служба VPN до 540 МБ. Мелочь в десятки мегабайт
 /// очереди на вытеснение не меняет, а запись в журнал стоит каждая.
+///
+/// Порог — только для того, чтобы взять под защиту. Кто уже взят, остаётся,
+/// даже похудев: служба VPN на той же машине держала 236 МБ, и без этого
+/// каждое её колебание через двести мегабайт снимало бы защиту и тут же
+/// ставило снова.
 const WORTH_SHIELDING: u64 = 200 * 1024 * 1024;
 
 /// Сколько процессов держим разом.
@@ -102,6 +121,10 @@ pub struct ShieldFacts<'a> {
 #[derive(Clone, Debug, Default)]
 pub struct Shield {
     engaged: bool,
+    /// С какого момента память ниже порога снятия. `None` — не ниже.
+    calm_since: Option<u64>,
+    /// Кого защита держала на прошлом тике.
+    held: HashSet<u32>,
 }
 
 impl Shield {
@@ -116,23 +139,34 @@ impl Shield {
 
     /// Номера процессов, которым сейчас нужен пониженный приоритет памяти.
     ///
-    /// Пустой список — обычный исход: памяти хватает, или прикрывать
-    /// передний план не от кого.
+    /// `now_ms` — монотонные часы: по ним отсчитываются спокойные минуты
+    /// перед снятием. Пустой список — обычный исход: памяти хватает,
+    /// или прикрывать передний план не от кого.
     pub fn wanted(
         &mut self,
         processes: &[ShieldFacts<'_>],
         memory_used_share: f64,
         foreground_pid: u32,
         own_pid: u32,
+        now_ms: u64,
     ) -> Vec<u32> {
-        if self.engaged {
-            if memory_used_share < RELEASE_BELOW {
-                self.engaged = false;
-            }
-        } else if memory_used_share >= ENGAGE_AT {
+        if memory_used_share >= ENGAGE_AT {
             self.engaged = true;
+            self.calm_since = None;
+        } else if self.engaged {
+            if memory_used_share < RELEASE_BELOW {
+                let since = *self.calm_since.get_or_insert(now_ms);
+                if now_ms.saturating_sub(since) >= CALM_BEFORE_RELEASE_MS {
+                    self.engaged = false;
+                    self.calm_since = None;
+                }
+            } else {
+                // Между порогами — спокойствие прервано, отсчёт заново.
+                self.calm_since = None;
+            }
         }
         if !self.engaged {
+            self.held.clear();
             return Vec::new();
         }
 
@@ -169,7 +203,9 @@ impl Shield {
             .enumerate()
             .filter(|(at, process)| {
                 !process.protected
-                    && (process.memory.as_u64() >= WORTH_SHIELDING || process.leaking)
+                    && (process.memory.as_u64() >= WORTH_SHIELDING
+                        || process.leaking
+                        || self.held.contains(&process.pid))
                     && !lineage(processes, &index, *at).into_iter().any(visible)
             })
             .map(|(_, process)| process)
@@ -178,11 +214,13 @@ impl Shield {
         // Больший — первым: если места в списке мало, пусть достанется тем,
         // у кого отнимать есть что.
         picked.sort_by_key(|process| Reverse(process.memory.as_u64()));
-        picked
+        let wanted: Vec<u32> = picked
             .into_iter()
             .take(AT_MOST)
             .map(|process| process.pid)
-            .collect()
+            .collect();
+        self.held = wanted.iter().copied().collect();
+        wanted
     }
 }
 
@@ -219,6 +257,7 @@ mod tests {
     use super::*;
 
     const MB: u64 = 1024 * 1024;
+    const MINUTE: u64 = 60 * 1000;
     const TIGHT: f64 = 0.88;
     const OWN: u32 = 999;
 
@@ -255,35 +294,101 @@ mod tests {
 
     #[test]
     fn a_windowless_background_family_is_shielded() {
-        let wanted = Shield::new().wanted(&steam_in_tray(), TIGHT, 30, OWN);
+        let wanted = Shield::new().wanted(&steam_in_tray(), TIGHT, 30, OWN, 0);
         assert_eq!(wanted, vec![21, 22]);
     }
 
     #[test]
     fn nothing_is_touched_while_memory_is_plentiful() {
         let mut shield = Shield::new();
-        assert!(shield.wanted(&steam_in_tray(), 0.60, 30, OWN).is_empty());
+        assert!(shield.wanted(&steam_in_tray(), 0.60, 30, OWN, 0).is_empty());
         assert!(!shield.engaged());
     }
 
     #[test]
-    fn the_shield_does_not_flap_around_the_threshold() {
+    fn the_shield_engages_at_once_but_releases_only_after_calm_minutes() {
         let mut shield = Shield::new();
+        let processes = steam_in_tray();
         assert!(
-            shield.wanted(&steam_in_tray(), 0.79, 30, OWN).is_empty(),
+            shield.wanted(&processes, 0.79, 30, OWN, 0).is_empty(),
             "включилась раньше порога"
         );
         assert!(
-            !shield.wanted(&steam_in_tray(), 0.81, 30, OWN).is_empty(),
+            !shield.wanted(&processes, 0.81, 30, OWN, 0).is_empty(),
             "не включилась на пороге"
         );
         assert!(
-            !shield.wanted(&steam_in_tray(), 0.75, 30, OWN).is_empty(),
-            "снялась в зазоре — будет дребезг"
+            !shield.wanted(&processes, 0.70, 30, OWN, MINUTE).is_empty(),
+            "снялась на первой же спокойной минуте — будет дребезг"
         );
         assert!(
-            shield.wanted(&steam_in_tray(), 0.70, 30, OWN).is_empty(),
-            "не снялась, хотя нехватка прошла"
+            !shield
+                .wanted(&processes, 0.70, 30, OWN, 10 * MINUTE)
+                .is_empty(),
+            "снялась раньше десяти спокойных минут"
+        );
+        assert!(
+            shield
+                .wanted(&processes, 0.70, 30, OWN, 11 * MINUTE)
+                .is_empty(),
+            "не снялась после десяти спокойных минут"
+        );
+    }
+
+    /// Случай с живой машины, из-за которого появился отсчёт во времени.
+    ///
+    /// Сборка в Android Studio подняла память до 85%, после сборки память
+    /// рухнула ниже порога снятия, через полторы минуты выросла снова.
+    /// Прежняя защита успела сняться и поставиться заново — две лишние
+    /// записи в журнал за полторы минуты.
+    #[test]
+    fn a_memory_drop_after_a_build_does_not_bounce_the_shield() {
+        let mut shield = Shield::new();
+        let processes = vec![
+            process(10, 1, "explorer.exe", 600, true),
+            process(40, 0, "java.exe", 1500, false),
+        ];
+        assert_eq!(shield.wanted(&processes, 0.85, 10, OWN, 0), vec![40]);
+        assert_eq!(
+            shield.wanted(&processes, 0.70, 10, OWN, MINUTE),
+            vec![40],
+            "провал после сборки снял защиту"
+        );
+        assert_eq!(shield.wanted(&processes, 0.83, 10, OWN, 90_000), vec![40]);
+    }
+
+    #[test]
+    fn a_calm_spell_interrupted_between_thresholds_starts_over() {
+        let mut shield = Shield::new();
+        let processes = steam_in_tray();
+        shield.wanted(&processes, 0.85, 30, OWN, 0);
+        shield.wanted(&processes, 0.70, 30, OWN, MINUTE);
+        // Между порогами — спокойствие прервано.
+        shield.wanted(&processes, 0.75, 30, OWN, 5 * MINUTE);
+        assert!(
+            !shield
+                .wanted(&processes, 0.70, 30, OWN, 12 * MINUTE)
+                .is_empty(),
+            "отсчёт не начался заново после перерыва"
+        );
+    }
+
+    #[test]
+    fn a_shielded_process_that_shrinks_below_the_bar_stays_shielded() {
+        // Служба VPN на живой машине держала 236 МБ при пороге в двести.
+        // Без «липкости» каждое её колебание через порог снимало бы защиту
+        // и тут же ставило снова.
+        let mut shield = Shield::new();
+        let mut processes = vec![
+            process(10, 1, "explorer.exe", 600, true),
+            process(50, 10, "Cloudflare WARP.exe", 236, false),
+        ];
+        assert_eq!(shield.wanted(&processes, TIGHT, 10, OWN, 0), vec![50]);
+        processes[1].memory = Bytes(190 * MB);
+        assert_eq!(
+            shield.wanted(&processes, TIGHT, 10, OWN, MINUTE),
+            vec![50],
+            "похудевшего сняли — будет дребезг"
         );
     }
 
@@ -293,7 +398,20 @@ mod tests {
         // и страницы его браузера должны быть на месте.
         let mut processes = steam_in_tray();
         processes[1].has_window = true;
-        assert!(Shield::new().wanted(&processes, TIGHT, 30, OWN).is_empty());
+        assert!(Shield::new()
+            .wanted(&processes, TIGHT, 30, OWN, 0)
+            .is_empty());
+    }
+
+    #[test]
+    fn opening_a_window_releases_at_once() {
+        // Снятие по времени — только для нехватки памяти. Появилось окно —
+        // человек вернулся к программе, и её страницы нужны сейчас.
+        let mut shield = Shield::new();
+        let mut processes = steam_in_tray();
+        assert!(!shield.wanted(&processes, TIGHT, 30, OWN, 0).is_empty());
+        processes[1].has_window = true;
+        assert!(shield.wanted(&processes, TIGHT, 30, OWN, MINUTE).is_empty());
     }
 
     #[test]
@@ -308,7 +426,9 @@ mod tests {
             process(42, 40, "chrome.exe", 380, false),
             process(30, 10, "Telegram.exe", 900, true),
         ];
-        assert!(Shield::new().wanted(&processes, TIGHT, 30, OWN).is_empty());
+        assert!(Shield::new()
+            .wanted(&processes, TIGHT, 30, OWN, 0)
+            .is_empty());
     }
 
     #[test]
@@ -324,7 +444,9 @@ mod tests {
             process(53, 52, "link.exe", 1200, false),
             process(54, 52, "rustc.exe", 740, false),
         ];
-        assert!(Shield::new().wanted(&processes, TIGHT, 50, OWN).is_empty());
+        assert!(Shield::new()
+            .wanted(&processes, TIGHT, 50, OWN, 0)
+            .is_empty());
     }
 
     #[test]
@@ -335,7 +457,10 @@ mod tests {
             process(10, 1, "explorer.exe", 600, true),
             process(60, 10, "BlueStacksAI.exe", 645, false),
         ];
-        assert_eq!(Shield::new().wanted(&processes, TIGHT, 10, OWN), vec![60]);
+        assert_eq!(
+            Shield::new().wanted(&processes, TIGHT, 10, OWN, 0),
+            vec![60]
+        );
     }
 
     #[test]
@@ -346,7 +471,9 @@ mod tests {
             process(OWN, 10, "bamboo-agent.exe", 300, false),
         ];
         processes[1].protected = true;
-        assert!(Shield::new().wanted(&processes, TIGHT, 10, OWN).is_empty());
+        assert!(Shield::new()
+            .wanted(&processes, TIGHT, 10, OWN, 0)
+            .is_empty());
     }
 
     #[test]
@@ -356,7 +483,10 @@ mod tests {
             process(80, 10, "leaky-helper.exe", 60, false),
         ];
         processes[1].leaking = true;
-        assert_eq!(Shield::new().wanted(&processes, TIGHT, 10, OWN), vec![80]);
+        assert_eq!(
+            Shield::new().wanted(&processes, TIGHT, 10, OWN, 0),
+            vec![80]
+        );
     }
 
     #[test]
@@ -366,7 +496,7 @@ mod tests {
             process(91, 90, "b.exe", 300, false),
         ];
         assert_eq!(
-            Shield::new().wanted(&processes, TIGHT, 0, OWN),
+            Shield::new().wanted(&processes, TIGHT, 0, OWN, 0),
             vec![90, 91]
         );
     }
@@ -386,7 +516,7 @@ mod tests {
                 false,
             ));
         }
-        let wanted = Shield::new().wanted(&processes, TIGHT, 10, OWN);
+        let wanted = Shield::new().wanted(&processes, TIGHT, 10, OWN, 0);
         assert_eq!(wanted.len(), AT_MOST);
         assert_eq!(wanted[0], 119, "первым должен идти самый большой");
     }

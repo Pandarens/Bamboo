@@ -1771,6 +1771,9 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                             snapshot.memory_pressure(),
                             bamboo_sys::window::foreground_pid(),
                             std::process::id(),
+                            // Монотонные часы: по ним защита отсчитывает спокойные
+                            // минуты перед снятием, и прыжки настенных ей не страшны.
+                            started.elapsed().as_millis() as u64,
                         );
                         let wanted: Vec<(u32, String)> = wanted_pids
                             .iter()
