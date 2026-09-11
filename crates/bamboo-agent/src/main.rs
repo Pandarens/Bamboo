@@ -70,7 +70,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     //
     // Место держится переменной до конца main. Присвоить его `_` нельзя:
     // так значение уничтожается сразу же, и защита исчезает в тот же миг.
-    let _single = match bamboo_sys::single::SingleInstance::acquire(AGENT_MUTEX) {
+    // После обновления новая версия стартует, пока старая ещё заканчивает
+    // работу, — ей надо подождать, а не уходить.
+    let after_update = std::env::args().any(|arg| arg == update::AFTER_UPDATE_FLAG);
+    let _single = match acquire_single(after_update) {
         Ok(Some(place)) => place,
         Ok(None) => {
             // Не ошибка и не повод для кода возврата: человек дважды нажал
@@ -96,6 +99,36 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 /// агенты свои, а вот запуск от администратора и обычный внутри одного
 /// сеанса — это те самые двое, которых надо развести.
 const AGENT_MUTEX: &str = r"Local\Bamboo-Agent";
+
+/// Занимает место единственного агента.
+///
+/// После обновления новая версия стартует, пока старая ещё возвращает
+/// придержанное и дописывает историю, — поэтому ждёт до двадцати секунд,
+/// а не уходит сразу. Без ожидания после обновления не осталось бы
+/// ни одного агента.
+#[cfg(windows)]
+fn acquire_single(
+    after_update: bool,
+) -> bamboo_core::Result<Option<bamboo_sys::single::SingleInstance>> {
+    let deadline = std::time::Instant::now() + Duration::from_secs(20);
+    loop {
+        match bamboo_sys::single::SingleInstance::acquire(AGENT_MUTEX)? {
+            Some(place) => return Ok(Some(place)),
+            None if after_update && std::time::Instant::now() < deadline => {
+                std::thread::sleep(Duration::from_millis(250));
+            }
+            None => return Ok(None),
+        }
+    }
+}
+
+/// Как часто пробовать открыть историю, если она не открылась.
+#[cfg(windows)]
+const HISTORY_RETRY: Duration = Duration::from_secs(10 * 60);
+
+/// Как часто напоминать об утечке одной и той же программы.
+#[cfg(windows)]
+const LEAK_NOTICE_EVERY: Duration = Duration::from_secs(24 * 60 * 60);
 
 fn run() -> Result<(), Box<dyn std::error::Error>> {
     // Программный рендерер: GPU-контекст не создаётся вообще (ТЗ, раздел 4.1).
@@ -250,14 +283,19 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     // История наблюдений на диске. Без неё выводы о росте памяти
     // начинались заново после каждого перезапуска, а недельный отчёт
     // строить было не из чего.
-    let mut history = match history::History::open(0) {
-        Ok(history) => Some(history),
-        Err(error) => {
-            // Наблюдение продолжается и без истории, но молчать нельзя.
-            eprintln!("история наблюдений недоступна: {error}");
-            None
-        }
-    };
+    let history: std::rc::Rc<std::cell::RefCell<Option<history::History>>> =
+        std::rc::Rc::new(std::cell::RefCell::new(None));
+    // Беда с историей — пока она не прошла. Прежде неоткрывшаяся история
+    // печаталась в поток ошибок, которого у программы с окном никто
+    // не видит, и оставалась закрытой до перезапуска агента.
+    let mut history_error: Option<String> = None;
+    match history::History::open(0) {
+        Ok(opened) => *history.borrow_mut() = Some(opened),
+        Err(error) => history_error = Some(error),
+    }
+    let mut history_retry_at = std::time::Instant::now() + HISTORY_RETRY;
+    // Сказали ли уже человеку, что история не пишется: одного раза хватит.
+    let mut history_alerted = false;
 
     // Уведомления. Своя скрытая иконка: чужую, которую держит трей,
     // трогать нельзя, а вторая видимая панда человеку не нужна.
@@ -690,9 +728,17 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                         win.set_update_status(SharedString::from(note.clone()));
                         win.set_action_note(SharedString::from(note));
                         if installed {
-                            // Полосу убираем: обновляться больше не на что,
-                            // осталось перезапустить.
                             win.set_update_version(SharedString::from(""));
+                            // Перезапускаемся сами. Новая версия стартует с ключом
+                            // и ждёт, пока эта освободит место единственного агента;
+                            // эта тем временем возвращает придержанное и дописывает
+                            // историю.
+                            match update::restart_into_new_version() {
+                                Ok(()) => {
+                                    let _ = slint::quit_event_loop();
+                                }
+                                Err(why) => win.set_action_note(SharedString::from(why)),
+                            }
                         }
                     }
                 });
@@ -1381,6 +1427,16 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     let started = std::time::Instant::now();
     let tick_pilot = autopilot.clone();
     let tick_holds = autopilot_holds.clone();
+    let tick_history = history.clone();
+    // Защита переднего плана: её удержания отдельно от удержаний «пока
+    // человека нет» — у них противоположное правило снятия.
+    let shield_holds: std::rc::Rc<std::cell::RefCell<autopilot::ShieldHolds>> =
+        std::rc::Rc::new(std::cell::RefCell::new(autopilot::ShieldHolds::default()));
+    let tick_shield = shield_holds.clone();
+    let mut shield = bamboo_analyze::shield::Shield::new();
+    // О каких утечках уже говорили и когда.
+    let mut leak_notified: std::collections::HashMap<String, std::time::Instant> =
+        std::collections::HashMap::new();
     let timer = slint::Timer::default();
     // Состояние автоскрытия в полноэкранном режиме (ТЗ 14.2). Реагируем на
     // переходы, а не на само состояние: иначе, если пользователь вручную
@@ -1533,34 +1589,90 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                     );
                 }
 
-                // Подвисание пишем сразу, а не с историей: их единицы
-                // за сутки, и ждать четырёхчасового сброса значило бы
-                // терять их при каждом перезапуске.
-                if let (Some(history), Some(entry)) = (&history, &snapshot.new_freeze) {
-                    if let Err(error) = history.record_freeze(entry) {
-                        eprintln!("подвисание записать не удалось: {error}");
-                    }
-                }
-
-                // История: копим каждый тик, пишем раз в несколько часов.
-                if let Some(history) = &mut history {
+                // История наблюдений. Не открылась или сломалась во время
+                // работы — пробуем снова раз в десять минут и говорим об
+                // этом, а не молчим. На живой машине молчание стоило
+                // четырёх дней без единой записи.
+                {
                     let now = started.elapsed().as_millis() as u64;
-                    history.observe(&snapshot);
-                    if history.due(now) {
-                        if let Err(error) = history.flush(now) {
-                            eprintln!("историю записать не удалось: {error}");
+                    let mut slot = tick_history.borrow_mut();
+                    if slot.is_none() && std::time::Instant::now() >= history_retry_at {
+                        match history::History::open(now) {
+                            Ok(opened) => {
+                                *slot = Some(opened);
+                                history_error = None;
+                            }
+                            Err(error) => {
+                                history_error = Some(error);
+                                history_retry_at = std::time::Instant::now() + HISTORY_RETRY;
+                            }
                         }
+                    }
+
+                    if let Some(history) = slot.as_mut() {
+                        // Подвисание пишем сразу, а не с историей: их единицы
+                        // за сутки, и ждать четырёхчасового сброса значило бы
+                        // терять их при каждом перезапуске.
+                        if let Some(entry) = &snapshot.new_freeze {
+                            let _ = history.record_freeze(entry);
+                        }
+                        history.observe(&snapshot);
+                        if history.due(now) {
+                            let _ = history.flush(now);
+                        }
+                        // Ошибки не выбрасываются: они копятся в состоянии
+                        // истории и показываются человеку.
+                        history_error = history.health().map(str::to_string);
+                        if let Some(note) = history.take_recovery_note() {
+                            if let Some(main) = main_weak.upgrade() {
+                                main.set_action_note(SharedString::from(note.clone()));
+                            }
+                            if let Some(notifier) = &notifier {
+                                let _ = notifier.show(
+                                    "Bamboo: база наблюдений восстановлена",
+                                    &shorten(&note, 240),
+                                    bamboo_sys::Importance::Notice,
+                                );
+                            }
+                        }
+                    }
+
+                    // Беду с историей показываем один раз уведомлением
+                    // и постоянно — в разделе настроек.
+                    match &history_error {
+                        Some(error) if !history_alerted => {
+                            history_alerted = true;
+                            if let Some(notifier) = &notifier {
+                                let text = format!(
+                                    "{error}. Bamboo пробует снова каждые десять минут, наблюдение за системой при этом продолжается."
+                                );
+                                let _ = notifier.show(
+                                    "Bamboo: история наблюдений не пишется",
+                                    &shorten(&text, 240),
+                                    bamboo_sys::Importance::Warning,
+                                );
+                            }
+                        }
+                        Some(_) => {}
+                        None => history_alerted = false,
                     }
 
                     // Свой расход показываем наравне с чужим.
                     if let Some(main) = main_weak.upgrade() {
                         if main.window().is_visible() && main.get_section() == 5 {
                             fill_budget(&main, &selfwatch);
-                            main.set_history_note(SharedString::from(format!(
-                                "База наблюдений занимает {}. Запись идёт раз в                                  несколько часов пачкой, а не постоянно: Bamboo считает                                  чужой износ накопителя и не имеет права изнашивать его                                  сам. Ждёт записи программ: {}.",
-                                history.size(),
-                                history.pending_apps(),
-                            )));
+                            let note = match (&history_error, slot.as_ref()) {
+                                (Some(error), _) => format!(
+                                    "История наблюдений сейчас не пишется: {error}. Bamboo пробует снова каждые десять минут и сам лечит повреждённую базу."
+                                ),
+                                (None, Some(history)) => format!(
+                                    "База наблюдений занимает {}. Запись идёт раз в несколько часов пачкой, а не постоянно: Bamboo считает чужой износ накопителя и не имеет права изнашивать его сам. Ждёт записи программ: {}.",
+                                    history.size(),
+                                    history.pending_apps(),
+                                ),
+                                (None, None) => String::new(),
+                            };
+                            main.set_history_note(SharedString::from(note));
                         }
                     }
                 }
@@ -1620,6 +1732,122 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                     }
                 }
 
+                // Защита переднего плана от нехватки памяти. Работает, пока
+                // человек за компьютером, — в отличие от придержания фоновой
+                // работы, которое снимается, как только он вернулся.
+                {
+                    let enabled = tick_pilot.borrow().enabled();
+                    let mut holds = tick_shield.borrow_mut();
+                    if enabled {
+                        // Что держит другая автоматика, защита не трогает:
+                        // одно действие на процесс, одна запись журнала.
+                        let away_held: std::collections::HashSet<u32> =
+                            tick_holds.borrow().keys().map(|(pid, _)| *pid).collect();
+                        let facts: Vec<bamboo_analyze::shield::ShieldFacts<'_>> = snapshot
+                            .top
+                            .iter()
+                            .map(|line| bamboo_analyze::shield::ShieldFacts {
+                                pid: line.pid,
+                                parent_pid: line.parent_pid,
+                                name: &line.name,
+                                memory: line.memory,
+                                has_window: !line.window_title.is_empty(),
+                                protected: away_held.contains(&line.pid)
+                                    || bamboo_policy::immutable_reason(
+                                        &bamboo_policy::ProcessFacts {
+                                            image_name: &line.name,
+                                            session_id: 1,
+                                            ..Default::default()
+                                        },
+                                    )
+                                    .is_some(),
+                                leaking: line
+                                    .memory_growth
+                                    .is_some_and(|trend| trend.suspected_leak),
+                            })
+                            .collect();
+                        let wanted_pids = shield.wanted(
+                            &facts,
+                            snapshot.memory_pressure(),
+                            bamboo_sys::window::foreground_pid(),
+                            std::process::id(),
+                        );
+                        let wanted: Vec<(u32, String)> = wanted_pids
+                            .iter()
+                            .filter_map(|pid| {
+                                snapshot
+                                    .top
+                                    .iter()
+                                    .find(|line| line.pid == *pid)
+                                    .map(|line| (line.pid, line.name.clone()))
+                            })
+                            .collect();
+                        let step = holds.step(&wanted);
+                        for (pid, journal_id) in step.release {
+                            holds.release(pid);
+                            // Завершившемуся возвращать нечего.
+                            if snapshot.top.iter().any(|line| line.pid == pid) {
+                                actions::revert_automatically(
+                                    journal_id,
+                                    "защита переднего плана больше не нужна",
+                                );
+                            }
+                        }
+                        for (pid, name) in step.apply {
+                            if let Some(journal_id) = actions::apply_automatically(
+                                pid,
+                                &name,
+                                actions::RowAction::LowerMemory,
+                            ) {
+                                holds.hold(pid, name, journal_id);
+                            }
+                        }
+                    } else {
+                        for (_, journal_id) in holds.drain() {
+                            actions::revert_automatically(journal_id, "автоматика выключена");
+                        }
+                    }
+                }
+
+                // Похоже на утечку — говорим один раз в сутки на программу,
+                // с числами. Лечить чужую утечку Bamboo не может: её лечит
+                // только перезапуск или обновление самой программы. Но может
+                // назвать её раньше, чем она съест память, и уже прикрыл
+                // передний план — если программа в фоне.
+                if let Some(notifier) = &notifier {
+                    if bamboo_sys::notification_state().may_notify() {
+                        let leaker = snapshot.top.iter().find(|line| {
+                            line.memory_growth.is_some_and(|trend| trend.suspected_leak)
+                                && leak_notified
+                                    .get(&line.name.to_lowercase())
+                                    .is_none_or(|at| at.elapsed() >= LEAK_NOTICE_EVERY)
+                        });
+                        if let Some(line) = leaker {
+                            let rate = line
+                                .memory_growth
+                                .map(|trend| trend.mb_per_hour)
+                                .unwrap_or_default();
+                            leak_notified.insert(line.name.to_lowercase(), std::time::Instant::now());
+                            let shielded = tick_shield.borrow().holds(line.pid);
+                            let text = format!(
+                                "{}: память растёт на {rate:.0} МБ/ч, сейчас {}. Похоже на утечку — вернёт память только перезапуск программы.{}",
+                                line.name,
+                                line.memory,
+                                if shielded {
+                                    " Пока она в фоне, Bamboo понизил ей приоритет памяти: рост не будет вытеснять то, с чем вы работаете."
+                                } else {
+                                    ""
+                                },
+                            );
+                            let _ = notifier.show(
+                                "Bamboo: похоже на утечку памяти",
+                                &shorten(&text, 240),
+                                bamboo_sys::Importance::Notice,
+                            );
+                        }
+                    }
+                }
+
                 // Обновляем главное окно, только если оно на экране.
                 if let Some(main) = main_weak.upgrade() {
                     if main.window().is_visible() {
@@ -1674,7 +1902,53 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     // Bamboo — фоновый наблюдатель, он живёт в трее и обязан пережить
     // закрытие виджета. Раньше вместе с виджетом исчезала и иконка.
     slint::run_event_loop_until_quit()?;
-    Ok(())
+    shutdown(started, &autopilot_holds, &shield_holds, &history, timer)
+}
+
+/// Завершает Bamboo, укладываясь во время.
+///
+/// Написано по живому случаю: при обновлении старый процесс завис
+/// на выходе, Windows закрыл его как не отвечающий, и в ту же минуту база
+/// наблюдений перестала писаться. Что именно зависло, по журналу
+/// не восстановить, поэтому защита не зависит от ответа: сторож закрывает
+/// процесс через шесть секунд, что бы ни происходило, а всё важное
+/// делается до него и по порядку важности.
+#[cfg(windows)]
+fn shutdown(
+    started: std::time::Instant,
+    away_holds: &std::rc::Rc<
+        std::cell::RefCell<std::collections::HashMap<(u32, &'static str), i64>>,
+    >,
+    shield_holds: &std::rc::Rc<std::cell::RefCell<autopilot::ShieldHolds>>,
+    history: &std::rc::Rc<std::cell::RefCell<Option<history::History>>>,
+    timer: slint::Timer,
+) -> ! {
+    std::thread::spawn(|| {
+        std::thread::sleep(Duration::from_secs(6));
+        std::process::exit(0);
+    });
+
+    // Первым — вернуть придержанное: это чужие программы, и оставлять
+    // их придержанными после ухода Bamboo нельзя.
+    for (_, journal_id) in away_holds.borrow_mut().drain() {
+        actions::revert_automatically(journal_id, "Bamboo завершает работу");
+    }
+    for (_, journal_id) in shield_holds.borrow_mut().drain() {
+        actions::revert_automatically(journal_id, "Bamboo завершает работу");
+    }
+
+    // Затем — дописать накопленное. Прежде при выходе терялось всё,
+    // что копилось с последнего сброса, — до четырёх часов наблюдений.
+    if let Some(mut opened) = history.borrow_mut().take() {
+        let _ = opened.flush(started.elapsed().as_millis() as u64);
+        // Соединение закрывается здесь, явно, а не где-то в разрушителях.
+        drop(opened);
+    }
+
+    // Таймер держит замыкание, а в нём — значок в трее. Разрушаем явно,
+    // иначе после выхода остаётся призрак значка до первого наведения мыши.
+    drop(timer);
+    std::process::exit(0);
 }
 
 /// Наполняет разделы «Обзор» и «Процессы» из снимка.

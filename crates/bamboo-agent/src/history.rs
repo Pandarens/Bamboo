@@ -54,6 +54,12 @@ pub struct History {
         std::collections::HashMap<String, std::collections::HashMap<i64, bamboo_store::Bucket>>,
     /// Когда сбрасывали в последний раз, по монотонным часам.
     flushed_at: u64,
+    /// Где лежит база: нужна, чтобы открыть её заново после повреждения.
+    path: std::path::PathBuf,
+    /// Последняя беда с записью. `None` — всё пишется.
+    health: Option<String>,
+    /// Что пришлось сделать с базой, пока о том не рассказали человеку.
+    recovery_note: Option<String>,
 }
 
 /// Где лежит база наблюдений.
@@ -77,10 +83,14 @@ impl History {
         }
 
         let store = Store::open(&path).map_err(|error| error.to_string())?;
+        let recovery_note = store.last_recovery().map(describe_recovery);
         Ok(History {
             store,
             pending: std::collections::HashMap::new(),
             flushed_at: now_ms,
+            path,
+            health: None,
+            recovery_note,
         })
     }
 
@@ -90,8 +100,30 @@ impl History {
     /// значило бы тысячи мелких записей в час — то самое изнашивание,
     /// за которое Bamboo ругает других.
     pub fn observe(&mut self, snapshot: &Snapshot) {
-        let mut top: Vec<&crate::collector::ProcessLine> = snapshot.top.iter().collect();
-        top.sort_by_key(|line| core::cmp::Reverse(line.memory.as_u64()));
+        // Складываем процессы одной программы. Прежде каждый процесс шёл
+        // отдельной точкой в одну корзину, и корзина хранила среднее
+        // по процессам: у Chrome с его полусотней процессов это двести
+        // мегабайт вместо пяти гигабайт. Утечка одной вкладки тонула
+        // в среднем, а в отчёте Chrome выглядел скромнее блокнота.
+        #[derive(Default)]
+        struct Total {
+            memory: u64,
+            cpu: f32,
+            read: u64,
+            write: u64,
+            threads: u32,
+        }
+        let mut totals: std::collections::HashMap<&str, Total> = std::collections::HashMap::new();
+        for line in &snapshot.top {
+            let total = totals.entry(line.name.as_str()).or_default();
+            total.memory = total.memory.saturating_add(line.memory.as_u64());
+            total.cpu += line.cpu_percent.max(0.0);
+            total.read = total.read.saturating_add(line.read_per_second);
+            total.write = total.write.saturating_add(line.write_per_second);
+            total.threads = total.threads.saturating_add(line.threads);
+        }
+        let mut apps: Vec<(&str, Total)> = totals.into_iter().collect();
+        apps.sort_by_key(|(_, total)| core::cmp::Reverse(total.memory));
 
         // Начало 15-минутного интервала — то же выравнивание, что у уровня
         // L2 в хранилище. Время по стенным часам: корзины в базе живут
@@ -99,16 +131,16 @@ impl History {
         let wall_ms = bamboo_core::SampleTime::wall_clock_now();
         let bucket_ms = bamboo_store::bucket_start(wall_ms, bamboo_store::L2_BUCKET_MS);
 
-        for line in top.into_iter().take(TOP_APPS) {
-            let memory_kib = (line.memory.as_u64() / 1024) as u32;
+        for (name, total) in apps.into_iter().take(TOP_APPS) {
+            let memory_kib = (total.memory / 1024).min(u64::from(u32::MAX)) as u32;
             let bucket = bamboo_store::Bucket {
                 start_ms: bucket_ms,
                 samples: 1,
                 // Доля процессора в миллисекундах за тик. Тик секундный,
                 // поэтому проценты и миллисекунды сходятся один к одному.
-                cpu_ms: line.cpu_percent.max(0.0) as u64 * 10,
-                read_kib: line.read_per_second / 1024,
-                write_kib: line.write_per_second / 1024,
+                cpu_ms: total.cpu as u64 * 10,
+                read_kib: total.read / 1024,
+                write_kib: total.write / 1024,
                 // Одна точка — это и среднее, и предел в обе стороны.
                 private_kib: bamboo_store::Stat {
                     avg: memory_kib,
@@ -122,9 +154,9 @@ impl History {
                 },
                 handles: bamboo_store::Stat::default(),
                 threads: bamboo_store::Stat {
-                    avg: line.threads,
-                    min: line.threads,
-                    max: line.threads,
+                    avg: total.threads,
+                    min: total.threads,
+                    max: total.threads,
                 },
             };
             // Слияние в корзину интервала, а не накопление точек: средние
@@ -135,7 +167,7 @@ impl History {
             };
             let slot = self
                 .pending
-                .entry(line.name.clone())
+                .entry(name.to_string())
                 .or_default()
                 .entry(bucket_ms)
                 .or_insert(empty);
@@ -148,10 +180,8 @@ impl History {
     /// Без буфера, сразу: подвисаний за сутки единицы, а не тысячи, и копить
     /// их до сброса раз в четыре часа значило бы потерять при перезапуске
     /// ровно то, ради чего они и записываются.
-    pub fn record_freeze(&self, entry: &bamboo_store::FreezeEntry) -> Result<(), String> {
-        self.store
-            .record_freeze(entry)
-            .map_err(|error| error.to_string())
+    pub fn record_freeze(&mut self, entry: &bamboo_store::FreezeEntry) -> Result<(), String> {
+        self.write(&mut |store| store.record_freeze(entry))
     }
 
     /// Пора ли сбрасывать.
@@ -170,36 +200,104 @@ impl History {
         }
 
         let pending = core::mem::take(&mut self.pending);
-        let written = pending.len();
+        let batches: Vec<(String, Vec<bamboo_store::Bucket>)> = pending
+            .iter()
+            .map(|(name, by_interval)| {
+                let mut buckets: Vec<bamboo_store::Bucket> =
+                    by_interval.values().copied().collect();
+                buckets.sort_by_key(|bucket| bucket.start_ms);
+                (name.clone(), buckets)
+            })
+            .collect();
 
-        for (name, by_interval) in pending {
-            let app_id = self
-                .store
-                .app_id(&name, &name, now_ms as i64)
-                .map_err(|error| error.to_string())?;
-            let mut buckets: Vec<bamboo_store::Bucket> = by_interval.into_values().collect();
-            buckets.sort_by_key(|bucket| bucket.start_ms);
-            self.store
-                .write_buckets(Level::L2, app_id, &buckets)
-                .map_err(|error| error.to_string())?;
+        let written = self.write(&mut |store| {
+            for (name, buckets) in &batches {
+                let app_id = store.app_id(name, name, now_ms as i64)?;
+                store.write_buckets(Level::L2, app_id, buckets)?;
+            }
+            Ok(batches.len())
+        });
+        if let Err(error) = written {
+            // Накопленное не выбрасываем: оно вернётся в копилку, и следующий
+            // сброс попробует снова. Прежде неудачный сброс молча терял
+            // до четырёх часов наблюдений.
+            self.pending = pending;
+            return Err(error);
         }
 
         // Сворачивание и удаление старого — там же, где запись: иначе база
         // росла бы без предела, а предел в 200 МБ задан разделом 8 ТЗ.
         //
-        // Часы настенные, и это исправление, а не мелочь. Прежде сюда
-        // передавались монотонные — миллисекунды от запуска агента. Корзины
-        // же лежат в настенных, и «сейчас минус тридцать суток» от числа
-        // вроде трёх миллионов уходило далеко в отрицательные значения:
-        // под удаление не попадало ничего, сворачивать было нечего.
-        // Отсюда и пустой уровень L3 на живой машине при девяти мегабайтах
-        // сырых наблюдений — ни одна из двух чисток ни разу не сработала.
+        // Часы настенные: корзины лежат в них. Монотонные — миллисекунды
+        // от запуска агента — давали «сейчас минус тридцать суток» далеко
+        // в отрицательных значениях, и под чистку не попадало ничего.
         let wall_ms = bamboo_core::SampleTime::wall_clock_now();
         let _ = self.store.roll_up_to_l3(wall_ms);
         let _ = self.store.prune(wall_ms);
         let _ = self.store.prune_freezes(wall_ms);
 
-        Ok(written)
+        written
+    }
+
+    /// Выполняет запись, а на повреждение отвечает лечением и одной
+    /// повторной попыткой.
+    ///
+    /// Написано после того, как база повредилась во время работы и четыре
+    /// дня агент писал в неё, получая отказ за отказом и молча их
+    /// выбрасывая. Лечение при запуске есть, но до следующего запуска
+    /// могут пройти недели.
+    fn write<T>(
+        &mut self,
+        op: &mut dyn FnMut(&mut Store) -> bamboo_store::Result<T>,
+    ) -> Result<T, String> {
+        let outcome = match op(&mut self.store) {
+            Err(error) if bamboo_store::is_corruption(&error) => {
+                self.reopen()?;
+                op(&mut self.store)
+            }
+            other => other,
+        };
+        match outcome {
+            Ok(value) => {
+                self.health = None;
+                Ok(value)
+            }
+            Err(error) => {
+                let text = error.to_string();
+                self.health = Some(text.clone());
+                Err(text)
+            }
+        }
+    }
+
+    /// Закрывает базу и открывает заново — с лечением.
+    fn reopen(&mut self) -> Result<(), String> {
+        // Сначала закрыть: Windows не даёт переименовать открытый файл,
+        // и отодвинуть повреждённую базу при живом соединении нельзя.
+        let placeholder = Store::in_memory().map_err(|error| error.to_string())?;
+        drop(core::mem::replace(&mut self.store, placeholder));
+        match Store::open(&self.path) {
+            Ok(store) => {
+                self.recovery_note = store.last_recovery().map(describe_recovery);
+                self.store = store;
+                Ok(())
+            }
+            Err(error) => {
+                let text = error.to_string();
+                self.health = Some(text.clone());
+                Err(text)
+            }
+        }
+    }
+
+    /// Последняя беда с записью. `None` — всё пишется.
+    pub fn health(&self) -> Option<&str> {
+        self.health.as_deref()
+    }
+
+    /// Что пришлось сделать с базой — один раз, чтобы сказать человеку.
+    pub fn take_recovery_note(&mut self) -> Option<String> {
+        self.recovery_note.take()
     }
 
     /// Сколько места занимает база.
@@ -210,6 +308,21 @@ impl History {
     /// Сколько приложений ждёт сброса.
     pub fn pending_apps(&self) -> usize {
         self.pending.len()
+    }
+}
+
+/// Что пришлось сделать с базой — словами человека.
+fn describe_recovery(recovery: &bamboo_store::Recovery) -> String {
+    match recovery {
+        bamboo_store::Recovery::DroppedJournal => "База наблюдений была повреждена в журнале последних записей. Журнал убран, сама история цела: потерян только хвост, не успевший дойти до базы.".to_string(),
+        bamboo_store::Recovery::Rebuilt {
+            salvaged_rows,
+            lost_parts: 0,
+        } => format!("База наблюдений была повреждена и пересобрана. Перенесено всё: {salvaged_rows} записей."),
+        bamboo_store::Recovery::Rebuilt {
+            salvaged_rows,
+            lost_parts,
+        } => format!("База наблюдений была повреждена и пересобрана. Перенесено {salvaged_rows} записей, не прочиталось частей: {lost_parts}. Повреждённый файл оставлен рядом, чтобы было по чему разбираться."),
     }
 }
 
@@ -231,6 +344,9 @@ mod tests {
             store: Store::in_memory().expect("база в памяти"),
             pending: std::collections::HashMap::new(),
             flushed_at: 0,
+            path: std::path::PathBuf::new(),
+            health: None,
+            recovery_note: None,
         }
     }
 

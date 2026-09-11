@@ -197,6 +197,132 @@ impl Autopilot {
     }
 }
 
+/// Удержания защиты переднего плана.
+///
+/// Отдельно от удержаний «пока человека нет», и это не случайность:
+/// у них противоположное правило снятия. Те снимаются, как только человек
+/// вернулся; эти, наоборот, нужнее всего, когда он за компьютером,
+/// и снимаются, только когда нехватка памяти прошла или у программы
+/// появилось окно.
+#[derive(Debug, Default)]
+pub struct ShieldHolds {
+    /// Номер процесса → его имя и запись журнала, которой откатывать.
+    held: std::collections::HashMap<u32, (String, i64)>,
+}
+
+/// Что сделать с защитой на этом тике.
+#[derive(Debug, Default, PartialEq)]
+pub struct ShieldStep {
+    /// Кому понизить приоритет памяти.
+    pub apply: Vec<(u32, String)>,
+    /// Какие удержания снять: номер процесса и запись журнала.
+    pub release: Vec<(u32, i64)>,
+}
+
+impl ShieldHolds {
+    /// Сравнивает нужное с удерживаемым.
+    ///
+    /// Процесс узнаётся по номеру и имени вместе: номера переиспользуются,
+    /// и тот же номер с другим именем — уже другой процесс.
+    pub fn step(&self, wanted: &[(u32, String)]) -> ShieldStep {
+        let mut step = ShieldStep::default();
+        for (pid, (name, journal_id)) in &self.held {
+            if !wanted
+                .iter()
+                .any(|(want, want_name)| want == pid && want_name == name)
+            {
+                step.release.push((*pid, *journal_id));
+            }
+        }
+        for (pid, name) in wanted {
+            match self.held.get(pid) {
+                Some((held_name, _)) if held_name == name => {}
+                _ => step.apply.push((*pid, name.clone())),
+            }
+        }
+        step.release.sort_unstable();
+        step
+    }
+
+    pub fn hold(&mut self, pid: u32, name: String, journal_id: i64) {
+        self.held.insert(pid, (name, journal_id));
+    }
+
+    pub fn release(&mut self, pid: u32) -> Option<i64> {
+        self.held.remove(&pid).map(|(_, journal_id)| journal_id)
+    }
+
+    /// Всё удерживаемое разом — для выхода и выключения автоматики.
+    pub fn drain(&mut self) -> Vec<(u32, i64)> {
+        self.held
+            .drain()
+            .map(|(pid, (_, journal_id))| (pid, journal_id))
+            .collect()
+    }
+
+    pub fn holds(&self, pid: u32) -> bool {
+        self.held.contains_key(&pid)
+    }
+}
+
+#[cfg(test)]
+mod shield_hold_tests {
+    use super::*;
+
+    fn wanted(list: &[(u32, &str)]) -> Vec<(u32, String)> {
+        list.iter()
+            .map(|(pid, name)| (*pid, name.to_string()))
+            .collect()
+    }
+
+    #[test]
+    fn new_wants_are_applied_and_old_holds_kept() {
+        let mut holds = ShieldHolds::default();
+        holds.hold(21, "steamwebhelper.exe".into(), 7);
+        let step = holds.step(&wanted(&[
+            (21, "steamwebhelper.exe"),
+            (60, "BlueStacksAI.exe"),
+        ]));
+        assert_eq!(step.apply, vec![(60, "BlueStacksAI.exe".to_string())]);
+        assert!(
+            step.release.is_empty(),
+            "удержанное снимать незачем — оно всё ещё нужно"
+        );
+    }
+
+    #[test]
+    fn what_is_no_longer_wanted_is_released() {
+        let mut holds = ShieldHolds::default();
+        holds.hold(21, "steamwebhelper.exe".into(), 7);
+        assert_eq!(holds.step(&[]).release, vec![(21, 7)]);
+    }
+
+    #[test]
+    fn a_reused_process_number_is_a_different_process() {
+        // Тот же номер с другим именем — другой процесс: прежнее удержание
+        // снимаем, новое заводим отдельной записью журнала.
+        let mut holds = ShieldHolds::default();
+        holds.hold(21, "steamwebhelper.exe".into(), 7);
+        let step = holds.step(&wanted(&[(21, "other.exe")]));
+        assert_eq!(step.release, vec![(21, 7)]);
+        assert_eq!(step.apply, vec![(21, "other.exe".to_string())]);
+    }
+
+    #[test]
+    fn draining_returns_every_journal_entry_to_revert() {
+        let mut holds = ShieldHolds::default();
+        holds.hold(1, "a.exe".into(), 10);
+        holds.hold(2, "b.exe".into(), 20);
+        let mut drained = holds.drain();
+        drained.sort_unstable();
+        assert_eq!(drained, vec![(1, 10), (2, 20)]);
+        assert!(
+            holds.step(&[]).release.is_empty(),
+            "после выдачи держать нечего"
+        );
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
