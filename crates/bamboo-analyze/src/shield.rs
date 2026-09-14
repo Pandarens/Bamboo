@@ -101,6 +101,33 @@ const SHELLS: &[&str] = &[
     "system",
 ];
 
+/// Части оболочки, которые появляются по вызову: меню «Пуск», поиск,
+/// панель ввода и эмодзи, виджеты, экран блокировки.
+///
+/// Окна у них нет, пока их не позвали, — и по правилу «нет окна — можно
+/// прикрыть» они попадали бы под защиту. Но позвать их — дело секунды,
+/// и открываться они обязаны мгновенно: пониженный приоритет означал бы,
+/// что меню «Пуск» или поиск при открытии полезут за страницами на диск.
+/// Хуже всех здесь панель ввода: TextInputHost и ctfmon обслуживают
+/// раскладку, подсказки и эмодзи — то есть сам набор текста, на задержки
+/// которого и была жалоба.
+///
+/// Считаются они «на виду» вместе со всем, что под ними: на живой машине
+/// встроенный браузер WebView2 работал на поиск Windows, и защита, глядя
+/// только на окна, прикрывала бы и его. WebView2 под TeamViewer в трее
+/// при этом остаётся законным кандидатом — TeamViewer не зовут клавишей.
+const ON_DEMAND: &[&str] = &[
+    "searchhost.exe",
+    "startmenuexperiencehost.exe",
+    "shellexperiencehost.exe",
+    "textinputhost.exe",
+    "ctfmon.exe",
+    "widgets.exe",
+    "widgetservice.exe",
+    "lockapp.exe",
+    "applicationframehost.exe",
+];
+
 /// Что известно о процессе.
 #[derive(Clone, Debug)]
 pub struct ShieldFacts<'a> {
@@ -181,7 +208,11 @@ impl Shield {
         // интерфейс сейчас перед человеком, тоже часть того, с чем он работает.
         let mut seen = vec![false; processes.len()];
         for (at, process) in processes.iter().enumerate() {
-            if process.has_window || process.pid == foreground_pid || process.pid == own_pid {
+            if process.has_window
+                || process.pid == foreground_pid
+                || process.pid == own_pid
+                || is_on_demand(process.name)
+            {
                 for member in lineage(processes, &index, at) {
                     seen[member] = true;
                 }
@@ -246,6 +277,10 @@ fn lineage(processes: &[ShieldFacts<'_>], index: &HashMap<u32, usize>, start: us
         current = parent;
     }
     chain
+}
+
+fn is_on_demand(name: &str) -> bool {
+    ON_DEMAND.iter().any(|part| name.eq_ignore_ascii_case(part))
 }
 
 fn is_shell(name: &str) -> bool {
@@ -389,6 +424,39 @@ mod tests {
             shield.wanted(&processes, TIGHT, 10, OWN, MINUTE),
             vec![50],
             "похудевшего сняли — будет дребезг"
+        );
+    }
+
+    #[test]
+    fn shell_parts_summoned_by_a_key_are_never_shielded() {
+        // Меню «Пуск» без окна держало на живой машине 300 МБ. По правилу
+        // «нет окна» его бы прикрыли — и при нажатии клавиши Windows меню
+        // полезло бы за страницами на диск.
+        let processes = vec![
+            process(10, 1, "explorer.exe", 600, true),
+            process(60, 4, "StartMenuExperienceHost.exe", 300, false),
+            process(61, 4, "TextInputHost.exe", 250, false),
+        ];
+        assert!(Shield::new()
+            .wanted(&processes, TIGHT, 10, OWN, 0)
+            .is_empty());
+    }
+
+    #[test]
+    fn webview_of_the_search_is_spared_but_webview_of_a_tray_app_is_not() {
+        // Обстановка с живой машины: WebView2 держали поиск Windows
+        // и TeamViewer, оба без окна. Поиск зовут клавишей — его WebView2
+        // трогать нельзя. TeamViewer в трее — законный кандидат.
+        let processes = vec![
+            process(10, 1, "explorer.exe", 600, true),
+            process(70, 4, "SearchHost.exe", 150, false),
+            process(71, 70, "msedgewebview2.exe", 250, false),
+            process(80, 10, "TeamViewer.exe", 120, false),
+            process(81, 80, "msedgewebview2.exe", 260, false),
+        ];
+        assert_eq!(
+            Shield::new().wanted(&processes, TIGHT, 10, OWN, 0),
+            vec![81]
         );
     }
 
