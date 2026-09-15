@@ -548,3 +548,7 @@ msgstr "Where the memory went"
 msgctxt "MainWindow"
 msgid "в Диспетчере задач не видно"
 msgstr "not visible in Task Manager"
+
+msgctxt "MainWindow"
+msgid "Температура"
+msgstr "Temperature"

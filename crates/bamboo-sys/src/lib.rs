@@ -43,6 +43,7 @@ mod settings;
 pub mod single;
 pub mod startup;
 pub mod storage;
+pub mod thermal;
 pub mod user;
 pub mod wake;
 pub mod window;

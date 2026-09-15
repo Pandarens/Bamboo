@@ -315,6 +315,24 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         }
     });
 
+    // Температуры: диски из SMART и термозоны там, где они есть. Чтение
+    // SMART открывает устройство и обращается к драйверу — поэтому в фоне
+    // и раз в пять минут, а не на каждом тике.
+    type Readings = Vec<bamboo_sys::thermal::Reading>;
+    let temperatures: std::sync::Arc<std::sync::Mutex<Option<(Readings, Readings)>>> =
+        std::sync::Arc::new(std::sync::Mutex::new(None));
+    {
+        let slot = temperatures.clone();
+        std::thread::spawn(move || loop {
+            let zones = bamboo_sys::thermal::thermal_zones();
+            let disks = bamboo_sys::thermal::disk_temperatures();
+            if let Ok(mut guard) = slot.lock() {
+                *guard = Some((zones, disks));
+            }
+            std::thread::sleep(Duration::from_secs(5 * 60));
+        });
+    }
+
     // Виновники долгой загрузки. Читаются из журнала диагностики один раз
     // при запуске, в фоне: чтение требует прав и занимает время, а меняется
     // список только после перезагрузки.
@@ -1428,6 +1446,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     let started = std::time::Instant::now();
     let tick_pilot = autopilot.clone();
     let tick_holds = autopilot_holds.clone();
+    let tick_temperatures = temperatures.clone();
     let tick_history = history.clone();
     // Защита переднего плана: её удержания отдельно от удержаний «пока
     // человека нет» — у них противоположное правило снятия.
@@ -1868,6 +1887,18 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                             &tick_games,
                             &tick_rejections.borrow(),
                         );
+                        // Температура — рядом с памятью: пока её не намерили
+                        // в первый раз, строки нет вовсе, а не «0 °C».
+                        let line = tick_temperatures
+                            .lock()
+                            .ok()
+                            .and_then(|guard| {
+                                guard
+                                    .as_ref()
+                                    .map(|(zones, disks)| mainwin::temperature_line(zones, disks))
+                            })
+                            .unwrap_or_default();
+                        main.set_temperature(SharedString::from(line));
                     }
                 }
                 // Не вернулся ли кто-то из завершённых? Если вернулся,

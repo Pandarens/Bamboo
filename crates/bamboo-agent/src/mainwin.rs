@@ -1317,6 +1317,45 @@ pub fn memory_view(snapshot: &Snapshot) -> MemoryView {
     }
 }
 
+/// Строка «Температура» для обзора.
+///
+/// Показывает то, что Windows отдаёт без сторонних драйверов: диски
+/// из SMART и термозоны там, где они есть. Для процессора и видеокарты
+/// на машине без термозон честно говорит, почему градусов нет, — выдуманное
+/// число хуже пустого места.
+pub fn temperature_line(
+    zones: &[bamboo_sys::thermal::Reading],
+    disks: &[bamboo_sys::thermal::Reading],
+) -> String {
+    let mut parts: Vec<String> = Vec::new();
+    for zone in zones {
+        parts.push(bamboo_core::say(
+            "датчик платы {name}: {t} °C",
+            "board sensor {name}: {t} °C",
+            &[("name", &zone.name), ("t", &format!("{:.0}", zone.celsius))],
+        ));
+    }
+    for disk in disks {
+        parts.push(bamboo_core::say(
+            "диск {name}: {t} °C",
+            "drive {name}: {t} °C",
+            &[("name", &disk.name), ("t", &format!("{:.0}", disk.celsius))],
+        ));
+    }
+
+    let mut text = parts.join(" · ");
+    if zones.is_empty() {
+        if !text.is_empty() {
+            text.push_str(". ");
+        }
+        text.push_str(bamboo_core::pick(
+            "Процессор и видеокарта: Windows не отдаёт их датчики на этой машине. Прочитать их можно только сторонним драйвером ядра — это известная дыра в безопасности, и Bamboo его не ставит.",
+            "Processor and graphics: Windows does not expose their sensors on this machine. Reading them takes a third-party kernel driver — a known security hole, so Bamboo does not install one.",
+        ));
+    }
+    text
+}
+
 /// Имя программы без хвоста «.exe»: в раскладке это подпись, не путь.
 fn display_name(name: &str) -> &str {
     let lower = name.to_ascii_lowercase();
@@ -2392,6 +2431,34 @@ mod translation_tests {
             .join("LC_MESSAGES")
             .join("bamboo-agent.po");
         std::fs::read_to_string(path).expect("каталог перевода на месте")
+    }
+
+    #[test]
+    fn temperature_names_what_is_measured_and_why_the_rest_is_not() {
+        // Язык здесь больше никто не переключает — замок не нужен. Ставим
+        // явно, чтобы тест не зависел от того, какой язык по умолчанию.
+        bamboo_core::set_language(bamboo_core::Language::Russian);
+
+        // Машина разработки: термозон нет, диск отдаёт температуру в SMART.
+        let disk = bamboo_sys::thermal::Reading {
+            name: "Apacer AS350 512GB".into(),
+            celsius: 38.4,
+        };
+        let line = super::temperature_line(&[], std::slice::from_ref(&disk));
+        assert!(line.contains("38 °C"), "{line}");
+        assert!(
+            line.contains("драйвер"),
+            "не объяснено, почему нет процессора: {line}"
+        );
+
+        // Где термозоны есть, объяснять нечего.
+        let zone = bamboo_sys::thermal::Reading {
+            name: "TZ00".into(),
+            celsius: 46.0,
+        };
+        let line = super::temperature_line(&[zone], &[disk]);
+        assert!(line.contains("46 °C"), "{line}");
+        assert!(!line.contains("драйвер"), "{line}");
     }
 
     #[test]
