@@ -1,12 +1,12 @@
 {
-    "version": "0.9.9",
+    "version": "0.9.10",
     "description": "Наблюдает за Windows и объясняет, что с ней происходит. Не чистит память и не отключает службы пачками.",
     "homepage": "https://github.com/Pandarens/Bamboo",
     "license": "GPL-3.0-or-later",
     "architecture": {
         "64bit": {
-            "url": "https://github.com/Pandarens/Bamboo/releases/download/v0.9.9/bamboo-agent.exe#/bamboo-agent.exe",
-            "hash": "85d9c0419f291c3dcc9f4e29ef656951e37a468505443e14023d053758e4090b"
+            "url": "https://github.com/Pandarens/Bamboo/releases/download/v0.9.10/bamboo-agent.exe#/bamboo-agent.exe",
+            "hash": "0ba17aebdf19009182d68adfe778358e5f776c5ec6c0e3ecc0ec947cd93e288d"
         }
     },
     "bin": "bamboo-agent.exe",
