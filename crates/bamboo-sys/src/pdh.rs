@@ -108,3 +108,69 @@ impl Counter {
         Ok(unsafe { value.Anonymous.doubleValue }.max(0.0))
     }
 }
+
+/// Несколько счётчиков в одном запросе.
+///
+/// Для мгновенных величин вроде размеров пулов памяти: их значение готово
+/// после первого же опроса, и открывать на каждую свой запрос незачем —
+/// один сбор данных на все.
+pub struct CounterSet {
+    query: PDH_HQUERY,
+    /// По счётчику на путь. `None` — такого счётчика в системе нет.
+    counters: Vec<Option<PDH_HCOUNTER>>,
+}
+
+impl Drop for CounterSet {
+    fn drop(&mut self) {
+        unsafe { PdhCloseQuery(self.query) };
+    }
+}
+
+impl CounterSet {
+    /// Открывает набор. Отсутствующий счётчик — не ошибка: его место
+    /// в ответе будет пустым, а остальные прочитаются.
+    pub fn open(paths: &[&str]) -> Result<CounterSet> {
+        let mut query: PDH_HQUERY = core::ptr::null_mut();
+        let status = unsafe { PdhOpenQueryW(core::ptr::null(), 0, &mut query) };
+        if status != 0 {
+            return Err(Error::Win32 {
+                call: "PdhOpenQuery",
+                code: status as u32,
+            });
+        }
+        let mut set = CounterSet {
+            query,
+            counters: Vec::with_capacity(paths.len()),
+        };
+        for path in paths {
+            let mut counter: PDH_HCOUNTER = core::ptr::null_mut();
+            let status =
+                unsafe { PdhAddEnglishCounterW(set.query, wide(path).as_ptr(), 0, &mut counter) };
+            set.counters.push((status == 0).then_some(counter));
+        }
+        Ok(set)
+    }
+
+    /// Значения по порядку путей. `None` — счётчика нет или он не ответил.
+    pub fn read(&mut self) -> Vec<Option<f64>> {
+        if unsafe { PdhCollectQueryData(self.query) } != 0 {
+            return vec![None; self.counters.len()];
+        }
+        self.counters
+            .iter()
+            .map(|counter| {
+                let counter = (*counter)?;
+                let mut value: PDH_FMT_COUNTERVALUE = unsafe { core::mem::zeroed() };
+                let status = unsafe {
+                    PdhGetFormattedCounterValue(
+                        counter,
+                        PDH_FMT_DOUBLE,
+                        core::ptr::null_mut(),
+                        &mut value,
+                    )
+                };
+                (status == 0).then_some(unsafe { value.Anonymous.doubleValue })
+            })
+            .collect()
+    }
+}

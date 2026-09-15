@@ -233,6 +233,110 @@ fn pid_from_instance(name: &str) -> Option<u32> {
         .ok()
 }
 
+/// Сколько памяти видеокарта взяла из ОЗУ — и у кого.
+///
+/// У встроенной графики своей памяти нет: она берёт её из общей оперативной
+/// памяти. Диспетчер задач показывает это только на вкладке
+/// «Производительность», а у процессов в столбце «Память» — нет. На живой
+/// машине с Intel UHD 730 так уходило 0,8 ГБ: Word держал 259 МБ, отрисовка
+/// окон — 253, Chrome — 154.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct GpuMemory {
+    /// Всего взято из ОЗУ всеми видеоадаптерами.
+    pub shared_total: bamboo_core::Bytes,
+    /// По процессам, крупные первыми.
+    pub shared_by_pid: Vec<(u32, bamboo_core::Bytes)>,
+}
+
+/// Открытые счётчики общей памяти видеокарты.
+pub struct GpuMemoryCounter {
+    query: PDH_HQUERY,
+    adapter: PDH_HCOUNTER,
+    process: PDH_HCOUNTER,
+}
+
+impl Drop for GpuMemoryCounter {
+    fn drop(&mut self) {
+        unsafe { PdhCloseQuery(self.query) };
+    }
+}
+
+impl GpuMemoryCounter {
+    /// Открывает счётчики. Ошибка — не поломка: набор появился в Windows 10
+    /// вместе с драйверами WDDM 2.0, и без него о видеокарте честнее
+    /// промолчать, чем нарисовать ноль.
+    pub fn open() -> Result<GpuMemoryCounter> {
+        let mut query: PDH_HQUERY = core::ptr::null_mut();
+        let status = unsafe { PdhOpenQueryW(core::ptr::null(), 0, &mut query) };
+        if status != 0 {
+            return Err(Error::Win32 {
+                call: "PdhOpenQuery",
+                code: status as u32,
+            });
+        }
+        let mut open = GpuMemoryCounter {
+            query,
+            adapter: core::ptr::null_mut(),
+            process: core::ptr::null_mut(),
+        };
+        let adapter = unsafe {
+            PdhAddEnglishCounterW(
+                open.query,
+                wide(r"\GPU Adapter Memory(*)\Shared Usage").as_ptr(),
+                0,
+                &mut open.adapter,
+            )
+        };
+        let process = unsafe {
+            PdhAddEnglishCounterW(
+                open.query,
+                wide(r"\GPU Process Memory(*)\Shared Usage").as_ptr(),
+                0,
+                &mut open.process,
+            )
+        };
+        if adapter != 0 || process != 0 {
+            return Err(Error::Unsupported(
+                "счётчики памяти видеокарты в этой системе недоступны",
+            ));
+        }
+        Ok(open)
+    }
+
+    /// Снимает общую память. Величины мгновенные: готовы с первого опроса.
+    pub fn read(&mut self) -> Result<GpuMemory> {
+        let status = unsafe { PdhCollectQueryData(self.query) };
+        if status != 0 {
+            return Err(Error::Win32 {
+                call: "PdhCollectQueryData",
+                code: status as u32,
+            });
+        }
+        let total: f64 = read_items(self.adapter)?
+            .into_iter()
+            .map(|(_, value)| value.max(0.0))
+            .sum();
+
+        let mut by_pid: std::collections::HashMap<u32, f64> = std::collections::HashMap::new();
+        for (name, value) in read_items(self.process)? {
+            if let Some(pid) = pid_from_instance(&name) {
+                *by_pid.entry(pid).or_default() += value.max(0.0);
+            }
+        }
+        let mut shared_by_pid: Vec<(u32, bamboo_core::Bytes)> = by_pid
+            .into_iter()
+            .filter(|(_, bytes)| *bytes >= 1.0)
+            .map(|(pid, bytes)| (pid, bamboo_core::Bytes(bytes as u64)))
+            .collect();
+        shared_by_pid.sort_by_key(|entry| core::cmp::Reverse(entry.1));
+
+        Ok(GpuMemory {
+            shared_total: bamboo_core::Bytes(total as u64),
+            shared_by_pid,
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

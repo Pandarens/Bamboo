@@ -74,6 +74,18 @@ struct PagefileRow {
     fill: float,
 }
 
+// Часть памяти в раскладке «Куда ушла память».
+struct MemoryPartRow {
+    label: string,
+    value: string,
+    hint: string,
+    fill: float,
+    // В Диспетчере задач у процессов этого не видно.
+    hidden: bool,
+    // Не занято по-настоящему: кэш и пустые страницы.
+    free: bool,
+}
+
 // Кто прямо сейчас работает с накопителем.
 // Расширение браузера.
 struct ExtensionRow {
@@ -399,6 +411,10 @@ export component MainWindow inherits Window {
     in property <[JournalRow]> journal: [];
     in property <[DiskLoadRow]> disk-load: [];
     in property <[PagefileRow]> pagefiles: [];
+    in property <[MemoryPartRow]> memory-parts: [];
+    in property <string> memory-apps: "";
+    in property <string> memory-graphics: "";
+    in property <string> memory-kernel: "";
     in property <[VolumeRow]> volumes: [];
     in property <[SuggestionRow]> suggestions: [];
     in property <string> suggestions-note: "";
@@ -810,259 +826,329 @@ export component MainWindow inherits Window {
                     }
                 }
 
-                if root.section == 0: VerticalLayout {
-                    spacing: 10px;
-                    Text { text: @tr("Обзор"); font-size: 20px; color: #e8f0ec; }
-
-                    HorizontalLayout {
+                // Раздел прокручивается целиком. Прежде у обзора и настроек
+                // прокрутки не было вовсе: всё, что не влезало в окно,
+                // просто обрезалось, и до нижних пунктов было не добраться.
+                if root.section == 0: Flickable {
+                    vertical-stretch: 1;
+                    VerticalLayout {
                         spacing: 10px;
-                        Rectangle {
-                            background: #1e2a24; border-radius: 8px; height: 78px;
-                            VerticalLayout {
-                                padding: 12px;
-                                Text { text: @tr("Процессор"); font-size: 11px; color: #7d8f86; }
-                                Text { text: root.cpu-summary; font-size: 22px; color: #e8f0ec; }
-                            }
-                        }
-                        Rectangle {
-                            background: #1e2a24; border-radius: 8px; height: 78px;
-                            VerticalLayout {
-                                padding: 12px;
-                                Text { text: @tr("Память"); font-size: 11px; color: #7d8f86; }
-                                Text { text: root.memory-summary; font-size: 22px; color: #e8f0ec; }
-                            }
-                        }
-                        Rectangle {
-                            background: #1e2a24; border-radius: 8px; height: 78px;
-                            VerticalLayout {
-                                padding: 12px;
-                                Text { text: @tr("Процессов"); font-size: 11px; color: #7d8f86; }
-                                Text { text: root.process-summary; font-size: 22px; color: #e8f0ec; }
-                            }
-                        }
-                    }
+                        Text { text: @tr("Обзор"); font-size: 20px; color: #e8f0ec; }
 
-                    // Подвисания. Смотреть надо в момент подвисания, а он
-                    // короткий: пока человек откроет окно, всё уже прошло.
-                    // Поэтому показываем то, что было поймано раньше.
-                    if root.freeze != "": Rectangle {
-                        background: #2e2320; border-radius: 8px;
-                        height: freezebox.preferred-height;
-                        freezebox := HorizontalLayout {
-                            padding: 12px; spacing: 12px;
-                            VerticalLayout {
-                                spacing: 4px;
-                                horizontal-stretch: 1;
-                                Text {
-                                    text: @tr("Система подвисала");
-                                    font-size: 12px; color: #e0a44a;
-                                }
-                                Text {
-                                    text: root.freeze;
-                                    font-size: 12px; color: #d8c4a8; wrap: word-wrap;
+                        HorizontalLayout {
+                            spacing: 10px;
+                            Rectangle {
+                                background: #1e2a24; border-radius: 8px; height: 78px;
+                                VerticalLayout {
+                                    padding: 12px;
+                                    Text { text: @tr("Процессор"); font-size: 11px; color: #7d8f86; }
+                                    Text { text: root.cpu-summary; font-size: 22px; color: #e8f0ec; }
                                 }
                             }
-                            // Переход к виновникам. Прочитать имена мало:
-                            // человек хочет с ними что-то сделать, а искать
-                            // их в списке из трёхсот строк руками — работа.
-                            if root.freeze-culprits != "": VerticalLayout {
-                                alignment: center;
-                                RowButton {
-                                    label: @tr("Показать их");
-                                    width: 120px;
-                                    pressed => {
-                                        root.filter = root.freeze-culprits;
-                                        root.apply-filter();
-                                        root.section = 1;
-                                    }
+                            Rectangle {
+                                background: #1e2a24; border-radius: 8px; height: 78px;
+                                VerticalLayout {
+                                    padding: 12px;
+                                    Text { text: @tr("Память"); font-size: 11px; color: #7d8f86; }
+                                    Text { text: root.memory-summary; font-size: 22px; color: #e8f0ec; }
+                                }
+                            }
+                            Rectangle {
+                                background: #1e2a24; border-radius: 8px; height: 78px;
+                                VerticalLayout {
+                                    padding: 12px;
+                                    Text { text: @tr("Процессов"); font-size: 11px; color: #7d8f86; }
+                                    Text { text: root.process-summary; font-size: 22px; color: #e8f0ec; }
                                 }
                             }
                         }
-                    }
 
-                    // --- Игровой режим ---
-                    Rectangle {
-                        background: root.game-mode ? #23372c : #1e2a24;
-                        border-radius: 8px;
-                        height: game.preferred-height;
-                        game := HorizontalLayout {
-                            padding: 12px; spacing: 12px;
-                            VerticalLayout {
-                                spacing: 3px;
-                                horizontal-stretch: 1;
+                        // Куда ушла память. Диспетчер задач показывает у процессов
+                        // только их личную память в ОЗУ: на живой машине 7,3 ГБ
+                        // из 12,8 ГБ занятых. Остальное — ядро, драйверы, кэш,
+                        // видеокарта — строки в списке процессов не имеет,
+                        // и человек не мог понять, куда делись пять гигабайт.
+                        if root.memory-parts.length > 0: Rectangle {
+                            background: #1e2a24; border-radius: 8px;
+                            height: membox.preferred-height;
+                            membox := VerticalLayout {
+                                padding: 12px; spacing: 7px;
                                 Text {
-                                    text: root.game-mode
-                                        ? @tr("Игровой режим включён")
-                                        : @tr("Игровой режим");
+                                    text: @tr("Куда ушла память");
                                     font-size: 13px; color: #e8f0ec;
                                 }
-                                Text {
-                                    text: root.game-mode
-                                        ? @tr("Игра получает процессор и память в первую очередь. ")
-                                          + @tr("Выключите — всё вернётся как было.")
-                                        : @tr("Отдаёт процессор и память той программе, что сейчас ")
-                                          + @tr("на экране. Фоновые уводит в энергосберегающий режим. ")
-                                          + @tr("Discord, Steam и OBS не трогает.");
-                                    font-size: 11px; color: #7d8f86; wrap: word-wrap;
+                                for part in root.memory-parts: VerticalLayout {
+                                    spacing: 3px;
+                                    HorizontalLayout {
+                                        spacing: 8px;
+                                        Text {
+                                            text: part.label; font-size: 12px;
+                                            color: part.free ? #7d8f86 : #e8f0ec;
+                                            vertical-alignment: center;
+                                        }
+                                        if part.hidden: Text {
+                                            text: @tr("в Диспетчере задач не видно");
+                                            font-size: 10px; color: #c99a4a;
+                                            vertical-alignment: center;
+                                        }
+                                        Rectangle { horizontal-stretch: 1; }
+                                        Text {
+                                            text: part.value; font-size: 12px; color: #b6c6bd;
+                                            vertical-alignment: center;
+                                        }
+                                    }
+                                    Rectangle {
+                                        height: 5px; background: #141b18; border-radius: 2px;
+                                        Rectangle {
+                                            x: 0;
+                                            width: parent.width * part.fill;
+                                            height: parent.height;
+                                            border-radius: 2px;
+                                            background: part.free ? #3a4a42 : (part.hidden ? #c99a4a : #4a86c9);
+                                        }
+                                    }
+                                    Text {
+                                        text: part.hint; font-size: 11px; color: #7d8f86;
+                                        wrap: word-wrap;
+                                    }
+                                }
+                                if root.memory-apps != "": Text {
+                                    text: root.memory-apps; font-size: 11px; color: #b6c6bd;
+                                    wrap: word-wrap;
+                                }
+                                if root.memory-graphics != "": Text {
+                                    text: root.memory-graphics; font-size: 11px; color: #b6c6bd;
+                                    wrap: word-wrap;
+                                }
+                                if root.memory-kernel != "": Text {
+                                    text: root.memory-kernel; font-size: 12px; color: #e0a44a;
+                                    wrap: word-wrap;
                                 }
                             }
-                            Rectangle {
-                                width: 110px;
+                        }
+
+                        // Подвисания. Смотреть надо в момент подвисания, а он
+                        // короткий: пока человек откроет окно, всё уже прошло.
+                        // Поэтому показываем то, что было поймано раньше.
+                        if root.freeze != "": Rectangle {
+                            background: #2e2320; border-radius: 8px;
+                            height: freezebox.preferred-height;
+                            freezebox := HorizontalLayout {
+                                padding: 12px; spacing: 12px;
                                 VerticalLayout {
+                                    spacing: 4px;
+                                    horizontal-stretch: 1;
+                                    Text {
+                                        text: @tr("Система подвисала");
+                                        font-size: 12px; color: #e0a44a;
+                                    }
+                                    Text {
+                                        text: root.freeze;
+                                        font-size: 12px; color: #d8c4a8; wrap: word-wrap;
+                                    }
+                                }
+                                // Переход к виновникам. Прочитать имена мало:
+                                // человек хочет с ними что-то сделать, а искать
+                                // их в списке из трёхсот строк руками — работа.
+                                if root.freeze-culprits != "": VerticalLayout {
                                     alignment: center;
                                     RowButton {
-                                        label: root.game-mode ? @tr("Выключить") : @tr("Включить");
-                                        width: 110px;
-                                        pressed => { root.toggle-game-mode(); }
+                                        label: @tr("Показать их");
+                                        width: 120px;
+                                        pressed => {
+                                            root.filter = root.freeze-culprits;
+                                            root.apply-filter();
+                                            root.section = 1;
+                                        }
                                     }
                                 }
                             }
                         }
-                    }
 
-                    // --- Накопители ---
-                    Text { text: @tr("Накопители"); font-size: 14px; color: #e8f0ec; }
-                    if root.disk-pressure != "": Rectangle {
-                        background: #2a211c; border-radius: 8px;
-                        height: pressure.preferred-height;
-                        pressure := VerticalLayout {
-                            padding: 10px;
-                            Text {
-                                text: root.disk-pressure;
-                                font-size: 12px; color: #e0a44a; wrap: word-wrap;
-                            }
-                        }
-                    }
-                    // Ядро само по себе виновником не бывает: объясняем,
-                    // по чьему поручению оно работает с диском.
-                    if root.system-io != "": Rectangle {
-                        background: #1c2530; border-radius: 8px;
-                        height: sysio.preferred-height;
-                        sysio := VerticalLayout {
-                            padding: 10px;
-                            Text {
-                                text: root.system-io;
-                                font-size: 12px; color: #8fb4d8; wrap: word-wrap;
-                            }
-                        }
-                    }
-                    for disk in root.disk-load: Rectangle {
-                        background: #1e2a24; border-radius: 8px;
-                        VerticalLayout {
-                            padding: 10px; spacing: 5px;
-                            HorizontalLayout {
-                                spacing: 8px;
-                                Text {
-                                    text: disk.name; font-size: 12px; color: #e8f0ec;
-                                    vertical-alignment: center; horizontal-stretch: 1;
-                                    overflow: elide;
+                        // --- Игровой режим ---
+                        Rectangle {
+                            background: root.game-mode ? #23372c : #1e2a24;
+                            border-radius: 8px;
+                            height: game.preferred-height;
+                            game := HorizontalLayout {
+                                padding: 12px; spacing: 12px;
+                                VerticalLayout {
+                                    spacing: 3px;
+                                    horizontal-stretch: 1;
+                                    Text {
+                                        text: root.game-mode
+                                            ? @tr("Игровой режим включён")
+                                            : @tr("Игровой режим");
+                                        font-size: 13px; color: #e8f0ec;
+                                    }
+                                    Text {
+                                        text: root.game-mode
+                                            ? @tr("Игра получает процессор и память в первую очередь. ")
+                                              + @tr("Выключите — всё вернётся как было.")
+                                            : @tr("Отдаёт процессор и память той программе, что сейчас ")
+                                              + @tr("на экране. Фоновые уводит в энергосберегающий режим. ")
+                                              + @tr("Discord, Steam и OBS не трогает.");
+                                        font-size: 11px; color: #7d8f86; wrap: word-wrap;
+                                    }
                                 }
-                                Text {
-                                    text: disk.busy;
-                                    font-size: 12px;
-                                    color: disk.saturated ? #e0724a : #b6c6bd;
-                                    vertical-alignment: center;
-                                }
-                            }
-                            // Полоска занятости: та же цифра, но видно сразу.
-                            Rectangle {
-                                height: 6px; background: #141b18; border-radius: 3px;
                                 Rectangle {
-                                    x: 0;
-                                    width: parent.width * disk.fill;
-                                    height: parent.height;
-                                    background: disk.saturated ? #c25a3a : #3f8f66;
-                                    border-radius: 3px;
+                                    width: 110px;
+                                    VerticalLayout {
+                                        alignment: center;
+                                        RowButton {
+                                            label: root.game-mode ? @tr("Выключить") : @tr("Включить");
+                                            width: 110px;
+                                            pressed => { root.toggle-game-mode(); }
+                                        }
+                                    }
                                 }
-                            }
-                            Text {
-                                text: disk.speed + @tr("   в очереди: ") + disk.queue;
-                                font-size: 11px; color: #7d8f86;
                             }
                         }
-                    }
 
-                    // --- Разделы ---
-                    Text { text: @tr("Свободное место"); font-size: 14px; color: #e8f0ec; }
-                    for volume in root.volumes: Rectangle {
-                        background: #1e2a24; border-radius: 8px;
-                        VerticalLayout {
-                            padding: 10px; spacing: 5px;
-                            HorizontalLayout {
-                                spacing: 8px;
+                        // --- Накопители ---
+                        Text { text: @tr("Накопители"); font-size: 14px; color: #e8f0ec; }
+                        if root.disk-pressure != "": Rectangle {
+                            background: #2a211c; border-radius: 8px;
+                            height: pressure.preferred-height;
+                            pressure := VerticalLayout {
+                                padding: 10px;
                                 Text {
-                                    text: volume.title; font-size: 12px; color: #e8f0ec;
-                                    vertical-alignment: center; horizontal-stretch: 1;
-                                    overflow: elide;
-                                }
-                                Text {
-                                    text: volume.space; font-size: 12px;
-                                    color: volume.cramped ? #e0724a : #b6c6bd;
-                                    vertical-alignment: center;
+                                    text: root.disk-pressure;
+                                    font-size: 12px; color: #e0a44a; wrap: word-wrap;
                                 }
                             }
-                            Rectangle {
-                                height: 6px; background: #141b18; border-radius: 3px;
+                        }
+                        // Ядро само по себе виновником не бывает: объясняем,
+                        // по чьему поручению оно работает с диском.
+                        if root.system-io != "": Rectangle {
+                            background: #1c2530; border-radius: 8px;
+                            height: sysio.preferred-height;
+                            sysio := VerticalLayout {
+                                padding: 10px;
+                                Text {
+                                    text: root.system-io;
+                                    font-size: 12px; color: #8fb4d8; wrap: word-wrap;
+                                }
+                            }
+                        }
+                        for disk in root.disk-load: Rectangle {
+                            background: #1e2a24; border-radius: 8px;
+                            VerticalLayout {
+                                padding: 10px; spacing: 5px;
+                                HorizontalLayout {
+                                    spacing: 8px;
+                                    Text {
+                                        text: disk.name; font-size: 12px; color: #e8f0ec;
+                                        vertical-alignment: center; horizontal-stretch: 1;
+                                        overflow: elide;
+                                    }
+                                    Text {
+                                        text: disk.busy;
+                                        font-size: 12px;
+                                        color: disk.saturated ? #e0724a : #b6c6bd;
+                                        vertical-alignment: center;
+                                    }
+                                }
+                                // Полоска занятости: та же цифра, но видно сразу.
                                 Rectangle {
-                                    x: 0;
-                                    width: parent.width * volume.fill;
-                                    height: parent.height;
-                                    background: volume.cramped ? #c25a3a : #3f8f66;
-                                    border-radius: 3px;
+                                    height: 6px; background: #141b18; border-radius: 3px;
+                                    Rectangle {
+                                        x: 0;
+                                        width: parent.width * disk.fill;
+                                        height: parent.height;
+                                        background: disk.saturated ? #c25a3a : #3f8f66;
+                                        border-radius: 3px;
+                                    }
                                 }
-                            }
-                            if volume.cramped: Text {
-                                text: @tr("Свободного места меньше десятой части. У SSD от этого ")
-                                    + @tr("падает скорость записи: контроллеру негде раскладывать данные.");
-                                font-size: 11px; color: #e0a44a; wrap: word-wrap;
+                                Text {
+                                    text: disk.speed + @tr("   в очереди: ") + disk.queue;
+                                    font-size: 11px; color: #7d8f86;
+                                }
                             }
                         }
-                    }
 
-                    // --- Подкачка ---
-                    Text { text: @tr("Файл подкачки"); font-size: 14px; color: #e8f0ec; }
-                    if root.pagefiles.length == 0: Text {
-                        text: @tr("Подкачка отключена — Windows держит всё в оперативной памяти.");
-                        font-size: 11px; color: #7d8f86; wrap: word-wrap;
-                    }
-                    for file in root.pagefiles: Rectangle {
-                        background: #1e2a24; border-radius: 8px;
-                        VerticalLayout {
-                            padding: 10px; spacing: 5px;
-                            HorizontalLayout {
-                                spacing: 8px;
-                                Text {
-                                    text: file.where; font-size: 12px; color: #e8f0ec;
-                                    vertical-alignment: center; horizontal-stretch: 1;
+                        // --- Разделы ---
+                        Text { text: @tr("Свободное место"); font-size: 14px; color: #e8f0ec; }
+                        for volume in root.volumes: Rectangle {
+                            background: #1e2a24; border-radius: 8px;
+                            VerticalLayout {
+                                padding: 10px; spacing: 5px;
+                                HorizontalLayout {
+                                    spacing: 8px;
+                                    Text {
+                                        text: volume.title; font-size: 12px; color: #e8f0ec;
+                                        vertical-alignment: center; horizontal-stretch: 1;
+                                        overflow: elide;
+                                    }
+                                    Text {
+                                        text: volume.space; font-size: 12px;
+                                        color: volume.cramped ? #e0724a : #b6c6bd;
+                                        vertical-alignment: center;
+                                    }
                                 }
-                                Text {
-                                    text: file.used; font-size: 12px; color: #b6c6bd;
-                                    vertical-alignment: center;
-                                }
-                            }
-                            Rectangle {
-                                height: 6px; background: #141b18; border-radius: 3px;
                                 Rectangle {
-                                    x: 0;
-                                    width: parent.width * file.fill;
-                                    height: parent.height;
-                                    background: #4a86c9;
-                                    border-radius: 3px;
+                                    height: 6px; background: #141b18; border-radius: 3px;
+                                    Rectangle {
+                                        x: 0;
+                                        width: parent.width * volume.fill;
+                                        height: parent.height;
+                                        background: volume.cramped ? #c25a3a : #3f8f66;
+                                        border-radius: 3px;
+                                    }
+                                }
+                                if volume.cramped: Text {
+                                    text: @tr("Свободного места меньше десятой части. У SSD от этого ")
+                                        + @tr("падает скорость записи: контроллеру негде раскладывать данные.");
+                                    font-size: 11px; color: #e0a44a; wrap: word-wrap;
                                 }
                             }
-                            Text {
-                                text: file.peak;
-                                font-size: 11px; color: #7d8f86;
+                        }
+
+                        // --- Подкачка ---
+                        Text { text: @tr("Файл подкачки"); font-size: 14px; color: #e8f0ec; }
+                        if root.pagefiles.length == 0: Text {
+                            text: @tr("Подкачка отключена — Windows держит всё в оперативной памяти.");
+                            font-size: 11px; color: #7d8f86; wrap: word-wrap;
+                        }
+                        for file in root.pagefiles: Rectangle {
+                            background: #1e2a24; border-radius: 8px;
+                            VerticalLayout {
+                                padding: 10px; spacing: 5px;
+                                HorizontalLayout {
+                                    spacing: 8px;
+                                    Text {
+                                        text: file.where; font-size: 12px; color: #e8f0ec;
+                                        vertical-alignment: center; horizontal-stretch: 1;
+                                    }
+                                    Text {
+                                        text: file.used; font-size: 12px; color: #b6c6bd;
+                                        vertical-alignment: center;
+                                    }
+                                }
+                                Rectangle {
+                                    height: 6px; background: #141b18; border-radius: 3px;
+                                    Rectangle {
+                                        x: 0;
+                                        width: parent.width * file.fill;
+                                        height: parent.height;
+                                        background: #4a86c9;
+                                        border-radius: 3px;
+                                    }
+                                }
+                                Text {
+                                    text: file.peak;
+                                    font-size: 11px; color: #7d8f86;
+                                }
                             }
                         }
-                    }
 
-                    Text {
-                        text: @tr("Bamboo наблюдает за системой и объясняет причины деградации. ")
-                            + @tr("Действия применяются только по вашему решению и всегда обратимы.");
-                        font-size: 12px; color: #7d8f86; wrap: word-wrap;
-                    }
-                    Rectangle { vertical-stretch: 1; }
+                        Text {
+                            text: @tr("Bamboo наблюдает за системой и объясняет причины деградации. ")
+                                + @tr("Действия применяются только по вашему решению и всегда обратимы.");
+                            font-size: 12px; color: #7d8f86; wrap: word-wrap;
+                        }
+                        Rectangle { vertical-stretch: 1; }
+    }
                 }
 
                 // --- Процессы ---
@@ -1355,61 +1441,64 @@ export component MainWindow inherits Window {
                 }
 
                 // --- Диск ---
-                if root.section == 2: VerticalLayout {
-                    spacing: 8px;
-                    Text { text: @tr("Диск"); font-size: 20px; color: #e8f0ec; }
+                if root.section == 2: Flickable {
+                    vertical-stretch: 1;
+                    VerticalLayout {
+                        spacing: 8px;
+                        Text { text: @tr("Диск"); font-size: 20px; color: #e8f0ec; }
 
-                    // Кто занимает диск — тот самый вопрос, ради которого
-                    // раздел и открывают. Здоровье накопителя на него
-                    // не отвечает, поэтому список идёт первым.
-                    Text { text: @tr("Кто занимает диск"); font-size: 14px; color: #b6c6bd; }
-                    for user in root.disk-users: Rectangle {
-                        background: #1e2a24; border-radius: 6px;
-                        height: 40px;
-                        VerticalLayout {
-                            padding: 8px; spacing: 4px;
-                            HorizontalLayout {
-                                spacing: 8px;
-                                Text {
-                                    text: user.name; font-size: 12px; color: #e8f0ec;
-                                    horizontal-stretch: 1; overflow: elide;
-                                    vertical-alignment: center;
+                        // Кто занимает диск — тот самый вопрос, ради которого
+                        // раздел и открывают. Здоровье накопителя на него
+                        // не отвечает, поэтому список идёт первым.
+                        Text { text: @tr("Кто занимает диск"); font-size: 14px; color: #b6c6bd; }
+                        for user in root.disk-users: Rectangle {
+                            background: #1e2a24; border-radius: 6px;
+                            height: 40px;
+                            VerticalLayout {
+                                padding: 8px; spacing: 4px;
+                                HorizontalLayout {
+                                    spacing: 8px;
+                                    Text {
+                                        text: user.name; font-size: 12px; color: #e8f0ec;
+                                        horizontal-stretch: 1; overflow: elide;
+                                        vertical-alignment: center;
+                                    }
+                                    Text {
+                                        text: user.rate; font-size: 12px; color: #7fb0d8;
+                                        vertical-alignment: center;
+                                    }
                                 }
-                                Text {
-                                    text: user.rate; font-size: 12px; color: #7fb0d8;
-                                    vertical-alignment: center;
-                                }
-                            }
-                            Rectangle {
-                                height: 3px; background: #16201b; border-radius: 2px;
                                 Rectangle {
-                                    x: 0;
-                                    width: parent.width * user.share;
-                                    height: parent.height;
-                                    background: #4a86c9; border-radius: 2px;
+                                    height: 3px; background: #16201b; border-radius: 2px;
+                                    Rectangle {
+                                        x: 0;
+                                        width: parent.width * user.share;
+                                        height: parent.height;
+                                        background: #4a86c9; border-radius: 2px;
+                                    }
                                 }
                             }
                         }
-                    }
-                    if root.disk-users-note != "": Text {
-                        text: root.disk-users-note;
-                        font-size: 11px; color: #7d8f86; wrap: word-wrap;
-                    }
-
-                    Text {
-                        text: @tr("Здоровье накопителя"); font-size: 14px; color: #b6c6bd;
-                    }
-                    for drive in root.drives: Rectangle {
-                        background: #1e2a24; border-radius: 8px;
-                        VerticalLayout {
-                            padding: 12px; spacing: 4px;
-                            Text { text: drive.title; font-size: 14px; color: #e8f0ec; }
-                            Text { text: drive.facts; font-size: 11px; color: #7d8f86; }
-                            Text { text: drive.verdict; font-size: 12px; color: #b6c6bd; wrap: word-wrap; }
+                        if root.disk-users-note != "": Text {
+                            text: root.disk-users-note;
+                            font-size: 11px; color: #7d8f86; wrap: word-wrap;
                         }
-                    }
-                    Text { text: root.disk-note; font-size: 11px; color: #62736a; wrap: word-wrap; }
-                    Rectangle { vertical-stretch: 1; }
+
+                        Text {
+                            text: @tr("Здоровье накопителя"); font-size: 14px; color: #b6c6bd;
+                        }
+                        for drive in root.drives: Rectangle {
+                            background: #1e2a24; border-radius: 8px;
+                            VerticalLayout {
+                                padding: 12px; spacing: 4px;
+                                Text { text: drive.title; font-size: 14px; color: #e8f0ec; }
+                                Text { text: drive.facts; font-size: 11px; color: #7d8f86; }
+                                Text { text: drive.verdict; font-size: 12px; color: #b6c6bd; wrap: word-wrap; }
+                            }
+                        }
+                        Text { text: root.disk-note; font-size: 11px; color: #62736a; wrap: word-wrap; }
+                        Rectangle { vertical-stretch: 1; }
+    }
                 }
 
                 // --- Анализ программы ---
@@ -1780,37 +1869,43 @@ export component MainWindow inherits Window {
                 }
 
                 // --- Питание ---
-                if root.section == 3: VerticalLayout {
-                    spacing: 8px;
-                    Text { text: @tr("Питание"); font-size: 20px; color: #e8f0ec; }
-                    for wake in root.wakes: Rectangle {
-                        height: 30px; background: #1a231f; border-radius: 5px;
-                        HorizontalLayout {
-                            padding-left: 8px; padding-right: 8px; spacing: 8px;
-                            Text { text: wake.when; color: #7d8f86; font-size: 12px; vertical-alignment: center; width: 190px; }
-                            Text { text: wake.source; color: #e8f0ec; font-size: 12px; vertical-alignment: center; horizontal-stretch: 1; }
+                if root.section == 3: Flickable {
+                    vertical-stretch: 1;
+                    VerticalLayout {
+                        spacing: 8px;
+                        Text { text: @tr("Питание"); font-size: 20px; color: #e8f0ec; }
+                        for wake in root.wakes: Rectangle {
+                            height: 30px; background: #1a231f; border-radius: 5px;
+                            HorizontalLayout {
+                                padding-left: 8px; padding-right: 8px; spacing: 8px;
+                                Text { text: wake.when; color: #7d8f86; font-size: 12px; vertical-alignment: center; width: 190px; }
+                                Text { text: wake.source; color: #e8f0ec; font-size: 12px; vertical-alignment: center; horizontal-stretch: 1; }
+                            }
                         }
-                    }
-                    Text { text: root.power-note; font-size: 11px; color: #62736a; wrap: word-wrap; }
-                    Rectangle { vertical-stretch: 1; }
+                        Text { text: root.power-note; font-size: 11px; color: #62736a; wrap: word-wrap; }
+                        Rectangle { vertical-stretch: 1; }
+    }
                 }
 
                 // --- Журнал ---
-                if root.section == 4: VerticalLayout {
-                    spacing: 8px;
-                    Text { text: @tr("Журнал действий"); font-size: 20px; color: #e8f0ec; }
-                    for entry in root.journal: Rectangle {
-                        height: 30px; background: #1a231f; border-radius: 5px;
-                        HorizontalLayout {
-                            padding-left: 8px; padding-right: 8px; spacing: 6px;
-                            Text { text: entry.when; color: #7d8f86; font-size: 11px; vertical-alignment: center; width: 150px; }
-                            Text { text: entry.action; color: #e8f0ec; font-size: 12px; vertical-alignment: center; horizontal-stretch: 1; overflow: elide; }
-                            Text { text: entry.target; color: #b6c6bd; font-size: 12px; vertical-alignment: center; width: 180px; overflow: elide; }
-                            Text { text: entry.status; color: #7d8f86; font-size: 11px; vertical-alignment: center; width: 100px; }
+                if root.section == 4: Flickable {
+                    vertical-stretch: 1;
+                    VerticalLayout {
+                        spacing: 8px;
+                        Text { text: @tr("Журнал действий"); font-size: 20px; color: #e8f0ec; }
+                        for entry in root.journal: Rectangle {
+                            height: 30px; background: #1a231f; border-radius: 5px;
+                            HorizontalLayout {
+                                padding-left: 8px; padding-right: 8px; spacing: 6px;
+                                Text { text: entry.when; color: #7d8f86; font-size: 11px; vertical-alignment: center; width: 150px; }
+                                Text { text: entry.action; color: #e8f0ec; font-size: 12px; vertical-alignment: center; horizontal-stretch: 1; overflow: elide; }
+                                Text { text: entry.target; color: #b6c6bd; font-size: 12px; vertical-alignment: center; width: 180px; overflow: elide; }
+                                Text { text: entry.status; color: #7d8f86; font-size: 11px; vertical-alignment: center; width: 100px; }
+                            }
                         }
-                    }
-                    Text { text: root.journal-note; font-size: 11px; color: #62736a; wrap: word-wrap; }
-                    Rectangle { vertical-stretch: 1; }
+                        Text { text: root.journal-note; font-size: 11px; color: #62736a; wrap: word-wrap; }
+                        Rectangle { vertical-stretch: 1; }
+    }
                 }
 
                 // --- Оптимизация ---
@@ -1977,288 +2072,291 @@ export component MainWindow inherits Window {
                 }
 
                 // --- Настройки ---
-                if root.section == 5: VerticalLayout {
-                    spacing: 10px;
-                    Text { text: @tr("Настройки"); font-size: 20px; color: #e8f0ec; }
+                if root.section == 5: Flickable {
+                    vertical-stretch: 1;
+                    VerticalLayout {
+                        spacing: 10px;
+                        Text { text: @tr("Настройки"); font-size: 20px; color: #e8f0ec; }
 
-                    // Собственный расход. Утилита, которая считает чужие
-                    // ресурсы и молчит про свои, занимается двойной моралью.
-                    if root.budget.length > 0: Rectangle {
-                        background: #1e2a24; border-radius: 8px;
-                        height: budgetbox.preferred-height;
-                        budgetbox := VerticalLayout {
-                            padding: 12px; spacing: 6px;
-                            Text {
-                                text: @tr("Собственный бюджет");
-                                font-size: 13px; color: #e8f0ec;
-                            }
-                            for row in root.budget: HorizontalLayout {
-                                spacing: 8px;
+                        // Собственный расход. Утилита, которая считает чужие
+                        // ресурсы и молчит про свои, занимается двойной моралью.
+                        if root.budget.length > 0: Rectangle {
+                            background: #1e2a24; border-radius: 8px;
+                            height: budgetbox.preferred-height;
+                            budgetbox := VerticalLayout {
+                                padding: 12px; spacing: 6px;
                                 Text {
-                                    text: row.metric;
-                                    font-size: 11px; color: #9fb3a8;
+                                    text: @tr("Собственный бюджет");
+                                    font-size: 13px; color: #e8f0ec;
+                                }
+                                for row in root.budget: HorizontalLayout {
+                                    spacing: 8px;
+                                    Text {
+                                        text: row.metric;
+                                        font-size: 11px; color: #9fb3a8;
+                                        horizontal-stretch: 1;
+                                    }
+                                    Text {
+                                        text: row.measured;
+                                        font-size: 11px;
+                                        color: row.state == 2 ? #e0724a
+                                            : (row.state == 1 ? #6fb58a : #62736a);
+                                        width: 150px;
+                                        horizontal-alignment: right;
+                                    }
+                                    Text {
+                                        text: "\u{2264} " + row.limit;
+                                        font-size: 11px; color: #4d5b53;
+                                        width: 90px;
+                                        horizontal-alignment: right;
+                                    }
+                                }
+                                Text {
+                                    text: root.budget-verdict;
+                                    font-size: 11px; color: #7d8f86; wrap: word-wrap;
+                                }
+                            }
+                        }
+
+                        // Автозапуск с правами. Обычная запись в Run их не даёт,
+                        // и Bamboo при входе поднимается урезанным.
+                        Rectangle {
+                            background: #1e2a24; border-radius: 8px;
+                            height: schedbox.preferred-height;
+                            schedbox := HorizontalLayout {
+                                padding: 12px; spacing: 12px;
+                                VerticalLayout {
+                                    spacing: 3px;
                                     horizontal-stretch: 1;
+                                    Text {
+                                        text: @tr("Запускать с правами администратора");
+                                        font-size: 13px; color: #e8f0ec;
+                                    }
+                                    Text {
+                                        text: root.scheduled-logon
+                                            ? @tr("Bamboo поднимется при входе со всеми правами и без запроса подтверждения.")
+                                            : @tr("Обычный автозапуск прав не даёт: Bamboo стартует урезанным и не покажет историю загрузок, здоровье накопителя и имена задач. Задача планировщика решает это — подтверждение потребуется один раз, сейчас.");
+                                        font-size: 11px; color: #7d8f86; wrap: word-wrap;
+                                    }
                                 }
-                                Text {
-                                    text: row.measured;
-                                    font-size: 11px;
-                                    color: row.state == 2 ? #e0724a
-                                        : (row.state == 1 ? #6fb58a : #62736a);
-                                    width: 150px;
-                                    horizontal-alignment: right;
-                                }
-                                Text {
-                                    text: "\u{2264} " + row.limit;
-                                    font-size: 11px; color: #4d5b53;
-                                    width: 90px;
-                                    horizontal-alignment: right;
-                                }
-                            }
-                            Text {
-                                text: root.budget-verdict;
-                                font-size: 11px; color: #7d8f86; wrap: word-wrap;
-                            }
-                        }
-                    }
-
-                    // Автозапуск с правами. Обычная запись в Run их не даёт,
-                    // и Bamboo при входе поднимается урезанным.
-                    Rectangle {
-                        background: #1e2a24; border-radius: 8px;
-                        height: schedbox.preferred-height;
-                        schedbox := HorizontalLayout {
-                            padding: 12px; spacing: 12px;
-                            VerticalLayout {
-                                spacing: 3px;
-                                horizontal-stretch: 1;
-                                Text {
-                                    text: @tr("Запускать с правами администратора");
-                                    font-size: 13px; color: #e8f0ec;
-                                }
-                                Text {
-                                    text: root.scheduled-logon
-                                        ? @tr("Bamboo поднимется при входе со всеми правами и без запроса подтверждения.")
-                                        : @tr("Обычный автозапуск прав не даёт: Bamboo стартует урезанным и не покажет историю загрузок, здоровье накопителя и имена задач. Задача планировщика решает это — подтверждение потребуется один раз, сейчас.");
-                                    font-size: 11px; color: #7d8f86; wrap: word-wrap;
-                                }
-                            }
-                            VerticalLayout {
-                                alignment: center;
-                                RowButton {
-                                    label: root.scheduled-logon ? @tr("Выключить") : @tr("Включить");
-                                    width: 110px;
-                                    pressed => { root.toggle-scheduled-logon(); }
-                                }
-                            }
-                        }
-                    }
-
-                    // Язык интерфейса.
-                    Rectangle {
-                        background: #1e2a24; border-radius: 8px;
-                        height: langbox.preferred-height;
-                        langbox := HorizontalLayout {
-                            padding: 12px; spacing: 12px;
-                            VerticalLayout {
-                                spacing: 3px;
-                                horizontal-stretch: 1;
-                                Text {
-                                    text: @tr("Язык интерфейса");
-                                    font-size: 13px; color: #e8f0ec;
-                                }
-                                Text {
-                                    text: root.language == "ru"
-                                        ? @tr("Сейчас русский. Смена языка вступает в силу после перезапуска.")
-                                        : @tr("Currently English. A language change takes effect after a restart.");
-                                    font-size: 11px; color: #7d8f86; wrap: word-wrap;
-                                }
-                            }
-                            VerticalLayout {
-                                alignment: center;
-                                RowButton {
-                                    label: root.language == "ru" ? "English" : "Русский";
-                                    width: 110px;
-                                    pressed => { root.toggle-language(); }
-                                }
-                            }
-                        }
-                    }
-
-                    // Свой расход. Bamboo считает чужую запись на диск
-                    // и обязан показывать собственную: утилита, которая
-                    // ругает других за износ накопителя и молчит про себя,
-                    // занимается двойной моралью.
-                    if root.history-note != "": Rectangle {
-                        background: #1e2a24; border-radius: 8px;
-                        height: histbox.preferred-height;
-                        histbox := VerticalLayout {
-                            padding: 12px; spacing: 3px;
-                            Text {
-                                text: @tr("История наблюдений");
-                                font-size: 13px; color: #e8f0ec;
-                            }
-                            Text {
-                                text: root.history-note;
-                                font-size: 11px; color: #7d8f86; wrap: word-wrap;
-                            }
-                        }
-                    }
-
-                    // Версия и обновление. Проверка идёт сама раз в сутки,
-                    // но кнопка нужна: человек, услышавший про новую версию,
-                    // не должен ждать до завтра.
-                    Rectangle {
-                        background: #1e2a24; border-radius: 8px;
-                        height: verbox.preferred-height;
-                        verbox := HorizontalLayout {
-                            padding: 12px; spacing: 12px;
-                            VerticalLayout {
-                                spacing: 3px;
-                                horizontal-stretch: 1;
-                                Text {
-                                    text: @tr("Версия ") + root.app-version;
-                                    font-size: 13px; color: #e8f0ec;
-                                }
-                                Text {
-                                    text: root.update-status;
-                                    font-size: 11px; color: #7d8f86; wrap: word-wrap;
-                                }
-                            }
-                            Rectangle {
-                                width: 130px;
                                 VerticalLayout {
                                     alignment: center;
                                     RowButton {
-                                        label: root.update-busy
-                                            ? @tr("Проверяю…")
-                                            : (root.update-version != ""
-                                                ? @tr("Обновить")
-                                                : @tr("Проверить"));
-                                        width: 130px;
-                                        pressed => {
-                                            if (root.update-busy) { return; }
-                                            if (root.update-version != "") {
-                                                root.install-update();
-                                            } else {
-                                                root.check-update();
+                                        label: root.scheduled-logon ? @tr("Выключить") : @tr("Включить");
+                                        width: 110px;
+                                        pressed => { root.toggle-scheduled-logon(); }
+                                    }
+                                }
+                            }
+                        }
+
+                        // Язык интерфейса.
+                        Rectangle {
+                            background: #1e2a24; border-radius: 8px;
+                            height: langbox.preferred-height;
+                            langbox := HorizontalLayout {
+                                padding: 12px; spacing: 12px;
+                                VerticalLayout {
+                                    spacing: 3px;
+                                    horizontal-stretch: 1;
+                                    Text {
+                                        text: @tr("Язык интерфейса");
+                                        font-size: 13px; color: #e8f0ec;
+                                    }
+                                    Text {
+                                        text: root.language == "ru"
+                                            ? @tr("Сейчас русский. Смена языка вступает в силу после перезапуска.")
+                                            : @tr("Currently English. A language change takes effect after a restart.");
+                                        font-size: 11px; color: #7d8f86; wrap: word-wrap;
+                                    }
+                                }
+                                VerticalLayout {
+                                    alignment: center;
+                                    RowButton {
+                                        label: root.language == "ru" ? "English" : "Русский";
+                                        width: 110px;
+                                        pressed => { root.toggle-language(); }
+                                    }
+                                }
+                            }
+                        }
+
+                        // Свой расход. Bamboo считает чужую запись на диск
+                        // и обязан показывать собственную: утилита, которая
+                        // ругает других за износ накопителя и молчит про себя,
+                        // занимается двойной моралью.
+                        if root.history-note != "": Rectangle {
+                            background: #1e2a24; border-radius: 8px;
+                            height: histbox.preferred-height;
+                            histbox := VerticalLayout {
+                                padding: 12px; spacing: 3px;
+                                Text {
+                                    text: @tr("История наблюдений");
+                                    font-size: 13px; color: #e8f0ec;
+                                }
+                                Text {
+                                    text: root.history-note;
+                                    font-size: 11px; color: #7d8f86; wrap: word-wrap;
+                                }
+                            }
+                        }
+
+                        // Версия и обновление. Проверка идёт сама раз в сутки,
+                        // но кнопка нужна: человек, услышавший про новую версию,
+                        // не должен ждать до завтра.
+                        Rectangle {
+                            background: #1e2a24; border-radius: 8px;
+                            height: verbox.preferred-height;
+                            verbox := HorizontalLayout {
+                                padding: 12px; spacing: 12px;
+                                VerticalLayout {
+                                    spacing: 3px;
+                                    horizontal-stretch: 1;
+                                    Text {
+                                        text: @tr("Версия ") + root.app-version;
+                                        font-size: 13px; color: #e8f0ec;
+                                    }
+                                    Text {
+                                        text: root.update-status;
+                                        font-size: 11px; color: #7d8f86; wrap: word-wrap;
+                                    }
+                                }
+                                Rectangle {
+                                    width: 130px;
+                                    VerticalLayout {
+                                        alignment: center;
+                                        RowButton {
+                                            label: root.update-busy
+                                                ? @tr("Проверяю…")
+                                                : (root.update-version != ""
+                                                    ? @tr("Обновить")
+                                                    : @tr("Проверить"));
+                                            width: 130px;
+                                            pressed => {
+                                                if (root.update-busy) { return; }
+                                                if (root.update-version != "") {
+                                                    root.install-update();
+                                                } else {
+                                                    root.check-update();
+                                                }
                                             }
                                         }
                                     }
                                 }
                             }
                         }
-                    }
 
-                    Rectangle {
-                        background: #1e2a24; border-radius: 8px;
-                        height: startup.preferred-height;
-                        startup := HorizontalLayout {
-                            padding: 12px; spacing: 12px;
-                            VerticalLayout {
-                                spacing: 3px;
-                                horizontal-stretch: 1;
-                                Text {
-                                    text: @tr("Запускать вместе с Windows");
-                                    font-size: 13px; color: #e8f0ec;
-                                }
-                                Text {
-                                    text: root.autostart
-                                        ? @tr("Bamboo запустится сам и продолжит наблюдение.")
-                                        : @tr("Сейчас выключено. Наблюдение идёт только пока ")
-                                          + @tr("программа запущена, а выводы о росте памяти ")
-                                          + @tr("требуют нескольких часов подряд.");
-                                    font-size: 11px; color: #7d8f86; wrap: word-wrap;
-                                }
-                            }
-                            Rectangle {
-                                width: 110px;
+                        Rectangle {
+                            background: #1e2a24; border-radius: 8px;
+                            height: startup.preferred-height;
+                            startup := HorizontalLayout {
+                                padding: 12px; spacing: 12px;
                                 VerticalLayout {
-                                    alignment: center;
-                                    RowButton {
-                                        label: root.autostart ? @tr("Выключить") : @tr("Включить");
-                                        width: 110px;
-                                        pressed => { root.toggle-autostart(); }
+                                    spacing: 3px;
+                                    horizontal-stretch: 1;
+                                    Text {
+                                        text: @tr("Запускать вместе с Windows");
+                                        font-size: 13px; color: #e8f0ec;
+                                    }
+                                    Text {
+                                        text: root.autostart
+                                            ? @tr("Bamboo запустится сам и продолжит наблюдение.")
+                                            : @tr("Сейчас выключено. Наблюдение идёт только пока ")
+                                              + @tr("программа запущена, а выводы о росте памяти ")
+                                              + @tr("требуют нескольких часов подряд.");
+                                        font-size: 11px; color: #7d8f86; wrap: word-wrap;
+                                    }
+                                }
+                                Rectangle {
+                                    width: 110px;
+                                    VerticalLayout {
+                                        alignment: center;
+                                        RowButton {
+                                            label: root.autostart ? @tr("Выключить") : @tr("Включить");
+                                            width: 110px;
+                                            pressed => { root.toggle-autostart(); }
+                                        }
                                     }
                                 }
                             }
                         }
-                    }
 
-                    Rectangle {
-                        background: #1e2a24; border-radius: 8px;
-                        height: widgetstart.preferred-height;
-                        widgetstart := HorizontalLayout {
-                            padding: 12px; spacing: 12px;
-                            VerticalLayout {
-                                spacing: 3px;
-                                horizontal-stretch: 1;
-                                Text {
-                                    text: @tr("Показывать виджет при запуске");
-                                    font-size: 13px; color: #e8f0ec;
-                                }
-                                Text {
-                                    text: root.show-widget-on-start
-                                        ? @tr("Виджет появится сразу вместе с Bamboo.")
-                                        : @tr("Bamboo запускается в трее. Виджет открывается ")
-                                          + @tr("щелчком по значку — наблюдение идёт в любом случае.");
-                                    font-size: 11px; color: #7d8f86; wrap: word-wrap;
-                                }
-                            }
-                            Rectangle {
-                                width: 110px;
+                        Rectangle {
+                            background: #1e2a24; border-radius: 8px;
+                            height: widgetstart.preferred-height;
+                            widgetstart := HorizontalLayout {
+                                padding: 12px; spacing: 12px;
                                 VerticalLayout {
-                                    alignment: center;
-                                    RowButton {
-                                        label: root.show-widget-on-start ? @tr("Выключить") : @tr("Включить");
-                                        width: 110px;
-                                        pressed => { root.toggle-widget-on-start(); }
+                                    spacing: 3px;
+                                    horizontal-stretch: 1;
+                                    Text {
+                                        text: @tr("Показывать виджет при запуске");
+                                        font-size: 13px; color: #e8f0ec;
+                                    }
+                                    Text {
+                                        text: root.show-widget-on-start
+                                            ? @tr("Виджет появится сразу вместе с Bamboo.")
+                                            : @tr("Bamboo запускается в трее. Виджет открывается ")
+                                              + @tr("щелчком по значку — наблюдение идёт в любом случае.");
+                                        font-size: 11px; color: #7d8f86; wrap: word-wrap;
+                                    }
+                                }
+                                Rectangle {
+                                    width: 110px;
+                                    VerticalLayout {
+                                        alignment: center;
+                                        RowButton {
+                                            label: root.show-widget-on-start ? @tr("Выключить") : @tr("Включить");
+                                            width: 110px;
+                                            pressed => { root.toggle-widget-on-start(); }
+                                        }
                                     }
                                 }
                             }
                         }
-                    }
 
-                    Rectangle {
-                        background: #1e2a24; border-radius: 8px;
-                        height: watch.preferred-height;
-                        watch := VerticalLayout {
-                            padding: 12px; spacing: 3px;
-                            Text {
-                                text: @tr("Наблюдение");
-                                font-size: 13px; color: #e8f0ec;
-                            }
-                            Text {
-                                text: root.watch-status;
-                                font-size: 11px; color: #7d8f86; wrap: word-wrap;
+                        Rectangle {
+                            background: #1e2a24; border-radius: 8px;
+                            height: watch.preferred-height;
+                            watch := VerticalLayout {
+                                padding: 12px; spacing: 3px;
+                                Text {
+                                    text: @tr("Наблюдение");
+                                    font-size: 13px; color: #e8f0ec;
+                                }
+                                Text {
+                                    text: root.watch-status;
+                                    font-size: 11px; color: #7d8f86; wrap: word-wrap;
+                                }
                             }
                         }
-                    }
 
-                    Rectangle {
-                        background: #1e2a24; border-radius: 8px;
-                        height: about.preferred-height;
-                        about := VerticalLayout {
-                            padding: 12px; spacing: 3px;
-                            Text {
-                                text: @tr("О программе");
-                                font-size: 13px; color: #e8f0ec;
-                            }
-                            Text {
-                                text: @tr("Bamboo наблюдает за системой и объясняет, что в ней ")
-                                    + @tr("происходит. Все действия записываются в журнал и ")
-                                    + @tr("обратимы. Того, что нельзя измерить, Bamboo не обещает: ")
-                                    + @tr("здесь нет «очистки памяти», «ускорения интернета» ")
-                                    + @tr("и прочего, чему нет доказательств.");
-                                font-size: 11px; color: #7d8f86; wrap: word-wrap;
+                        Rectangle {
+                            background: #1e2a24; border-radius: 8px;
+                            height: about.preferred-height;
+                            about := VerticalLayout {
+                                padding: 12px; spacing: 3px;
+                                Text {
+                                    text: @tr("О программе");
+                                    font-size: 13px; color: #e8f0ec;
+                                }
+                                Text {
+                                    text: @tr("Bamboo наблюдает за системой и объясняет, что в ней ")
+                                        + @tr("происходит. Все действия записываются в журнал и ")
+                                        + @tr("обратимы. Того, что нельзя измерить, Bamboo не обещает: ")
+                                        + @tr("здесь нет «очистки памяти», «ускорения интернета» ")
+                                        + @tr("и прочего, чему нет доказательств.");
+                                    font-size: 11px; color: #7d8f86; wrap: word-wrap;
+                                }
                             }
                         }
-                    }
 
-                    Text {
-                        text: root.action-note;
-                        font-size: 11px; color: #9fb3a8; wrap: word-wrap;
-                    }
-                    Rectangle { vertical-stretch: 1; }
+                        Text {
+                            text: root.action-note;
+                            font-size: 11px; color: #9fb3a8; wrap: word-wrap;
+                        }
+                        Rectangle { vertical-stretch: 1; }
+    }
                 }
             }
         }

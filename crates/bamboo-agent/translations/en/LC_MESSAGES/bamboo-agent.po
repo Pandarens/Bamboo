@@ -540,3 +540,11 @@ msgstr "Plain autostart gives no rights: Bamboo starts reduced and will not show
 msgctxt "MainWindow"
 msgid "Долгая загрузка"
 msgstr "Slow startup"
+
+msgctxt "MainWindow"
+msgid "Куда ушла память"
+msgstr "Where the memory went"
+
+msgctxt "MainWindow"
+msgid "в Диспетчере задач не видно"
+msgstr "not visible in Task Manager"

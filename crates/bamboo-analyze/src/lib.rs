@@ -14,6 +14,7 @@ pub mod driver;
 pub mod freeze;
 pub mod growth;
 pub mod idle;
+pub mod memmap;
 pub mod observation;
 pub mod origin;
 pub mod record;

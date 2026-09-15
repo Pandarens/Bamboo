@@ -26,6 +26,7 @@ mod gpu;
 mod http;
 pub mod inventory;
 mod iolimit;
+pub mod memmap;
 pub mod memory;
 pub mod notify;
 pub mod nt;
@@ -56,7 +57,9 @@ pub use digest::sha256_hex;
 pub use eventlog::daily_error_count;
 pub use extensions::{installed as installed_extensions, Extension};
 pub use games::{installed as installed_games, Game};
-pub use gpu::{load_by_process as gpu_load_by_process, GpuCounter, GpuLoad};
+pub use gpu::{
+    load_by_process as gpu_load_by_process, GpuCounter, GpuLoad, GpuMemory, GpuMemoryCounter,
+};
 pub use http::{fetch, fetch_text};
 pub use inventory::{drivers, scheduled_tasks, Driver, ScheduledTask};
 pub use iolimit::{IoLimit, LimitedProcess};

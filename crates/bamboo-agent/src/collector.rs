@@ -48,6 +48,13 @@ pub struct ProcessLine {
     /// между собой.
     pub read_per_second: u64,
     pub write_per_second: u64,
+    /// Личная память в ОЗУ — то, что Диспетчер задач показывает у процесса.
+    ///
+    /// Отдельно от `memory`, где выделенная память вместе с вытесненной
+    /// в подкачку. Для раскладки «куда ушла память» нужна именно лежащая
+    /// в ОЗУ: иначе сумма по программам не сошлась бы с тем, что видит
+    /// человек в Диспетчере.
+    pub resident: Bytes,
 }
 
 /// Снимок для интерфейса.
@@ -100,6 +107,14 @@ pub struct Snapshot {
     /// Сколько Bamboo уже наблюдает за системой. От этого зависит, что он
     /// вправе сказать про рост памяти: выводы требуют часов.
     pub watching_ms: u64,
+    /// Части памяти, которых нет в списке процессов: ядро, кэш, изменения.
+    pub system_memory: bamboo_sys::memmap::SystemMemory,
+    /// Сколько памяти видеокарта взяла из ОЗУ. `None` — счётчиков нет.
+    pub gpu_shared_total: Option<Bytes>,
+    /// Она же по процессам, крупные первыми.
+    pub gpu_shared_by_pid: Vec<(u32, Bytes)>,
+    /// Как растёт невыгружаемый пул ядра. `None` — не растёт или рано судить.
+    pub kernel_trend: Option<bamboo_analyze::MemoryTrend>,
 }
 
 /// Раздел в снимке.
@@ -195,6 +210,14 @@ const PAGEFILES_EVERY: std::time::Duration = std::time::Duration::from_secs(30);
 /// памяти на процесс.
 const BROWSER_ROLES_EVERY: std::time::Duration = std::time::Duration::from_secs(30);
 
+/// Как часто записывать размер пула ядра для слежения за ростом.
+///
+/// Раз в минуту: утечка драйвера растёт часами, и чаще мерить незачем.
+const KERNEL_SAMPLE_EVERY: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// Сколько минутных точек пула держим — сутки.
+const KERNEL_SERIES_POINTS: usize = 24 * 60;
+
 fn run(sender: Sender<Snapshot>, visible: WidgetVisible) {
     let started = std::time::Instant::now();
     let mut collector = Collector::new();
@@ -230,6 +253,14 @@ fn run(sender: Sender<Snapshot>, visible: WidgetVisible) {
     // загрузки — в обоих случаях процессор «занят на сто процентов».
     // Ошибка открытия не беда: тогда о частоте просто молчим.
     let mut frequency_counter = bamboo_sys::frequency::FrequencyCounter::open().ok();
+    // Части памяти, которых нет в списке процессов: ядро, кэш, видеокарта.
+    let mut memory_counter = bamboo_sys::memmap::SystemMemoryCounter::open().ok();
+    let mut gpu_memory_counter = bamboo_sys::GpuMemoryCounter::open().ok();
+    // Невыгружаемый пул ядра по минутам. Растёт день ото дня — течёт драйвер,
+    // а в Диспетчере задач этого не видно вовсе: у драйвера нет строки.
+    let mut kernel_series: Vec<bamboo_analyze::Point> = Vec::new();
+    let mut kernel_sampled: Option<std::time::Instant> = None;
+    let mut kernel_trend: Option<bamboo_analyze::MemoryTrend> = None;
     // Простой, измеренный на прошлом сне. Ноль до первого сна: мерить
     // ещё нечего, а выдумывать число нельзя.
     let mut stall_ms: u64 = 0;
@@ -323,6 +354,7 @@ fn run(sender: Sender<Snapshot>, visible: WidgetVisible) {
                 window_title: titles.get(&process.pid()).cloned().unwrap_or_default(),
                 read_per_second: per_second(process.last_point().read_kib, tick.interval_ms),
                 write_per_second: per_second(process.last_point().write_kib, tick.interval_ms),
+                resident: Bytes::from_kib(process.last_point().working_set_private_kib as u64),
             })
             .collect();
 
@@ -438,6 +470,27 @@ fn run(sender: Sender<Snapshot>, visible: WidgetVisible) {
             })
             .unwrap_or_default();
 
+        let system_memory = memory_counter
+            .as_mut()
+            .map(|counter| counter.read())
+            .unwrap_or_default();
+        let gpu_memory = gpu_memory_counter
+            .as_mut()
+            .and_then(|counter| counter.read().ok());
+        if let Some(pool) = system_memory.pool_nonpaged {
+            if kernel_sampled.is_none_or(|at| at.elapsed() >= KERNEL_SAMPLE_EVERY) {
+                kernel_sampled = Some(std::time::Instant::now());
+                let now_ms = started.elapsed().as_millis() as u64;
+                kernel_series.push((now_ms, pool.as_u64() as f64));
+                if kernel_series.len() > KERNEL_SERIES_POINTS {
+                    kernel_series.remove(0);
+                }
+                // Тем же судом, что утечки в программах: двух мнений о росте
+                // быть не должно.
+                kernel_trend = bamboo_analyze::memory_trend(&kernel_series, now_ms);
+            }
+        }
+
         // Считаем до сборки снимка: дальше список процессов уедет в него.
         let disk_pressure = explain_disk_pressure(&disks, &top);
         let system_io = explain_system(&top, used, tick.system.memory.physical_total);
@@ -466,6 +519,12 @@ fn run(sender: Sender<Snapshot>, visible: WidgetVisible) {
             new_freeze,
             gpu,
             watching_ms: started.elapsed().as_millis() as u64,
+            system_memory,
+            gpu_shared_total: gpu_memory.as_ref().map(|memory| memory.shared_total),
+            gpu_shared_by_pid: gpu_memory
+                .map(|memory| memory.shared_by_pid)
+                .unwrap_or_default(),
+            kernel_trend,
         };
 
         // Интерфейс закрылся — поток должен закончиться вместе с ним.
@@ -781,6 +840,7 @@ mod pressure_tests {
             parent_pid: 0,
             browser_role: None,
             window_title: String::new(),
+            resident: Bytes::ZERO,
             read_per_second: 0,
             write_per_second: write,
         }

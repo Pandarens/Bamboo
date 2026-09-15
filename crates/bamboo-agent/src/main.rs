@@ -223,6 +223,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     // не сделает — список останется пустым.
     main_window.set_disk_load(ModelRc::new(VecModel::from(Vec::<DiskLoadRow>::new())));
     main_window.set_pagefiles(ModelRc::new(VecModel::from(Vec::<PagefileRow>::new())));
+    main_window.set_memory_parts(ModelRc::new(VecModel::from(Vec::<MemoryPartRow>::new())));
     main_window.set_volumes(ModelRc::new(VecModel::from(Vec::<VolumeRow>::new())));
     main_window.set_suggestions(ModelRc::new(VecModel::from(Vec::<SuggestionRow>::new())));
     main_window.set_autostart(bamboo_sys::is_in_startup());
@@ -2255,6 +2256,27 @@ fn apply_overview(
     main.set_cpu_summary(SharedString::from(overview.cpu));
     main.set_memory_summary(SharedString::from(overview.memory));
     main.set_process_summary(SharedString::from(overview.processes));
+
+    // Куда ушла память: части, которых нет в списке процессов, — рядом
+    // с теми, что есть. Иначе «занято 12 ГБ» при семи гигабайтах в столбце
+    // Диспетчера так и остаётся загадкой.
+    let memory = mainwin::memory_view(snapshot);
+    let parts: Vec<MemoryPartRow> = memory
+        .rows
+        .into_iter()
+        .map(|row| MemoryPartRow {
+            label: SharedString::from(row.label),
+            value: SharedString::from(row.value),
+            hint: SharedString::from(row.hint),
+            fill: row.fill,
+            hidden: row.hidden,
+            free: row.free,
+        })
+        .collect();
+    replace(&main.get_memory_parts(), parts);
+    main.set_memory_apps(SharedString::from(memory.apps));
+    main.set_memory_graphics(SharedString::from(memory.graphics));
+    main.set_memory_kernel(SharedString::from(memory.kernel));
 
     // Накопители и подкачка: дашборд в обзоре отвечает на вопрос «что
     // именно грузит диск», который иначе приходится выяснять на ощупь.

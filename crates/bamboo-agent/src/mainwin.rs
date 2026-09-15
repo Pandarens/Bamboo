@@ -1162,6 +1162,182 @@ pub fn overview(snapshot: &Snapshot) -> Overview {
     }
 }
 
+/// Строка раскладки памяти.
+pub struct MemoryRowData {
+    pub label: String,
+    pub value: String,
+    pub hint: String,
+    pub fill: f32,
+    /// В Диспетчере задач у процессов этого не видно.
+    pub hidden: bool,
+    /// Не занято по-настоящему: кэш и пустые страницы.
+    pub free: bool,
+}
+
+/// Всё для карточки «Куда ушла память».
+pub struct MemoryView {
+    pub rows: Vec<MemoryRowData>,
+    /// Крупнейшие программы, сложенные из своих процессов.
+    pub apps: String,
+    /// Кто держит память видеокарты — и совет, если держит много.
+    pub graphics: String,
+    /// Рост ядра, если растёт.
+    pub kernel: String,
+}
+
+/// Раскладывает память снимка по частям.
+pub fn memory_view(snapshot: &Snapshot) -> MemoryView {
+    use bamboo_analyze::memmap::{breakdown, heavy_graphics, top_apps, MemoryFacts};
+    use bamboo_core::Bytes;
+
+    let is_compression = |name: &str| name.eq_ignore_ascii_case("Memory Compression");
+    let programs = || {
+        snapshot
+            .top
+            .iter()
+            .filter(|line| !is_compression(&line.name))
+    };
+    let compression: u64 = snapshot
+        .top
+        .iter()
+        .filter(|line| is_compression(&line.name))
+        .map(|line| line.resident.as_u64())
+        .sum();
+    let system = snapshot.system_memory;
+
+    let facts = MemoryFacts {
+        total: snapshot.memory_total,
+        available: Bytes(
+            snapshot
+                .memory_total
+                .as_u64()
+                .saturating_sub(snapshot.memory_used.as_u64()),
+        ),
+        programs: Bytes(programs().map(|line| line.resident.as_u64()).sum()),
+        compression: Bytes(compression),
+        graphics: snapshot.gpu_shared_total,
+        pool_nonpaged: system.pool_nonpaged,
+        pool_paged: system.pool_paged,
+        kernel_code: system.kernel_code,
+        file_cache: system.file_cache,
+        modified: system.modified,
+        free_zero: system.free_zero,
+    };
+    let rows = breakdown(&facts)
+        .into_iter()
+        .map(|part| MemoryRowData {
+            label: part.kind.label().to_string(),
+            value: part.bytes.to_string(),
+            hint: part.kind.hint().to_string(),
+            fill: (part.share as f32).clamp(0.0, 1.0),
+            hidden: part.kind.in_use() && !part.kind.in_task_manager(),
+            free: !part.kind.in_use(),
+        })
+        .collect();
+
+    let apps = top_apps(
+        programs().map(|line| (line.name.as_str(), line.resident)),
+        5,
+    );
+    let apps = if apps.is_empty() {
+        String::new()
+    } else {
+        let list: Vec<String> = apps
+            .iter()
+            .map(|app| {
+                format!(
+                    "{} — {}, {}",
+                    display_name(&app.name),
+                    process_count(app.processes),
+                    app.bytes
+                )
+            })
+            .collect();
+        bamboo_core::say(
+            "Больше всех, со всеми своими процессами: {list}.",
+            "Largest, with all their processes: {list}.",
+            &[("list", &list.join(" · "))],
+        )
+    };
+
+    let names: std::collections::HashMap<u32, &str> = snapshot
+        .top
+        .iter()
+        .map(|line| (line.pid, line.name.as_str()))
+        .collect();
+    let holders = top_apps(
+        snapshot
+            .gpu_shared_by_pid
+            .iter()
+            .filter_map(|(pid, bytes)| names.get(pid).map(|name| (*name, *bytes))),
+        4,
+    );
+    let graphics = if holders.is_empty() {
+        String::new()
+    } else {
+        let list: Vec<String> = holders
+            .iter()
+            .map(|app| format!("{} {}", display_name(&app.name), app.bytes))
+            .collect();
+        let mut text = bamboo_core::say(
+            "Память видеокарты держат: {list}.",
+            "Graphics memory is held by: {list}.",
+            &[("list", &list.join(", "))],
+        );
+        for app in heavy_graphics(&holders) {
+            text.push(' ');
+            text.push_str(&bamboo_core::say(
+                "{app} держит {size} памяти видеокарты. Если это не игра и не видеоредактор, обычно помогает выключить аппаратное ускорение графики в настройках программы.",
+                "{app} holds {size} of graphics memory. Unless it is a game or a video editor, turning off hardware graphics acceleration in its settings usually helps.",
+                &[("app", display_name(&app.name)), ("size", &app.bytes.to_string())],
+            ));
+        }
+        text
+    };
+
+    let kernel = match snapshot.kernel_trend {
+        Some(trend) if trend.suspected_leak => bamboo_core::say(
+            "Ядро и драйверы растут на {rate} МБ/ч уже несколько часов — похоже на утечку драйвера. В Диспетчере задач её не видно: у драйвера нет строки процесса.",
+            "Kernel and drivers have been growing by {rate} MB/h for hours — this looks like a driver leak. Task Manager cannot show it: a driver has no process row.",
+            &[("rate", &format!("{:.0}", trend.mb_per_hour))],
+        ),
+        Some(trend) => bamboo_core::say(
+            "Ядро и драйверы понемногу растут: {rate} МБ/ч. Если рост продлится часами — это утечка драйвера.",
+            "Kernel and drivers are growing slowly: {rate} MB/h. If it lasts for hours, a driver is leaking.",
+            &[("rate", &format!("{:.0}", trend.mb_per_hour))],
+        ),
+        None => String::new(),
+    };
+
+    MemoryView {
+        rows,
+        apps,
+        graphics,
+        kernel,
+    }
+}
+
+/// Имя программы без хвоста «.exe»: в раскладке это подпись, не путь.
+fn display_name(name: &str) -> &str {
+    let lower = name.to_ascii_lowercase();
+    if lower.ends_with(".exe") {
+        &name[..name.len() - 4]
+    } else {
+        name
+    }
+}
+
+/// «41 процесс», «14 процессов» — по правилам языка.
+fn process_count(count: usize) -> String {
+    let russian = match (count % 10, count % 100) {
+        (1, rest) if rest != 11 => "процесс",
+        (2..=4, rest) if !(12..=14).contains(&rest) => "процесса",
+        _ => "процессов",
+    };
+    let english = if count == 1 { "process" } else { "processes" };
+    format!("{count} {}", bamboo_core::pick(russian, english))
+}
+
 /// Дата и время из миллисекунд эпохи Unix, в UTC.
 fn date(unix_ms: i64) -> String {
     let total_seconds = unix_ms.div_euclid(1000);
@@ -1210,6 +1386,7 @@ mod tests {
             window_title: String::new(),
             read_per_second: 0,
             write_per_second: 0,
+            resident: bamboo_core::Bytes::ZERO,
         }
     }
 
@@ -1357,6 +1534,7 @@ mod grouping_tests {
             window_title: String::new(),
             read_per_second: disk,
             write_per_second: 0,
+            resident: bamboo_core::Bytes::ZERO,
         }
     }
 
@@ -1588,6 +1766,7 @@ mod expansion_tests {
             window_title: String::new(),
             read_per_second: 0,
             write_per_second: 0,
+            resident: bamboo_core::Bytes::ZERO,
         }
     }
 
@@ -1683,6 +1862,7 @@ mod filter_tests {
             window_title: String::new(),
             read_per_second: 0,
             write_per_second: 0,
+            resident: bamboo_core::Bytes::ZERO,
         }
     }
 
@@ -1755,6 +1935,7 @@ mod explain_tests {
             window_title: String::new(),
             read_per_second: 0,
             write_per_second: 0,
+            resident: bamboo_core::Bytes::ZERO,
         }
     }
 
