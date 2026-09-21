@@ -115,6 +115,9 @@ pub struct Snapshot {
     pub gpu_shared_by_pid: Vec<(u32, Bytes)>,
     /// Как растёт невыгружаемый пул ядра. `None` — не растёт или рано судить.
     pub kernel_trend: Option<bamboo_analyze::MemoryTrend>,
+    /// Сколько памяти программы запросили всего — вместе с тем, что лежит
+    /// в подкачке. Больше физической — памяти не хватает по-настоящему.
+    pub commit_used: Bytes,
 }
 
 /// Раздел в снимке.
@@ -525,6 +528,7 @@ fn run(sender: Sender<Snapshot>, visible: WidgetVisible) {
                 .map(|memory| memory.shared_by_pid)
                 .unwrap_or_default(),
             kernel_trend,
+            commit_used: tick.system.memory.commit_used,
         };
 
         // Интерфейс закрылся — поток должен закончиться вместе с ним.

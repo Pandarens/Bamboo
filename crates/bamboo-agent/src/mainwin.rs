@@ -1183,6 +1183,8 @@ pub struct MemoryView {
     pub graphics: String,
     /// Рост ядра, если растёт.
     pub kernel: String,
+    /// Памяти не хватает физически — сказано прямо.
+    pub verdict: String,
 }
 
 /// Раскладывает память снимка по частям.
@@ -1309,11 +1311,29 @@ pub fn memory_view(snapshot: &Snapshot) -> MemoryView {
         None => String::new(),
     };
 
+    // Программам нужно заметно больше, чем есть. Четверть сверху — граница,
+    // за которой подкачка перестаёт быть запасом и становится рабочей
+    // памятью. На живой машине было 24 ГБ при шестнадцати.
+    let total = snapshot.memory_total.as_u64();
+    let verdict = if total > 0 && snapshot.commit_used.as_u64() > total / 4 * 5 {
+        bamboo_core::say(
+            "Программам сейчас нужно {need}, а оперативной памяти {have}. Разницу Windows держит на диске, в подкачке, — отсюда задержки при переключении между программами и при наборе. Настройкой это не лечится: помогает закрыть лишнее из списка ниже либо добавить памяти. Bamboo тем временем следит, чтобы первой память отдавала не та программа, в которой вы работаете.",
+            "Programs currently need {need}, while there is {have} of RAM. Windows keeps the difference on disk, in the page file — hence the delays when switching programs and typing. No setting cures this: closing what you do not need from the list below helps, or adding memory. Meanwhile Bamboo makes sure the program you work in is not the first to give memory up.",
+            &[
+                ("need", &snapshot.commit_used.to_string()),
+                ("have", &snapshot.memory_total.to_string()),
+            ],
+        )
+    } else {
+        String::new()
+    };
+
     MemoryView {
         rows,
         apps,
         graphics,
         kernel,
+        verdict,
     }
 }
 

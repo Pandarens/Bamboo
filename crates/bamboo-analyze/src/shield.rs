@@ -138,6 +138,20 @@ pub struct ShieldFacts<'a> {
     pub memory: Bytes,
     /// Есть ли у процесса видимое окно с заголовком.
     pub has_window: bool,
+    /// Программа давно не была на переднем плане.
+    ///
+    /// Вторая редакция защиты, и снова по данным. Первая трогала только
+    /// программы без окна — и за неделю на живой машине прикрыла ровно
+    /// одну, на двести мегабайт, при памяти, занятой на 97%. Всё крупное
+    /// там с окнами: Chrome, Claude, ChatGPT, редактор кода, второй браузер.
+    /// Но окно ещё не значит «в работе»: второй браузер, к которому час
+    /// не подходили, держит свои сотни мегабайт наравне с тем, в котором
+    /// человек печатает. Такое окно больше не прикрывает свою семью.
+    ///
+    /// Цена честная и названа прямо: вернувшись к такой программе, человек
+    /// увидит секундную задержку, пока её страницы поднимутся. Зато
+    /// не тормозит та, в которой он сейчас.
+    pub long_unused: bool,
     /// Трогать нельзя: неизменяемый список или уже держит другая автоматика.
     pub protected: bool,
     /// Похоже на утечку — тогда размер не важен: утечка вырастет.
@@ -208,7 +222,7 @@ impl Shield {
         // интерфейс сейчас перед человеком, тоже часть того, с чем он работает.
         let mut seen = vec![false; processes.len()];
         for (at, process) in processes.iter().enumerate() {
-            if process.has_window
+            if (process.has_window && !process.long_unused)
                 || process.pid == foreground_pid
                 || process.pid == own_pid
                 || is_on_demand(process.name)
@@ -309,9 +323,43 @@ mod tests {
             name,
             memory: Bytes(mb * MB),
             has_window,
+            long_unused: false,
             protected: false,
             leaking: false,
         }
+    }
+
+    #[test]
+    fn a_windowed_program_untouched_for_long_gives_way_to_the_one_in_use() {
+        // С живой машины: Chrome в работе, второй браузер открыт, но к нему
+        // час не подходили. Память на 97%.
+        let mut processes = vec![
+            process(10, 1, "explorer.exe", 600, true),
+            process(40, 10, "chrome.exe", 500, true),
+            process(41, 40, "chrome.exe", 450, false),
+            process(50, 10, "brave.exe", 300, true),
+            process(51, 50, "brave.exe", 250, false),
+        ];
+        processes[3].long_unused = true;
+        processes[4].long_unused = true;
+        assert_eq!(
+            Shield::new().wanted(&processes, 0.97, 40, OWN, 0),
+            vec![50, 51],
+            "Chrome в работе трогать нельзя, забытый Brave — можно"
+        );
+    }
+
+    #[test]
+    fn coming_back_to_a_program_releases_it_at_once() {
+        let mut shield = Shield::new();
+        let mut processes = vec![
+            process(10, 1, "explorer.exe", 600, true),
+            process(50, 10, "brave.exe", 300, true),
+        ];
+        processes[1].long_unused = true;
+        assert_eq!(shield.wanted(&processes, 0.97, 10, OWN, 0), vec![50]);
+        // Человек переключился на неё — она на переднем плане.
+        assert!(shield.wanted(&processes, 0.97, 50, OWN, 1000).is_empty());
     }
 
     /// Обстановка с живой машины: Steam свёрнут в трей, его встроенный

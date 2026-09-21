@@ -236,6 +236,13 @@ impl History {
         let _ = self.store.prune(wall_ms);
         let _ = self.store.prune_freezes(wall_ms);
 
+        // Проверка на ходу, раз в сброс. Третье повреждение не задело запись
+        // наблюдений — ошибок не было, и лечение по ошибке молчало неделю,
+        // пока записи о подвисаниях уходили в битое дерево.
+        if !self.store.is_sound() {
+            let _ = self.reopen();
+        }
+
         written
     }
 

@@ -126,6 +126,12 @@ fn acquire_single(
 #[cfg(windows)]
 const HISTORY_RETRY: Duration = Duration::from_secs(10 * 60);
 
+/// Сколько программа должна не быть на переднем плане, чтобы её окно
+/// перестало считаться «в работе». Полчаса: меньше — человек просто
+/// переключился ненадолго.
+#[cfg(windows)]
+const UNUSED_AFTER_MS: u64 = 30 * 60 * 1000;
+
 /// Как часто напоминать об утечке одной и той же программы.
 #[cfg(windows)]
 const LEAK_NOTICE_EVERY: Duration = Duration::from_secs(24 * 60 * 60);
@@ -1454,6 +1460,11 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         std::rc::Rc::new(std::cell::RefCell::new(autopilot::ShieldHolds::default()));
     let tick_shield = shield_holds.clone();
     let mut shield = bamboo_analyze::shield::Shield::new();
+    // Когда программа последний раз была на переднем плане — по имени,
+    // в миллисекундах от запуска агента. Нет записи — считаем с запуска:
+    // первые полчаса «давно не трогали» не скажешь ни про кого.
+    let mut last_foreground: std::collections::HashMap<String, u64> =
+        std::collections::HashMap::new();
     // О каких утечках уже говорили и когда.
     let mut leak_notified: std::collections::HashMap<String, std::time::Instant> =
         std::collections::HashMap::new();
@@ -1763,6 +1774,12 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                         // одно действие на процесс, одна запись журнала.
                         let away_held: std::collections::HashSet<u32> =
                             tick_holds.borrow().keys().map(|(pid, _)| *pid).collect();
+                        let shield_now = started.elapsed().as_millis() as u64;
+                        let foreground = bamboo_sys::window::foreground_pid();
+                        if let Some(line) = snapshot.top.iter().find(|line| line.pid == foreground)
+                        {
+                            last_foreground.insert(line.name.to_lowercase(), shield_now);
+                        }
                         let facts: Vec<bamboo_analyze::shield::ShieldFacts<'_>> = snapshot
                             .top
                             .iter()
@@ -1772,6 +1789,12 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                                 name: &line.name,
                                 memory: line.memory,
                                 has_window: !line.window_title.is_empty(),
+                                long_unused: shield_now.saturating_sub(
+                                    last_foreground
+                                        .get(&line.name.to_lowercase())
+                                        .copied()
+                                        .unwrap_or(0),
+                                ) >= UNUSED_AFTER_MS,
                                 protected: away_held.contains(&line.pid)
                                     || bamboo_policy::immutable_reason(
                                         &bamboo_policy::ProcessFacts {
@@ -1789,7 +1812,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                         let wanted_pids = shield.wanted(
                             &facts,
                             snapshot.memory_pressure(),
-                            bamboo_sys::window::foreground_pid(),
+                            foreground,
                             std::process::id(),
                             // Монотонные часы: по ним защита отсчитывает спокойные
                             // минуты перед снятием, и прыжки настенных ей не страшны.
@@ -2308,6 +2331,7 @@ fn apply_overview(
     main.set_memory_apps(SharedString::from(memory.apps));
     main.set_memory_graphics(SharedString::from(memory.graphics));
     main.set_memory_kernel(SharedString::from(memory.kernel));
+    main.set_memory_verdict(SharedString::from(memory.verdict));
 
     // Накопители и подкачка: дашборд в обзоре отвечает на вопрос «что
     // именно грузит диск», который иначе приходится выяснять на ощупь.
