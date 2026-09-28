@@ -132,6 +132,12 @@ const HISTORY_RETRY: Duration = Duration::from_secs(10 * 60);
 #[cfg(windows)]
 const UNUSED_AFTER_MS: u64 = 30 * 60 * 1000;
 
+/// Сколько человек должен отсутствовать, чтобы обновление поставилось само.
+/// Перезапуск Bamboo длится секунды, но пусть он случится не у человека
+/// на глазах.
+#[cfg(windows)]
+const AUTO_UPDATE_IDLE_MS: u64 = 15 * 60 * 1000;
+
 /// Как часто напоминать об утечке одной и той же программы.
 #[cfg(windows)]
 const LEAK_NOTICE_EVERY: Duration = Duration::from_secs(24 * 60 * 60);
@@ -1445,6 +1451,8 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     let mut checked_at = std::time::Instant::now();
     let update_weak = main_window.as_weak();
     let update_found = pending_update.clone();
+    // Ставится ли обновление прямо сейчас: второй раз не начинаем.
+    let auto_installing = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
 
     let tick_games = known_games.clone();
     let tick_rejections = rejections.clone();
@@ -1595,6 +1603,35 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                         }
                     });
                 });
+            }
+
+            // Обновление ставится само, пока человека нет. Написано по живому
+            // случаю: 0.9.11 с исправлениями защиты и базы неделю пролежал
+            // на GitHub, а на машине всё это время работала 0.9.10 с битой
+            // базой — кнопку «Обновить» никто не нажал, и это нормально:
+            // смотреть в окно утилиты человек не обязан. Разрешение то же,
+            // что у автоматики: включена — Bamboo вправе действовать сам.
+            if let Some(snapshot) = &latest {
+                let ready = update_found.lock().ok().and_then(|found| found.clone());
+                if let Some(release) = ready {
+                    if tick_pilot.borrow().enabled()
+                        && snapshot.user_idle_ms >= AUTO_UPDATE_IDLE_MS
+                        && !auto_installing.swap(true, std::sync::atomic::Ordering::SeqCst)
+                    {
+                        let flag = auto_installing.clone();
+                        std::thread::spawn(move || {
+                            let (_, installed) = update::install(&release);
+                            if installed && update::restart_into_new_version().is_ok() {
+                                let _ = slint::invoke_from_event_loop(|| {
+                                    let _ = slint::quit_event_loop();
+                                });
+                            } else {
+                                // Не вышло — попробуем при следующем отсутствии.
+                                flag.store(false, std::sync::atomic::Ordering::SeqCst);
+                            }
+                        });
+                    }
+                }
             }
 
             if let Some(snapshot) = latest {
