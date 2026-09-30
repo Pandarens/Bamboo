@@ -2027,10 +2027,7 @@ fn shutdown(
     // Ждём не дольше четырёх секунд: сторож закроет процесс на шестой,
     // а таймеру и значку нужно успеть разрушиться.
     if let Some(recorder) = history.borrow_mut().take() {
-        recorder.stop(
-            started.elapsed().as_millis() as u64,
-            Duration::from_secs(4),
-        );
+        recorder.stop(started.elapsed().as_millis() as u64, Duration::from_secs(4));
     }
 
     // Таймер держит замыкание, а в нём — значок в трее. Разрушаем явно,

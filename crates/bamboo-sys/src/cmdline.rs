@@ -252,8 +252,22 @@ fn looks_like_browser(lowered: &str) -> bool {
 /// и та же строка «Node.js JavaScript Runtime», и закрыть нужное по ней
 /// нельзя. Что это на самом деле, написано только в строке запуска.
 const SCRIPT_HOSTS: &[&str] = &[
-    "node", "deno", "bun", "python", "python3", "pythonw", "py", "php", "php-cgi", "java",
-    "javaw", "ruby", "rubyw", "dotnet", "powershell", "pwsh",
+    "node",
+    "deno",
+    "bun",
+    "python",
+    "python3",
+    "pythonw",
+    "py",
+    "php",
+    "php-cgi",
+    "java",
+    "javaw",
+    "ruby",
+    "rubyw",
+    "dotnet",
+    "powershell",
+    "pwsh",
 ];
 
 /// Исполнитель ли это сценариев — стоит ли читать его строку запуска.
@@ -284,9 +298,10 @@ pub fn script_label(command_line: &str) -> Option<String> {
             {
                 positional.remove(0);
             }
-            if rest.iter().any(|arg| {
-                matches!(arg.as_str(), "-e" | "--eval" | "-p" | "--print")
-            }) {
+            if rest
+                .iter()
+                .any(|arg| matches!(arg.as_str(), "-e" | "--eval" | "-p" | "--print"))
+            {
                 return None;
             }
             let (script, after) = positional.split_first()?;
@@ -352,21 +367,45 @@ pub fn script_label(command_line: &str) -> Option<String> {
 /// Сценарии, у которых смысл в следующем слове: «artisan serve»,
 /// «npm run dev». Одно имя без него ничего не объясняет.
 const WITH_SUBCOMMAND: &[&str] = &[
-    "artisan", "manage.py", "rails", "rake", "console", "npm-cli.js", "yarn.js", "yarn.cjs",
-    "pnpm.cjs", "pnpm.js",
+    "artisan",
+    "manage.py",
+    "rails",
+    "rake",
+    "console",
+    "npm-cli.js",
+    "yarn.js",
+    "yarn.cjs",
+    "pnpm.cjs",
+    "pnpm.js",
 ];
 
 /// Имена-пустышки: «index.js» и «main.py» есть в каждом проекте. За них
 /// говорит папка, в которой они лежат.
 const GENERIC_STEMS: &[&str] = &[
-    "index", "main", "server", "app", "cli", "run", "start", "__main__", "entry", "boot",
-    "bootstrap", "launcher", "program", "service", "daemon", "worker", "wrapper", "bin",
+    "index",
+    "main",
+    "server",
+    "app",
+    "cli",
+    "run",
+    "start",
+    "__main__",
+    "entry",
+    "boot",
+    "bootstrap",
+    "launcher",
+    "program",
+    "service",
+    "daemon",
+    "worker",
+    "wrapper",
+    "bin",
 ];
 
 /// Служебные папки: за ними не проект, а устройство пакета.
 const PLUMBING_DIRS: &[&str] = &[
-    "dist", "bin", "lib", "src", "build", "out", "current", "scripts", "js", "esm", "cjs",
-    "node", "release", "debug", "target", "cli", "server", "app",
+    "dist", "bin", "lib", "src", "build", "out", "current", "scripts", "js", "esm", "cjs", "node",
+    "release", "debug", "target", "cli", "server", "app",
 ];
 
 /// Места, где пакеты лежат сами по себе, без проекта: кэш npx, глобальная
@@ -474,7 +513,11 @@ fn with_subcommand(name: &str, after: &[String]) -> String {
         .map(String::as_str)
         .collect();
     // У npm и yarn смысл в «run dev»: одного «run» мало.
-    let take = if matches!(words.first(), Some(&"run")) { 2 } else { 1 };
+    let take = if matches!(words.first(), Some(&"run")) {
+        2
+    } else {
+        1
+    };
     let words: Vec<&str> = words.into_iter().take(take).collect();
     if words.is_empty() {
         name.to_string()

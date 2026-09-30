@@ -1411,7 +1411,10 @@ fn app_key(line: &crate::collector::ProcessLine) -> String {
 fn labels_inside(members: &[GroupMember]) -> String {
     let mut counted: Vec<(String, usize, u64)> = Vec::new();
     for member in members.iter().filter(|member| !member.label.is_empty()) {
-        match counted.iter_mut().find(|(label, _, _)| *label == member.label) {
+        match counted
+            .iter_mut()
+            .find(|(label, _, _)| *label == member.label)
+        {
             Some(entry) => {
                 entry.1 += 1;
                 entry.2 += member.memory.as_u64();
@@ -1554,9 +1557,11 @@ fn copies_line(processes: &[crate::collector::ProcessLine]) -> String {
 
     // Кто запускал: если у всех копий один и тот же хозяин, его и называем.
     let launchers: Vec<&String> = many.iter().flat_map(|group| &group.launchers).collect();
-    let same = launchers
-        .first()
-        .filter(|first| launchers.iter().all(|name| name.eq_ignore_ascii_case(first)));
+    let same = launchers.first().filter(|first| {
+        launchers
+            .iter()
+            .all(|name| name.eq_ignore_ascii_case(first))
+    });
     text.push(' ');
     match same {
         Some(owner) => text.push_str(&bamboo_core::say(
@@ -2750,7 +2755,11 @@ mod translation_tests {
 
         // В карточке памяти node разложен по тому, что он выполняет.
         let view = super::memory_view(&snapshot);
-        assert!(view.apps.contains("node · vite (stanica_club)"), "{}", view.apps);
+        assert!(
+            view.apps.contains("node · vite (stanica_club)"),
+            "{}",
+            view.apps
+        );
     }
 
     #[test]
