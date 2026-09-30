@@ -416,6 +416,7 @@ export component MainWindow inherits Window {
     in property <string> memory-graphics: "";
     in property <string> memory-kernel: "";
     in property <string> memory-verdict: "";
+    in property <string> memory-copies: "";
     in property <string> temperature: "";
     in property <[VolumeRow]> volumes: [];
     in property <[SuggestionRow]> suggestions: [];
@@ -920,6 +921,10 @@ export component MainWindow inherits Window {
                                 }
                                 if root.memory-apps != "": Text {
                                     text: root.memory-apps; font-size: 11px; color: #b6c6bd;
+                                    wrap: word-wrap;
+                                }
+                                if root.memory-copies != "": Text {
+                                    text: root.memory-copies; font-size: 11px; color: #e0a44a;
                                     wrap: word-wrap;
                                 }
                                 if root.memory-graphics != "": Text {

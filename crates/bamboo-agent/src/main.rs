@@ -2369,6 +2369,7 @@ fn apply_overview(
     main.set_memory_graphics(SharedString::from(memory.graphics));
     main.set_memory_kernel(SharedString::from(memory.kernel));
     main.set_memory_verdict(SharedString::from(memory.verdict));
+    main.set_memory_copies(SharedString::from(memory.copies));
 
     // Накопители и подкачка: дашборд в обзоре отвечает на вопрос «что
     // именно грузит диск», который иначе приходится выяснять на ощупь.

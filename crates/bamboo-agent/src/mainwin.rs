@@ -121,6 +121,8 @@ pub struct GroupMember {
     pub role: Option<bamboo_sys::BrowserRole>,
     /// Заголовок окна, если оно есть.
     pub title: String,
+    /// Что выполняет исполнитель сценариев, если это он.
+    pub label: String,
 }
 
 /// Группирует процессы по имени образа.
@@ -148,6 +150,7 @@ pub fn group_by_app(snapshot: &Snapshot) -> Vec<AppGroup> {
                     hung: line.hung,
                     role: line.browser_role,
                     title: line.window_title.clone(),
+                    label: line.label.clone(),
                 });
                 group.cpu_percent += line.cpu_percent;
                 group.memory = bamboo_core::Bytes(group.memory.as_u64() + line.memory.as_u64());
@@ -181,6 +184,7 @@ pub fn group_by_app(snapshot: &Snapshot) -> Vec<AppGroup> {
                             hung: line.hung,
                             role: line.browser_role,
                             title: line.window_title.clone(),
+                            label: line.label.clone(),
                         }],
                         hung: line.hung,
                         leak: line.memory_growth.is_some_and(|trend| trend.suspected_leak),
@@ -464,7 +468,7 @@ pub fn grouped_rows(
             // В режиме групп в колонке потоков полезнее число процессов:
             // сумма потоков у двадцати вкладок ничего не объясняет.
             threads: format!("{} проц.", group.count),
-            badge: String::new(),
+            badge: labels_inside(&group.members),
             growth: if group.leak {
                 "утечка?".to_string()
             } else {
@@ -507,10 +511,12 @@ pub fn grouped_rows(
                 // Что показать вместо повтора имени: заголовок окна, если
                 // он есть, — по нему сразу видно, что это за процесс.
                 // У вкладок браузера окна нет, там остаётся номер.
-                name: if member.title.is_empty() {
-                    format!("PID {}", member.pid)
-                } else {
+                name: if !member.title.is_empty() {
                     member.title.clone()
+                } else if !member.label.is_empty() {
+                    member.label.clone()
+                } else {
+                    format!("PID {}", member.pid)
                 },
                 pid: member.pid.to_string(),
                 cpu: format!("{:.1}%", member.cpu_percent),
@@ -588,7 +594,13 @@ pub fn process_rows(
             cpu: format!("{:.1}%", line.cpu_percent),
             memory: line.memory.to_string(),
             threads: line.threads.to_string(),
-            badge: line.badge.clone(),
+            badge: if line.label.is_empty() {
+                line.badge.clone()
+            } else if line.badge.is_empty() {
+                line.label.clone()
+            } else {
+                format!("{} · {}", line.label, line.badge)
+            },
             growth: describe_growth(line),
             leak: line.memory_growth.is_some_and(|trend| trend.suspected_leak),
             // Про отвечающий процесс не пишем ничего: строка «отвечает»
@@ -1185,6 +1197,8 @@ pub struct MemoryView {
     pub kernel: String,
     /// Памяти не хватает физически — сказано прямо.
     pub verdict: String,
+    /// Одинаковые копии одного и того же сценария, если их набралось много.
+    pub copies: String,
 }
 
 /// Раскладывает память снимка по частям.
@@ -1237,10 +1251,13 @@ pub fn memory_view(snapshot: &Snapshot) -> MemoryView {
         })
         .collect();
 
-    let apps = top_apps(
-        programs().map(|line| (line.name.as_str(), line.resident)),
-        5,
-    );
+    // У исполнителей сценариев складываем по подписи, а не по имени:
+    // «node — 17 процессов, 2 ГБ» не говорит, что закрывать, а «node ·
+    // vite (stanica_club)» говорит.
+    let keyed: Vec<(String, Bytes)> = programs()
+        .map(|line| (app_key(line), line.resident))
+        .collect();
+    let apps = top_apps(keyed.iter().map(|(name, bytes)| (name.as_str(), *bytes)), 5);
     let apps = if apps.is_empty() {
         String::new()
     } else {
@@ -1334,6 +1351,7 @@ pub fn memory_view(snapshot: &Snapshot) -> MemoryView {
         graphics,
         kernel,
         verdict,
+        copies: copies_line(&snapshot.top),
     }
 }
 
@@ -1374,6 +1392,195 @@ pub fn temperature_line(
         ));
     }
     text
+}
+
+/// По чему складывать процесс в программу: по имени, а у исполнителя
+/// сценариев — по имени и подписи.
+fn app_key(line: &crate::collector::ProcessLine) -> String {
+    if line.label.is_empty() {
+        line.name.clone()
+    } else {
+        format!("{} · {}", display_name(&line.name), line.label)
+    }
+}
+
+/// Что выполняется внутри группы: «vite (stanica_club) · codegraph ×5».
+///
+/// Для строки node.exe в списке: без этого семнадцать процессов под одним
+/// именем — загадка, и закрыть нужный можно только наугад.
+fn labels_inside(members: &[GroupMember]) -> String {
+    let mut counted: Vec<(String, usize, u64)> = Vec::new();
+    for member in members.iter().filter(|member| !member.label.is_empty()) {
+        match counted.iter_mut().find(|(label, _, _)| *label == member.label) {
+            Some(entry) => {
+                entry.1 += 1;
+                entry.2 += member.memory.as_u64();
+            }
+            None => counted.push((member.label.clone(), 1, member.memory.as_u64())),
+        }
+    }
+    counted.sort_by_key(|(_, _, bytes)| core::cmp::Reverse(*bytes));
+    counted
+        .iter()
+        .take(3)
+        .map(|(label, count, _)| {
+            if *count > 1 {
+                format!("{label} ×{count}")
+            } else {
+                label.clone()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" · ")
+}
+
+/// Оболочки и исполнители: они запускают, но сами ничего не значат.
+/// Когда ищем, кто запустил копию, их проходим насквозь.
+const PASS_THROUGH: &[&str] = &[
+    "cmd.exe",
+    "conhost.exe",
+    "bash.exe",
+    "sh.exe",
+    "powershell.exe",
+    "pwsh.exe",
+    "node.exe",
+    "python.exe",
+    "php.exe",
+];
+
+/// С какого числа копий о них стоит говорить.
+///
+/// Три: две копии — обычное дело (два окна редактора), а пять одинаковых
+/// серверов, по одному на каждую забытую сессию, — это уже память,
+/// которую держит то, чем никто не пользуется.
+const MANY_COPIES: usize = 3;
+
+/// Сколько копии должны занимать вместе, чтобы о них говорить.
+const COPIES_WORTH: u64 = 200 * 1024 * 1024;
+
+/// Одинаковые копии одного сценария.
+struct Copies<'a> {
+    label: &'a str,
+    count: usize,
+    bytes: u64,
+    launchers: Vec<String>,
+}
+
+/// Строка об одинаковых копиях: «@modelcontextprotocol/server-pdf — 5 копий,
+/// 540 МБ».
+///
+/// С живой машины: пять сессий Claude держали каждая свой сервер PDF и свой
+/// индексатор кода — десять node.exe, больше гигабайта. Сессии были
+/// открыты с позавчера, а работали в одной.
+fn copies_line(processes: &[crate::collector::ProcessLine]) -> String {
+    use std::collections::HashMap;
+
+    let by_pid: HashMap<u32, &crate::collector::ProcessLine> =
+        processes.iter().map(|line| (line.pid, line)).collect();
+    // Предки процесса, ближние первыми. Глубина ограничена: номера процессов
+    // переиспользуются, и цепочка может замкнуться.
+    let ancestors = |line: &crate::collector::ProcessLine| {
+        let mut chain: Vec<&crate::collector::ProcessLine> = Vec::new();
+        let mut pid = line.parent_pid;
+        while chain.len() < 8 {
+            match by_pid.get(&pid) {
+                Some(parent) if parent.pid != line.pid => {
+                    chain.push(*parent);
+                    pid = parent.parent_pid;
+                }
+                _ => break,
+            }
+        }
+        chain
+    };
+
+    let mut groups: Vec<Copies<'_>> = Vec::new();
+    for line in processes.iter().filter(|line| !line.label.is_empty()) {
+        let chain = ancestors(line);
+        // Обёртка npx и сервер под ней подписаны одинаково — это одна копия.
+        let is_copy_root = !chain.iter().any(|parent| parent.label == line.label);
+        let at = match groups.iter().position(|group| group.label == line.label) {
+            Some(at) => at,
+            None => {
+                groups.push(Copies {
+                    label: &line.label,
+                    count: 0,
+                    bytes: 0,
+                    launchers: Vec::new(),
+                });
+                groups.len() - 1
+            }
+        };
+        let group = &mut groups[at];
+        group.bytes += line.resident.as_u64();
+        if is_copy_root {
+            group.count += 1;
+            if let Some(launcher) = chain.iter().find(|parent| {
+                !PASS_THROUGH
+                    .iter()
+                    .any(|name| parent.name.eq_ignore_ascii_case(name))
+            }) {
+                group.launchers.push(launcher.name.clone());
+            }
+        }
+    }
+
+    let mut many: Vec<Copies<'_>> = groups
+        .into_iter()
+        .filter(|group| group.count >= MANY_COPIES && group.bytes >= COPIES_WORTH)
+        .collect();
+    if many.is_empty() {
+        return String::new();
+    }
+    many.sort_by_key(|group| core::cmp::Reverse(group.bytes));
+    many.truncate(3);
+
+    let list: Vec<String> = many
+        .iter()
+        .map(|group| {
+            format!(
+                "{} — {}, {}",
+                group.label,
+                copy_count(group.count),
+                bamboo_core::Bytes(group.bytes)
+            )
+        })
+        .collect();
+    let mut text = bamboo_core::say(
+        "Одинаковые копии: {list}.",
+        "Identical copies: {list}.",
+        &[("list", &list.join("; "))],
+    );
+
+    // Кто запускал: если у всех копий один и тот же хозяин, его и называем.
+    let launchers: Vec<&String> = many.iter().flat_map(|group| &group.launchers).collect();
+    let same = launchers
+        .first()
+        .filter(|first| launchers.iter().all(|name| name.eq_ignore_ascii_case(first)));
+    text.push(' ');
+    match same {
+        Some(owner) => text.push_str(&bamboo_core::say(
+            "Каждую запустил свой процесс {owner} — обычно это открытые сессии или окна, о которых забыли. Закройте лишние, и копии уйдут вместе с ними.",
+            "Each was started by its own {owner} process — usually open sessions or windows that were forgotten. Close the spare ones and the copies go with them.",
+            &[("owner", display_name(owner))],
+        )),
+        None => text.push_str(bamboo_core::pick(
+            "Обычно это серверы от открытых сессий или окон, о которых забыли. Закройте лишние, и копии уйдут вместе с ними.",
+            "These are usually servers of open sessions or windows that were forgotten. Close the spare ones and the copies go with them.",
+        )),
+    }
+    text
+}
+
+/// «5 копий», «2 копии», «1 копия».
+fn copy_count(count: usize) -> String {
+    let russian = match (count % 10, count % 100) {
+        (1, rest) if rest != 11 => "копия",
+        (2..=4, rest) if !(12..=14).contains(&rest) => "копии",
+        _ => "копий",
+    };
+    let english = if count == 1 { "copy" } else { "copies" };
+    format!("{count} {}", bamboo_core::pick(russian, english))
 }
 
 /// Имя программы без хвоста «.exe»: в раскладке это подпись, не путь.
@@ -1446,6 +1653,7 @@ mod tests {
             read_per_second: 0,
             write_per_second: 0,
             resident: bamboo_core::Bytes::ZERO,
+            label: String::new(),
         }
     }
 
@@ -1594,6 +1802,7 @@ mod grouping_tests {
             read_per_second: disk,
             write_per_second: 0,
             resident: bamboo_core::Bytes::ZERO,
+            label: String::new(),
         }
     }
 
@@ -1826,6 +2035,7 @@ mod expansion_tests {
             read_per_second: 0,
             write_per_second: 0,
             resident: bamboo_core::Bytes::ZERO,
+            label: String::new(),
         }
     }
 
@@ -1922,6 +2132,7 @@ mod filter_tests {
             read_per_second: 0,
             write_per_second: 0,
             resident: bamboo_core::Bytes::ZERO,
+            label: String::new(),
         }
     }
 
@@ -1995,6 +2206,7 @@ mod explain_tests {
             read_per_second: 0,
             write_per_second: 0,
             resident: bamboo_core::Bytes::ZERO,
+            label: String::new(),
         }
     }
 
@@ -2451,6 +2663,94 @@ mod translation_tests {
             .join("LC_MESSAGES")
             .join("bamboo-agent.po");
         std::fs::read_to_string(path).expect("каталог перевода на месте")
+    }
+
+    /// Процесс для разбора копий: имя, номер, родитель, подпись, мегабайты.
+    fn launched(
+        name: &str,
+        pid: u32,
+        parent: u32,
+        label: &str,
+        mib: u64,
+    ) -> crate::collector::ProcessLine {
+        crate::collector::ProcessLine {
+            name: name.to_string(),
+            pid,
+            parent_pid: parent,
+            label: label.to_string(),
+            memory: bamboo_core::Bytes::from_mib(mib),
+            resident: bamboo_core::Bytes::from_mib(mib),
+            ..Default::default()
+        }
+    }
+
+    /// Живая машина: пять сессий Claude, у каждой обёртка npx и сервер
+    /// PDF под ней, плюс свой индексатор кода.
+    fn five_sessions() -> Vec<crate::collector::ProcessLine> {
+        const PDF: &str = "@modelcontextprotocol/server-pdf";
+        let mut lines = vec![launched("claude.exe", 1, 0, "", 400)];
+        for session in 0..5u32 {
+            let base = 100 + session * 10;
+            lines.push(launched("claude.exe", base, 1, "", 500));
+            lines.push(launched("cmd.exe", base + 1, base, "", 4));
+            lines.push(launched("node.exe", base + 2, base + 1, PDF, 91));
+            lines.push(launched("cmd.exe", base + 3, base + 2, "", 4));
+            lines.push(launched("node.exe", base + 4, base + 3, PDF, 111));
+            lines.push(launched("cmd.exe", base + 5, base, "", 4));
+            lines.push(launched("node.exe", base + 6, base + 5, "codegraph", 27));
+        }
+        lines
+    }
+
+    #[test]
+    fn forgotten_copies_are_counted_once_per_session() {
+        bamboo_core::set_language(bamboo_core::Language::Russian);
+        let text = super::copies_line(&five_sessions());
+        // Обёртка и сервер — одна копия: пять, а не десять.
+        assert!(
+            text.contains("@modelcontextprotocol/server-pdf — 5 копий"),
+            "{text}"
+        );
+        assert!(text.contains("claude"), "не назван хозяин копий: {text}");
+        // Индексатор мелкий: пять копий по 27 МБ — не повод шуметь.
+        assert!(!text.contains("codegraph"), "{text}");
+    }
+
+    #[test]
+    fn two_copies_are_not_a_finding() {
+        // Два окна редактора — обычное дело, а не забытые сессии.
+        let lines: Vec<_> = five_sessions()
+            .into_iter()
+            .filter(|line| line.pid < 120)
+            .collect();
+        assert_eq!(super::copies_line(&lines), "");
+    }
+
+    #[test]
+    fn a_node_group_says_what_runs_inside() {
+        bamboo_core::set_language(bamboo_core::Language::Russian);
+        let mut lines = five_sessions();
+        lines.push(launched("node.exe", 900, 1, "vite (stanica_club)", 813));
+        let snapshot = crate::collector::Snapshot {
+            top: lines,
+            memory_total: bamboo_core::Bytes::from_mib(16 * 1024),
+            memory_used: bamboo_core::Bytes::from_mib(12 * 1024),
+            ..Default::default()
+        };
+        let node = super::group_by_app(&snapshot)
+            .into_iter()
+            .find(|group| group.name == "node.exe")
+            .expect("группа node.exe");
+        let inside = super::labels_inside(&node.members);
+        // Крупное первым: десять процессов сервера PDF вместе больше vite.
+        assert_eq!(
+            inside,
+            "@modelcontextprotocol/server-pdf ×10 · vite (stanica_club) · codegraph ×5"
+        );
+
+        // В карточке памяти node разложен по тому, что он выполняет.
+        let view = super::memory_view(&snapshot);
+        assert!(view.apps.contains("node · vite (stanica_club)"), "{}", view.apps);
     }
 
     #[test]

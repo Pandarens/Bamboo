@@ -52,7 +52,7 @@ pub use apps::installed_applications;
 pub use boot::{boot_culprits, boot_history, BootCulprit, BootRecord};
 pub use budget::{apply_self_limits, own_memory, OwnMemory};
 pub use clock::{monotonic_ms, now};
-pub use cmdline::{browser_role, command_line, BrowserRole};
+pub use cmdline::{browser_role, command_line, is_script_host, script_label, BrowserRole};
 pub use cpu::CpuTimesBuffer;
 pub use digest::sha256_hex;
 pub use eventlog::daily_error_count;

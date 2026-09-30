@@ -317,6 +317,9 @@ pub struct Moment {
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Bystanders<'a> {
     /// Кто работал с диском: имя и байт в секунду.
+    ///
+    /// Имя может нести подпись через « · »: «node.exe · vite (stanica_club)».
+    /// В пересказ идёт целиком, в фильтр списка — только имя до подписи.
     pub disk: &'a [(String, u64)],
     /// Кто держал память: имя и байты.
     pub memory: &'a [(String, u64)],
@@ -532,11 +535,19 @@ fn name_them(lead: &str, who: &[(String, u64)], show_value: &dyn Fn(u64) -> Stri
 }
 
 /// Имена виновников по отдельности — столько же, сколько названо словами.
+///
+/// Без подписи: список процессов фильтруется по имени образа, и «node.exe ·
+/// vite» в фильтре не нашёл бы никого. Повтор имени схлопываем — двух
+/// одинаковых слов в фильтре не нужно.
 fn names_of(who: &[(String, u64)]) -> Vec<String> {
-    who.iter()
-        .take(SHOW)
-        .map(|(name, _)| name.clone())
-        .collect()
+    let mut names: Vec<String> = Vec::new();
+    for (name, _) in who.iter().take(SHOW) {
+        let image = name.split(" · ").next().unwrap_or(name).to_string();
+        if !names.contains(&image) {
+            names.push(image);
+        }
+    }
+    names
 }
 
 fn bytes(value: u64) -> String {
@@ -1339,6 +1350,39 @@ mod tests {
         for name in &freeze.culprit_names {
             assert!(freeze.culprits.contains(name.as_str()), "{freeze:?}");
         }
+    }
+
+    #[test]
+    fn a_labelled_culprit_is_told_in_full_and_filtered_by_image() {
+        // Пересказ должен сказать, что это за node.exe, а фильтр списка —
+        // найти его по имени образа.
+        let hogs = vec![
+            ("node.exe · vite (stanica_club)".to_string(), 812 << 20),
+            ("node.exe · codegraph".to_string(), 300 << 20),
+            ("chrome.exe".to_string(), 200 << 20),
+        ];
+        let freeze = detect_with(
+            Moment {
+                memory_used_share: 0.97,
+                compressing_memory: true,
+                ..Default::default()
+            },
+            Bystanders {
+                disk: &[],
+                memory: &hogs,
+                cpu: &[],
+            },
+        )
+        .expect("нехватка памяти с простоем — подвисание");
+        assert!(
+            freeze.culprits.contains("node.exe · vite (stanica_club)"),
+            "{}",
+            freeze.culprits
+        );
+        assert_eq!(
+            freeze.culprit_names,
+            vec!["node.exe".to_string(), "chrome.exe".to_string()]
+        );
     }
 
     #[test]

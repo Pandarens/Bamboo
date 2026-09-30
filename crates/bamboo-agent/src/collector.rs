@@ -55,6 +55,9 @@ pub struct ProcessLine {
     /// в ОЗУ: иначе сумма по программам не сошлась бы с тем, что видит
     /// человек в Диспетчере.
     pub resident: Bytes,
+    /// Что выполняет исполнитель сценариев: «vite (stanica_club)» у node.exe.
+    /// Пусто у обычных программ — им хватает своего имени.
+    pub label: String,
 }
 
 /// Снимок для интерфейса.
@@ -240,6 +243,11 @@ fn run(sender: Sender<Snapshot>, visible: WidgetVisible) {
     let mut roles: std::collections::HashMap<u32, bamboo_sys::BrowserRole> =
         std::collections::HashMap::new();
     let mut roles_at: Option<std::time::Instant> = None;
+    // Подписи исполнителей сценариев. `None` тоже запоминаем: у голой
+    // вкладки терминала подписи нет, и перечитывать её строку каждые
+    // полминуты незачем.
+    let mut labels: std::collections::HashMap<u32, Option<String>> =
+        std::collections::HashMap::new();
     // Подвисания: копим их непрерывно. Смотреть надо в момент подвисания,
     // а он короткий — пока человек откроет окно, всё уже прошло.
     let mut freezes = bamboo_analyze::FreezeLog::new();
@@ -314,6 +322,7 @@ fn run(sender: Sender<Snapshot>, visible: WidgetVisible) {
         // Состав браузеров: читаем редко и только для них.
         if roles_at.is_none_or(|at| at.elapsed() >= BROWSER_ROLES_EVERY) {
             refresh_browser_roles(collector.table(), &mut roles);
+            refresh_script_labels(collector.table(), &mut labels);
             roles_at = Some(std::time::Instant::now());
         }
 
@@ -358,6 +367,11 @@ fn run(sender: Sender<Snapshot>, visible: WidgetVisible) {
                 read_per_second: per_second(process.last_point().read_kib, tick.interval_ms),
                 write_per_second: per_second(process.last_point().write_kib, tick.interval_ms),
                 resident: Bytes::from_kib(process.last_point().working_set_private_kib as u64),
+                label: labels
+                    .get(&process.pid())
+                    .cloned()
+                    .flatten()
+                    .unwrap_or_default(),
             })
             .collect();
 
@@ -415,7 +429,7 @@ fn run(sender: Sender<Snapshot>, visible: WidgetVisible) {
             .iter()
             .map(|line| {
                 (
-                    line.name.clone(),
+                    culprit_name(line),
                     line.read_per_second.saturating_add(line.write_per_second),
                 )
             })
@@ -425,7 +439,7 @@ fn run(sender: Sender<Snapshot>, visible: WidgetVisible) {
 
         let mut memory_hogs: Vec<(String, u64)> = top
             .iter()
-            .map(|line| (line.name.clone(), line.memory.as_u64()))
+            .map(|line| (culprit_name(line), line.memory.as_u64()))
             .collect();
         memory_hogs.sort_by_key(|(_, size)| core::cmp::Reverse(*size));
 
@@ -433,7 +447,7 @@ fn run(sender: Sender<Snapshot>, visible: WidgetVisible) {
         // виновников — точность, которой там неоткуда взяться.
         let mut cpu_hogs: Vec<(String, u64)> = top
             .iter()
-            .map(|line| (line.name.clone(), line.cpu_percent.round().max(0.0) as u64))
+            .map(|line| (culprit_name(line), line.cpu_percent.round().max(0.0) as u64))
             .filter(|(_, percent)| *percent > 0)
             .collect();
         cpu_hogs.sort_by_key(|(_, percent)| core::cmp::Reverse(*percent));
@@ -847,6 +861,7 @@ mod pressure_tests {
             resident: Bytes::ZERO,
             read_per_second: 0,
             write_per_second: write,
+            label: String::new(),
         }
     }
 
@@ -915,6 +930,47 @@ fn read_volumes() -> Vec<VolumeLine> {
             }
         })
         .collect()
+}
+
+/// Имя виновника для пересказа подвисания: с подписью, если она есть.
+///
+/// «node.exe (812 МБ)» в пересказе не говорит ничего — на живой машине
+/// под этим именем было пять разных вещей. «node.exe · vite (stanica_club)»
+/// говорит, что закрыть. Подпись идёт через « · »: по имени до неё список
+/// процессов и фильтруется.
+fn culprit_name(line: &ProcessLine) -> String {
+    if line.label.is_empty() {
+        line.name.clone()
+    } else {
+        format!("{} · {}", line.name, line.label)
+    }
+}
+
+/// Освежает подписи исполнителей сценариев: node, python, php и прочих.
+///
+/// Как и у браузеров, строку читаем один раз за жизнь процесса и только
+/// у тех, кому она нужна: чтение чужой памяти недёшево.
+fn refresh_script_labels(
+    table: &bamboo_collect::ProcessTable,
+    labels: &mut std::collections::HashMap<u32, Option<String>>,
+) {
+    let mut alive: std::collections::HashSet<u32> = std::collections::HashSet::new();
+    for process in table.iter() {
+        if !bamboo_sys::is_script_host(&process.image_name) {
+            continue;
+        }
+        alive.insert(process.pid());
+        if labels.contains_key(&process.pid()) {
+            continue;
+        }
+        // Не прочиталось — запомним и это: защищённый процесс не станет
+        // читаемым через полминуты.
+        let label = bamboo_sys::command_line(process.pid())
+            .ok()
+            .and_then(|line| bamboo_sys::script_label(&line));
+        labels.insert(process.pid(), label);
+    }
+    labels.retain(|pid, _| alive.contains(pid));
 }
 
 /// Освежает состав процессов браузера.

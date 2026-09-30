@@ -244,6 +244,448 @@ fn looks_like_browser(lowered: &str) -> bool {
     .any(|name| lowered.contains(name))
 }
 
+/// Исполнители сценариев: у них имя образа не говорит ничего.
+///
+/// На живой машине «node.exe» оказался сразу тремя разными вещами: сервером
+/// разработки, забытым на двое суток, пятью копиями сервера для чтения PDF
+/// и пятью копиями индексатора кода. В Диспетчере задач все они — одна
+/// и та же строка «Node.js JavaScript Runtime», и закрыть нужное по ней
+/// нельзя. Что это на самом деле, написано только в строке запуска.
+const SCRIPT_HOSTS: &[&str] = &[
+    "node", "deno", "bun", "python", "python3", "pythonw", "py", "php", "php-cgi", "java",
+    "javaw", "ruby", "rubyw", "dotnet", "powershell", "pwsh",
+];
+
+/// Исполнитель ли это сценариев — стоит ли читать его строку запуска.
+pub fn is_script_host(image_name: &str) -> bool {
+    let lowered = image_name.to_ascii_lowercase();
+    let stem = lowered.strip_suffix(".exe").unwrap_or(&lowered);
+    SCRIPT_HOSTS.contains(&stem)
+}
+
+/// Что выполняет исполнитель сценариев: «vite (stanica_club)»,
+/// «@modelcontextprotocol/server-pdf», «artisan serve».
+///
+/// `None` — строка ничего не говорит: у голой оболочки или у кода,
+/// переданного прямо в строке, имени нет, а выдумывать его нельзя.
+pub fn script_label(command_line: &str) -> Option<String> {
+    let args = split_arguments(command_line);
+    let (host, rest) = args.split_first()?;
+    let host = file_name(host).to_ascii_lowercase();
+    let host = host.strip_suffix(".exe").unwrap_or(&host).to_string();
+
+    match host.as_str() {
+        "node" | "deno" | "bun" => {
+            let mut positional = positionals(rest, &["-r", "--require", "--import", "--loader"]);
+            if matches!(
+                positional.first().map(String::as_str),
+                Some("run" | "task" | "serve" | "x")
+            ) && host != "node"
+            {
+                positional.remove(0);
+            }
+            if rest.iter().any(|arg| {
+                matches!(arg.as_str(), "-e" | "--eval" | "-p" | "--print")
+            }) {
+                return None;
+            }
+            let (script, after) = positional.split_first()?;
+            Some(from_script(script, after))
+        }
+        "python" | "python3" | "pythonw" | "py" => {
+            if let Some(at) = rest.iter().position(|arg| arg == "-m") {
+                return rest.get(at + 1).cloned();
+            }
+            if rest.iter().any(|arg| arg == "-c") {
+                return None;
+            }
+            let positional = positionals(rest, &["-X", "-W"]);
+            let (script, after) = positional.split_first()?;
+            Some(from_script(script, after))
+        }
+        "php" | "php-cgi" => {
+            if let Some(at) = rest.iter().position(|arg| arg == "-f") {
+                let script = rest.get(at + 1)?;
+                return Some(from_script(script, &[]));
+            }
+            let positional = positionals(rest, &["-S", "-t", "-d", "-c", "-z"]);
+            let (script, after) = positional.split_first()?;
+            Some(from_script(script, after))
+        }
+        "java" | "javaw" => {
+            if let Some(at) = rest.iter().position(|arg| arg == "-jar") {
+                return rest.get(at + 1).map(|jar| stem(file_name(jar)).to_string());
+            }
+            let positional = positionals(
+                rest,
+                &["-cp", "-classpath", "--class-path", "-p", "--module-path"],
+            );
+            // Главный класс: «org.gradle.launcher.daemon.bootstrap.GradleDaemon»
+            // говорит о себе последним словом.
+            let main = positional.first()?;
+            Some(main.rsplit(['.', '/']).next().unwrap_or(main).to_string())
+        }
+        "ruby" | "rubyw" => {
+            let positional = positionals(rest, &["-I", "-r"]);
+            let (script, after) = positional.split_first()?;
+            Some(from_script(script, after))
+        }
+        "dotnet" => {
+            let positional = positionals(rest, &[]);
+            let first = positional.first()?;
+            if first.to_ascii_lowercase().ends_with(".dll") {
+                Some(stem(file_name(first)).to_string())
+            } else {
+                Some(first.clone())
+            }
+        }
+        "powershell" | "pwsh" => {
+            let at = rest
+                .iter()
+                .position(|arg| matches!(arg.to_ascii_lowercase().as_str(), "-file" | "-f"))?;
+            rest.get(at + 1).map(|script| file_name(script).to_string())
+        }
+        _ => None,
+    }
+}
+
+/// Сценарии, у которых смысл в следующем слове: «artisan serve»,
+/// «npm run dev». Одно имя без него ничего не объясняет.
+const WITH_SUBCOMMAND: &[&str] = &[
+    "artisan", "manage.py", "rails", "rake", "console", "npm-cli.js", "yarn.js", "yarn.cjs",
+    "pnpm.cjs", "pnpm.js",
+];
+
+/// Имена-пустышки: «index.js» и «main.py» есть в каждом проекте. За них
+/// говорит папка, в которой они лежат.
+const GENERIC_STEMS: &[&str] = &[
+    "index", "main", "server", "app", "cli", "run", "start", "__main__", "entry", "boot",
+    "bootstrap", "launcher", "program", "service", "daemon", "worker", "wrapper", "bin",
+];
+
+/// Служебные папки: за ними не проект, а устройство пакета.
+const PLUMBING_DIRS: &[&str] = &[
+    "dist", "bin", "lib", "src", "build", "out", "current", "scripts", "js", "esm", "cjs",
+    "node", "release", "debug", "target", "cli", "server", "app",
+];
+
+/// Места, где пакеты лежат сами по себе, без проекта: кэш npx, глобальная
+/// установка npm, хранилище pnpm.
+const GLOBAL_PLACES: &[&str] = &[
+    "/npm-cache/",
+    "/_npx/",
+    "/appdata/roaming/npm/",
+    "/program files",
+    "/.pnpm-store/",
+    "/appdata/local/pnpm/",
+    "/.yarn/",
+];
+
+/// Подпись по пути к сценарию и словам после него.
+fn from_script(script: &str, after: &[String]) -> String {
+    let parts = normalise_path(script);
+    let lowered: Vec<String> = parts.iter().map(|part| part.to_ascii_lowercase()).collect();
+    let joined = format!("/{}/", lowered.join("/"));
+    let file = parts.last().map(String::as_str).unwrap_or(script);
+    let global = GLOBAL_PLACES.iter().any(|place| joined.contains(place));
+
+    // Пакет из node_modules: имя пакета — сразу за последним node_modules,
+    // проект — перед первым. Последний, а не первый: pnpm вкладывает пакеты
+    // в node_modules/.pnpm/…/node_modules/имя.
+    let package_dirs = ["node_modules", "site-packages", "vendor"];
+    for dir in package_dirs {
+        let Some(last) = lowered.iter().rposition(|part| part == dir) else {
+            continue;
+        };
+        // У composer пакет из двух частей всегда, у npm — только со @.
+        let two_parts = dir == "vendor" || parts.get(last + 1).is_some_and(|p| p.starts_with('@'));
+        let package = if two_parts {
+            match (parts.get(last + 1), parts.get(last + 2)) {
+                (Some(scope), Some(name)) => format!("{scope}/{name}"),
+                _ => continue,
+            }
+        } else {
+            match parts.get(last + 1) {
+                Some(name) => stem_if_file(name, last + 1 == parts.len() - 1).to_string(),
+                None => continue,
+            }
+        };
+
+        // Пакетные менеджеры: смысл не в них, а в том, что они запускают.
+        let file_lower = file.to_ascii_lowercase();
+        if package == "npm" && file_lower == "npx-cli.js" {
+            if let Some(target) = after.iter().find(|arg| !arg.starts_with('-')) {
+                return without_version(target).to_string();
+            }
+        }
+        let label = if WITH_SUBCOMMAND.contains(&file_lower.as_str()) {
+            with_subcommand(&package, after)
+        } else {
+            package
+        };
+
+        let first = lowered.iter().position(|part| part == dir).unwrap_or(last);
+        let project = (!global && first >= 1)
+            .then(|| parts[first - 1].as_str())
+            .filter(|name| !name.ends_with(':'))
+            .filter(|name| !matches!(*name, ".venv" | "venv" | "env" | "Lib" | "lib"));
+        return match project {
+            Some(project) => format!("{label} ({project})"),
+            None => label,
+        };
+    }
+
+    let file_lower = file.to_ascii_lowercase();
+    if WITH_SUBCOMMAND.contains(&file_lower.as_str()) {
+        let name = if file_lower.ends_with(".py") {
+            file.to_string()
+        } else {
+            stem(file).to_string()
+        };
+        let label = with_subcommand(&name, after);
+        return match parts.len().checked_sub(2).map(|at| parts[at].as_str()) {
+            Some(project) if !project.ends_with(':') && !global => {
+                format!("{label} ({project})")
+            }
+            _ => label,
+        };
+    }
+
+    let name = stem(file);
+    if !GENERIC_STEMS.contains(&name.to_ascii_lowercase().as_str()) {
+        return name.to_string();
+    }
+    // «index.js» ничего не говорит — говорит папка над ним.
+    parts
+        .iter()
+        .rev()
+        .skip(1)
+        .find(|dir| !PLUMBING_DIRS.contains(&dir.to_ascii_lowercase().as_str()))
+        .filter(|dir| !dir.ends_with(':'))
+        .cloned()
+        .unwrap_or_else(|| name.to_string())
+}
+
+fn with_subcommand(name: &str, after: &[String]) -> String {
+    let words: Vec<&str> = after
+        .iter()
+        .filter(|arg| !arg.starts_with('-'))
+        .take(2)
+        .map(String::as_str)
+        .collect();
+    // У npm и yarn смысл в «run dev»: одного «run» мало.
+    let take = if matches!(words.first(), Some(&"run")) { 2 } else { 1 };
+    let words: Vec<&str> = words.into_iter().take(take).collect();
+    if words.is_empty() {
+        name.to_string()
+    } else {
+        format!("{name} {}", words.join(" "))
+    }
+}
+
+/// «@scope/name@1.2.3» → «@scope/name»: версия в подписи — шум.
+fn without_version(spec: &str) -> &str {
+    match spec.rfind('@') {
+        Some(at) if at > 0 => &spec[..at],
+        _ => spec,
+    }
+}
+
+/// Позиционные слова: всё, что не ключ и не значение ключа.
+fn positionals(args: &[String], with_value: &[&str]) -> Vec<String> {
+    let mut result = Vec::new();
+    let mut skip = false;
+    for arg in args {
+        if skip {
+            skip = false;
+            continue;
+        }
+        if arg.starts_with('-') && arg.len() > 1 {
+            skip = with_value.contains(&arg.as_str());
+            continue;
+        }
+        result.push(arg.clone());
+    }
+    result
+}
+
+/// Путь по частям, с разобранными «..» и «.»: `.bin\..\vite` — это `vite`.
+fn normalise_path(path: &str) -> Vec<String> {
+    let mut parts: Vec<String> = Vec::new();
+    for part in path.split(['\\', '/']) {
+        match part {
+            "" | "." => {}
+            ".." => {
+                parts.pop();
+            }
+            other => parts.push(other.to_string()),
+        }
+    }
+    parts
+}
+
+fn file_name(path: &str) -> &str {
+    path.rsplit(['\\', '/']).next().unwrap_or(path)
+}
+
+fn stem(file: &str) -> &str {
+    match file.rfind('.') {
+        Some(at) if at > 0 => &file[..at],
+        _ => file,
+    }
+}
+
+fn stem_if_file(name: &str, is_file: bool) -> &str {
+    if is_file {
+        stem(name)
+    } else {
+        name
+    }
+}
+
+/// Делит строку запуска на слова по правилам Windows: пробел внутри кавычек
+/// слово не рвёт, сами кавычки в слово не входят.
+fn split_arguments(line: &str) -> Vec<String> {
+    let mut args = Vec::new();
+    let mut current = String::new();
+    let mut quoted = false;
+    let mut started = false;
+    for ch in line.chars() {
+        match ch {
+            '"' => {
+                quoted = !quoted;
+                started = true;
+            }
+            ' ' | '\t' if !quoted => {
+                if started {
+                    args.push(std::mem::take(&mut current));
+                    started = false;
+                }
+            }
+            other => {
+                current.push(other);
+                started = true;
+            }
+        }
+    }
+    if started {
+        args.push(current);
+    }
+    args
+}
+
+#[cfg(test)]
+mod script_tests {
+    use super::*;
+
+    // Строки ниже — настоящие, с машины, где «node.exe» держал два гигабайта
+    // и никто не мог сказать, что это.
+
+    #[test]
+    fn a_dev_server_is_named_with_its_project() {
+        let line = r#""node" "C:\Users\user\Desktop\VS\stanica_club\node_modules\.bin\\..\vite\bin\vite.js""#;
+        assert_eq!(script_label(line).as_deref(), Some("vite (stanica_club)"));
+    }
+
+    #[test]
+    fn a_server_from_the_npx_cache_has_no_project() {
+        let line = r#""C:\Program Files\nodejs\node.exe" "C:\Users\user\AppData\Local\npm-cache\_npx\6583fba12287d067\node_modules\.bin\\..\@modelcontextprotocol\server-pdf\dist\index.js" --stdio"#;
+        assert_eq!(
+            script_label(line).as_deref(),
+            Some("@modelcontextprotocol/server-pdf")
+        );
+    }
+
+    #[test]
+    fn npx_is_named_after_what_it_runs() {
+        // Обёртка npx и сам сервер должны подписаться одинаково: это одна
+        // копия, и считать её надо один раз.
+        let line = r#""C:\Program Files\nodejs\\node.exe" "C:\Users\user\AppData\Roaming\npm\node_modules\npm\bin\npx-cli.js" "-y" "@modelcontextprotocol/server-pdf" "--stdio""#;
+        assert_eq!(
+            script_label(line).as_deref(),
+            Some("@modelcontextprotocol/server-pdf")
+        );
+    }
+
+    #[test]
+    fn npm_run_keeps_the_script_name() {
+        let line = r#""C:\Program Files\nodejs\\node.exe" "C:\Users\user\AppData\Roaming\npm\node_modules\npm\bin\npm-cli.js" run dev"#;
+        assert_eq!(script_label(line).as_deref(), Some("npm run dev"));
+    }
+
+    #[test]
+    fn a_standalone_tool_is_named_by_its_file() {
+        let line = r#""C:\Users\user\AppData\Local\codegraph\current\bin\..\node.exe" --liftoff-only "C:\Users\user\AppData\Local\codegraph\current\bin\..\lib\dist\bin\codegraph.js" "serve" "--mcp""#;
+        assert_eq!(script_label(line).as_deref(), Some("codegraph"));
+    }
+
+    #[test]
+    fn a_generic_file_is_named_by_its_folder() {
+        let line = r#"node C:\work\shop-api\dist\index.js"#;
+        assert_eq!(script_label(line).as_deref(), Some("shop-api"));
+    }
+
+    #[test]
+    fn laravel_is_named_with_its_project() {
+        let line = r#"C:\php\php.exe -S 127.0.0.1:8001 C:\Users\user\Desktop\VS\stanica_club\vendor\laravel\framework\src\Illuminate\Foundation\resources\server.php"#;
+        assert_eq!(
+            script_label(line).as_deref(),
+            Some("laravel/framework (stanica_club)")
+        );
+        assert_eq!(
+            script_label(r#""C:\php\php.exe" artisan serve"#).as_deref(),
+            Some("artisan serve")
+        );
+    }
+
+    #[test]
+    fn python_modules_and_scripts() {
+        assert_eq!(
+            script_label(r#"python.exe -m http.server 8000"#).as_deref(),
+            Some("http.server")
+        );
+        assert_eq!(
+            script_label(r#"python.exe C:\sites\blog\manage.py runserver"#).as_deref(),
+            Some("manage.py runserver (blog)")
+        );
+        assert_eq!(script_label(r#"python.exe -c "print(1)""#), None);
+    }
+
+    #[test]
+    fn java_is_named_by_its_main_class_or_jar() {
+        assert_eq!(
+            script_label(r#"java.exe -Xmx2g -cp C:\g\lib\gradle.jar org.gradle.launcher.daemon.bootstrap.GradleDaemon 8.5"#).as_deref(),
+            Some("GradleDaemon")
+        );
+        assert_eq!(
+            script_label(r#"javaw.exe -jar "C:\Apps\Tool Box\tool.jar""#).as_deref(),
+            Some("tool")
+        );
+    }
+
+    #[test]
+    fn a_bare_shell_says_nothing() {
+        // Вкладка терминала: имени у неё нет, и выдумывать его нельзя.
+        assert_eq!(
+            script_label(r#"C:\WINDOWS\System32\WindowsPowerShell\v1.0\powershell.exe"#),
+            None
+        );
+        assert_eq!(
+            script_label(r#"powershell.exe -NoProfile -File C:\tools\backup.ps1"#).as_deref(),
+            Some("backup.ps1")
+        );
+        assert_eq!(script_label(r#"node -e "console.log(1)""#), None);
+    }
+
+    #[test]
+    fn hosts_are_recognised_by_image_name() {
+        assert!(is_script_host("node.exe"));
+        assert!(is_script_host("Python.exe"));
+        assert!(!is_script_host("chrome.exe"));
+        assert!(!is_script_host("claude.exe"));
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
