@@ -749,6 +749,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
 
             let back = weak.clone();
             std::thread::spawn(move || {
+                let release = update::freshest(release);
                 let (note, installed) = update::install(&release);
                 let _ = slint::invoke_from_event_loop(move || {
                     if let Some(win) = back.upgrade() {
