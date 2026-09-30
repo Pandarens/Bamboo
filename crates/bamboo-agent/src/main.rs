@@ -295,18 +295,15 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
 
     // История наблюдений на диске. Без неё выводы о росте памяти
     // начинались заново после каждого перезапуска, а недельный отчёт
-    // строить было не из чего.
-    let history: std::rc::Rc<std::cell::RefCell<Option<history::History>>> =
-        std::rc::Rc::new(std::cell::RefCell::new(None));
+    // строить было не из чего. Пишется в своём потоке: окно не должно
+    // ждать накопитель, даже когда тот отвечает по полсекунды.
+    let history: std::rc::Rc<std::cell::RefCell<Option<history::Recorder>>> = std::rc::Rc::new(
+        std::cell::RefCell::new(Some(history::Recorder::spawn(HISTORY_RETRY))),
+    );
     // Беда с историей — пока она не прошла. Прежде неоткрывшаяся история
     // печаталась в поток ошибок, которого у программы с окном никто
     // не видит, и оставалась закрытой до перезапуска агента.
     let mut history_error: Option<String> = None;
-    match history::History::open(0) {
-        Ok(opened) => *history.borrow_mut() = Some(opened),
-        Err(error) => history_error = Some(error),
-    }
-    let mut history_retry_at = std::time::Instant::now() + HISTORY_RETRY;
     // Сказали ли уже человеку, что история не пишется: одного раза хватит.
     let mut history_alerted = false;
 
@@ -1664,33 +1661,17 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 {
                     let now = started.elapsed().as_millis() as u64;
                     let mut slot = tick_history.borrow_mut();
-                    if slot.is_none() && std::time::Instant::now() >= history_retry_at {
-                        match history::History::open(now) {
-                            Ok(opened) => {
-                                *slot = Some(opened);
-                                history_error = None;
-                            }
-                            Err(error) => {
-                                history_error = Some(error);
-                                history_retry_at = std::time::Instant::now() + HISTORY_RETRY;
-                            }
-                        }
-                    }
-
+                    // Состояние, прочитанное без ожидания: занят замок — это
+                    // поток записи как раз его обновляет, прочтём на следующем.
+                    let mut status: Option<history::Status> = None;
                     if let Some(history) = slot.as_mut() {
-                        // Подвисание пишем сразу, а не с историей: их единицы
-                        // за сутки, и ждать четырёхчасового сброса значило бы
-                        // терять их при каждом перезапуске.
-                        if let Some(entry) = &snapshot.new_freeze {
-                            let _ = history.record_freeze(entry);
+                        history.tick(now, &snapshot);
+                        status = history.status();
+                        if let Some(state) = &status {
+                            // Ошибки не выбрасываются: они копятся в состоянии
+                            // истории и показываются человеку.
+                            history_error = state.error.clone();
                         }
-                        history.observe(&snapshot);
-                        if history.due(now) {
-                            let _ = history.flush(now);
-                        }
-                        // Ошибки не выбрасываются: они копятся в состоянии
-                        // истории и показываются человеку.
-                        history_error = history.health().map(str::to_string);
                         if let Some(note) = history.take_recovery_note() {
                             if let Some(main) = main_weak.upgrade() {
                                 main.set_action_note(SharedString::from(note.clone()));
@@ -1729,18 +1710,22 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                     if let Some(main) = main_weak.upgrade() {
                         if main.window().is_visible() && main.get_section() == 5 {
                             fill_budget(&main, &selfwatch);
-                            let note = match (&history_error, slot.as_ref()) {
-                                (Some(error), _) => format!(
+                            let note = match (&history_error, &status) {
+                                (Some(error), _) => Some(format!(
                                     "История наблюдений сейчас не пишется: {error}. Bamboo пробует снова каждые десять минут и сам лечит повреждённую базу."
-                                ),
-                                (None, Some(history)) => format!(
+                                )),
+                                (None, Some(state)) if state.open => Some(format!(
                                     "База наблюдений занимает {}. Запись идёт раз в несколько часов пачкой, а не постоянно: Bamboo считает чужой износ накопителя и не имеет права изнашивать его сам. Ждёт записи программ: {}.",
-                                    history.size(),
-                                    history.pending_apps(),
-                                ),
-                                (None, None) => String::new(),
+                                    state.size,
+                                    state.pending_apps,
+                                )),
+                                // База ещё открывается либо замок занят —
+                                // оставляем прежнюю строку, а не мигаем пустой.
+                                _ => None,
                             };
-                            main.set_history_note(SharedString::from(note));
+                            if let Some(note) = note {
+                                main.set_history_note(SharedString::from(note));
+                            }
                         }
                     }
                 }
@@ -2019,7 +2004,7 @@ fn shutdown(
         std::cell::RefCell<std::collections::HashMap<(u32, &'static str), i64>>,
     >,
     shield_holds: &std::rc::Rc<std::cell::RefCell<autopilot::ShieldHolds>>,
-    history: &std::rc::Rc<std::cell::RefCell<Option<history::History>>>,
+    history: &std::rc::Rc<std::cell::RefCell<Option<history::Recorder>>>,
     timer: slint::Timer,
 ) -> ! {
     std::thread::spawn(|| {
@@ -2038,10 +2023,13 @@ fn shutdown(
 
     // Затем — дописать накопленное. Прежде при выходе терялось всё,
     // что копилось с последнего сброса, — до четырёх часов наблюдений.
-    if let Some(mut opened) = history.borrow_mut().take() {
-        let _ = opened.flush(started.elapsed().as_millis() as u64);
-        // Соединение закрывается здесь, явно, а не где-то в разрушителях.
-        drop(opened);
+    // Ждём не дольше четырёх секунд: сторож закроет процесс на шестой,
+    // а таймеру и значку нужно успеть разрушиться.
+    if let Some(recorder) = history.borrow_mut().take() {
+        recorder.stop(
+            started.elapsed().as_millis() as u64,
+            Duration::from_secs(4),
+        );
     }
 
     // Таймер держит замыкание, а в нём — значок в трее. Разрушаем явно,

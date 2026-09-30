@@ -99,39 +99,20 @@ impl History {
     /// Только копит: на диск ничего не идёт до сброса. Писать каждый тик
     /// значило бы тысячи мелких записей в час — то самое изнашивание,
     /// за которое Bamboo ругает других.
+    #[cfg(test)]
     pub fn observe(&mut self, snapshot: &Snapshot) {
-        // Складываем процессы одной программы. Прежде каждый процесс шёл
-        // отдельной точкой в одну корзину, и корзина хранила среднее
-        // по процессам: у Chrome с его полусотней процессов это двести
-        // мегабайт вместо пяти гигабайт. Утечка одной вкладки тонула
-        // в среднем, а в отчёте Chrome выглядел скромнее блокнота.
-        #[derive(Default)]
-        struct Total {
-            memory: u64,
-            cpu: f32,
-            read: u64,
-            write: u64,
-            threads: u32,
-        }
-        let mut totals: std::collections::HashMap<&str, Total> = std::collections::HashMap::new();
-        for line in &snapshot.top {
-            let total = totals.entry(line.name.as_str()).or_default();
-            total.memory = total.memory.saturating_add(line.memory.as_u64());
-            total.cpu += line.cpu_percent.max(0.0);
-            total.read = total.read.saturating_add(line.read_per_second);
-            total.write = total.write.saturating_add(line.write_per_second);
-            total.threads = total.threads.saturating_add(line.threads);
-        }
-        let mut apps: Vec<(&str, Total)> = totals.into_iter().collect();
-        apps.sort_by_key(|(_, total)| core::cmp::Reverse(total.memory));
+        self.observe_totals(totals(snapshot));
+    }
 
+    /// Учитывает программы, уже сложенные из процессов.
+    fn observe_totals(&mut self, apps: Vec<AppSample>) {
         // Начало 15-минутного интервала — то же выравнивание, что у уровня
         // L2 в хранилище. Время по стенным часам: корзины в базе живут
         // в них, а монотонные часы начинаются с запуска агента.
         let wall_ms = bamboo_core::SampleTime::wall_clock_now();
         let bucket_ms = bamboo_store::bucket_start(wall_ms, bamboo_store::L2_BUCKET_MS);
 
-        for (name, total) in apps.into_iter().take(TOP_APPS) {
+        for AppSample { name, total } in apps {
             let memory_kib = (total.memory / 1024).min(u64::from(u32::MAX)) as u32;
             let bucket = bamboo_store::Bucket {
                 start_ms: bucket_ms,
@@ -167,7 +148,7 @@ impl History {
             };
             let slot = self
                 .pending
-                .entry(name.to_string())
+                .entry(name)
                 .or_default()
                 .entry(bucket_ms)
                 .or_insert(empty);
@@ -318,6 +299,266 @@ impl History {
     }
 }
 
+/// Программа, сложенная из своих процессов, — то, что идёт в корзину.
+struct AppSample {
+    name: String,
+    total: Total,
+}
+
+#[derive(Default)]
+struct Total {
+    memory: u64,
+    cpu: f32,
+    read: u64,
+    write: u64,
+    threads: u32,
+}
+
+/// Складывает процессы одной программы, крупные первыми.
+///
+/// Прежде каждый процесс шёл отдельной точкой в одну корзину, и корзина
+/// хранила среднее по процессам: у Chrome с его полусотней процессов это
+/// двести мегабайт вместо пяти гигабайт. Утечка одной вкладки тонула
+/// в среднем, а в отчёте Chrome выглядел скромнее блокнота.
+///
+/// Считается в потоке окна, а в поток записи уходит готовый итог: полсотни
+/// строк вместо трёхсот процессов со всеми их заголовками.
+fn totals(snapshot: &Snapshot) -> Vec<AppSample> {
+    let mut totals: std::collections::HashMap<&str, Total> = std::collections::HashMap::new();
+    for line in &snapshot.top {
+        let total = totals.entry(line.name.as_str()).or_default();
+        total.memory = total.memory.saturating_add(line.memory.as_u64());
+        total.cpu += line.cpu_percent.max(0.0);
+        total.read = total.read.saturating_add(line.read_per_second);
+        total.write = total.write.saturating_add(line.write_per_second);
+        total.threads = total.threads.saturating_add(line.threads);
+    }
+    let mut apps: Vec<(&str, Total)> = totals.into_iter().collect();
+    apps.sort_by_key(|(_, total)| core::cmp::Reverse(total.memory));
+    apps.into_iter()
+        .take(TOP_APPS)
+        .map(|(name, total)| AppSample {
+            name: name.to_string(),
+            total,
+        })
+        .collect()
+}
+
+/// Что поток истории сообщает окну.
+#[derive(Clone, Debug, Default)]
+pub struct Status {
+    /// Беда с историей, пока она не прошла. `None` — всё пишется.
+    pub error: Option<String>,
+    /// База открыта.
+    pub open: bool,
+    pub size: Bytes,
+    pub pending_apps: usize,
+}
+
+/// Задание потоку истории.
+enum Job {
+    Tick {
+        now_ms: u64,
+        apps: Vec<AppSample>,
+        freezes: Vec<bamboo_store::FreezeEntry>,
+    },
+    Stop {
+        now_ms: u64,
+        done: std::sync::mpsc::Sender<()>,
+    },
+}
+
+/// Сколько заданий может ждать поток истории.
+///
+/// Застрял он на диске — задания копятся, и без предела за час простоя
+/// набежали бы мегабайты. Тридцать два тика — полминуты при открытом окне;
+/// дальше лишние наблюдения отбрасываются, а подвисания ждут своей очереди
+/// на стороне окна и не теряются.
+const QUEUE: usize = 32;
+
+/// Запись истории в своём потоке.
+///
+/// Написано после того, как окно Bamboo зависло на живой машине. База
+/// писалась из потока окна, и подвисание системы записывалось сразу,
+/// с принудительным сбросом на накопитель — ровно в тот миг, когда
+/// накопитель отвечал по четыреста миллисекунд на операцию. Окно ждало
+/// диск вместе со всей системой. Лечение повреждённой базы при запуске
+/// шло там же, до того, как окно вообще появлялось.
+///
+/// Теперь окно только отдаёт итоги и читает состояние, не дожидаясь
+/// ни диска, ни замка: занят замок — прочтёт на следующем тике.
+pub struct Recorder {
+    jobs: std::sync::mpsc::SyncSender<Job>,
+    status: std::sync::Arc<std::sync::Mutex<Status>>,
+    notes: std::sync::mpsc::Receiver<String>,
+    /// Подвисания, не влезшие в очередь: уйдут со следующим тиком.
+    waiting: Vec<bamboo_store::FreezeEntry>,
+}
+
+impl Recorder {
+    /// Запускает поток. База открывается уже в нём.
+    pub fn spawn(retry: std::time::Duration) -> Recorder {
+        let (jobs, inbox) = std::sync::mpsc::sync_channel(QUEUE);
+        let (notes_out, notes) = std::sync::mpsc::channel();
+        let status = std::sync::Arc::new(std::sync::Mutex::new(Status::default()));
+        let shared = status.clone();
+        let spawned = std::thread::Builder::new()
+            .name("bamboo-history".into())
+            .spawn(move || run(inbox, shared, notes_out, retry));
+        if let Err(error) = spawned {
+            if let Ok(mut status) = status.lock() {
+                status.error = Some(format!("поток записи не запустился: {error}"));
+            }
+        }
+        Recorder {
+            jobs,
+            status,
+            notes,
+            waiting: Vec::new(),
+        }
+    }
+
+    /// Отдаёт тик: итоги по программам и новое подвисание, если было.
+    pub fn tick(&mut self, now_ms: u64, snapshot: &Snapshot) {
+        if let Some(entry) = &snapshot.new_freeze {
+            self.waiting.push(entry.clone());
+        }
+        let job = Job::Tick {
+            now_ms,
+            apps: totals(snapshot),
+            freezes: core::mem::take(&mut self.waiting),
+        };
+        match self.jobs.try_send(job) {
+            Ok(()) => {}
+            // Очередь полна: поток стоит на диске. Наблюдение тика теряем —
+            // это одна точка из тысяч, — а подвисания бережём.
+            Err(std::sync::mpsc::TrySendError::Full(Job::Tick { freezes, .. })) => {
+                self.waiting = freezes;
+            }
+            Err(_) => {}
+        }
+    }
+
+    /// Состояние без ожидания. `None` — поток как раз его обновляет.
+    pub fn status(&self) -> Option<Status> {
+        self.status.try_lock().ok().map(|status| status.clone())
+    }
+
+    /// Что пришлось сделать с базой — по одному разу.
+    pub fn take_recovery_note(&self) -> Option<String> {
+        self.notes.try_recv().ok()
+    }
+
+    /// Дописывает накопленное и закрывает базу, но ждёт не дольше `wait`.
+    pub fn stop(self, now_ms: u64, wait: std::time::Duration) {
+        let deadline = std::time::Instant::now() + wait;
+        let (done, finished) = std::sync::mpsc::channel();
+        let mut job = Job::Stop { now_ms, done };
+        // Очередь может быть полна — поток на диске. Ждём место, но не
+        // дольше отведённого: выход важнее последних часов наблюдений.
+        loop {
+            match self.jobs.try_send(job) {
+                Ok(()) => break,
+                Err(std::sync::mpsc::TrySendError::Full(back)) => {
+                    if std::time::Instant::now() >= deadline {
+                        return;
+                    }
+                    job = back;
+                    std::thread::sleep(std::time::Duration::from_millis(20));
+                }
+                Err(std::sync::mpsc::TrySendError::Disconnected(_)) => return,
+            }
+        }
+        let left = deadline.saturating_duration_since(std::time::Instant::now());
+        let _ = finished.recv_timeout(left);
+    }
+}
+
+/// Тело потока истории.
+fn run(
+    inbox: std::sync::mpsc::Receiver<Job>,
+    status: std::sync::Arc<std::sync::Mutex<Status>>,
+    notes: std::sync::mpsc::Sender<String>,
+    retry: std::time::Duration,
+) {
+    let mut history: Option<History> = None;
+    let mut error: Option<String> = None;
+    let mut retry_at = std::time::Instant::now();
+
+    let mut try_open = |history: &mut Option<History>, error: &mut Option<String>, now_ms| {
+        if history.is_some() || std::time::Instant::now() < retry_at {
+            return;
+        }
+        match History::open(now_ms) {
+            Ok(opened) => {
+                *history = Some(opened);
+                *error = None;
+            }
+            Err(text) => {
+                *error = Some(text);
+                retry_at = std::time::Instant::now() + retry;
+            }
+        }
+    };
+    let publish = |history: &mut Option<History>, error: &Option<String>| {
+        if let Some(opened) = history.as_mut() {
+            if let Some(note) = opened.take_recovery_note() {
+                let _ = notes.send(note);
+            }
+        }
+        let fresh = Status {
+            error: history
+                .as_ref()
+                .and_then(|opened| opened.health().map(str::to_string))
+                .or_else(|| error.clone()),
+            open: history.is_some(),
+            size: history.as_ref().map(History::size).unwrap_or(Bytes(0)),
+            pending_apps: history.as_ref().map(History::pending_apps).unwrap_or(0),
+        };
+        if let Ok(mut shared) = status.lock() {
+            *shared = fresh;
+        }
+    };
+
+    try_open(&mut history, &mut error, 0);
+    publish(&mut history, &error);
+
+    while let Ok(job) = inbox.recv() {
+        match job {
+            Job::Tick {
+                now_ms,
+                apps,
+                freezes,
+            } => {
+                try_open(&mut history, &mut error, now_ms);
+                if let Some(opened) = history.as_mut() {
+                    // Подвисание пишем сразу, а не с историей: их единицы
+                    // за сутки, и ждать четырёхчасового сброса значило бы
+                    // терять их при каждом перезапуске.
+                    for entry in &freezes {
+                        let _ = opened.record_freeze(entry);
+                    }
+                    opened.observe_totals(apps);
+                    if opened.due(now_ms) {
+                        let _ = opened.flush(now_ms);
+                    }
+                }
+                publish(&mut history, &error);
+            }
+            Job::Stop { now_ms, done } => {
+                if let Some(mut opened) = history.take() {
+                    let _ = opened.flush(now_ms);
+                    // Соединение закрывается здесь, явно, а не где-то
+                    // в разрушителях при выходе процесса.
+                    drop(opened);
+                }
+                let _ = done.send(());
+                return;
+            }
+        }
+    }
+}
+
 /// Что пришлось сделать с базой — словами человека.
 fn describe_recovery(recovery: &bamboo_store::Recovery) -> String {
     match recovery {
@@ -337,6 +578,66 @@ fn describe_recovery(recovery: &bamboo_store::Recovery) -> String {
 mod tests {
     use super::*;
     use crate::collector::ProcessLine;
+
+    /// Поток записи, застрявший на диске: очередь есть, а читать её некому.
+    fn stuck_recorder() -> (Recorder, std::sync::mpsc::Receiver<Job>) {
+        let (jobs, inbox) = std::sync::mpsc::sync_channel(1);
+        let (_, notes) = std::sync::mpsc::channel();
+        let recorder = Recorder {
+            jobs,
+            status: std::sync::Arc::new(std::sync::Mutex::new(Status::default())),
+            notes,
+            waiting: Vec::new(),
+        };
+        (recorder, inbox)
+    }
+
+    fn freeze_at(at_unix_ms: i64) -> bamboo_store::FreezeEntry {
+        bamboo_store::FreezeEntry {
+            at_unix_ms,
+            cause: "disk".to_string(),
+            detail: String::new(),
+            culprits: String::new(),
+            stall_ms: 400,
+        }
+    }
+
+    #[test]
+    fn freezes_wait_while_the_writer_is_stuck() {
+        // Ровно тот случай, ради которого запись ушла из окна: диск
+        // отвечает по полсекунды, поток записи стоит, а подвисания идут.
+        // Наблюдения тиков можно потерять, подвисания — нельзя.
+        let (mut recorder, inbox) = stuck_recorder();
+        for at in 1..=3 {
+            let snapshot = Snapshot {
+                new_freeze: Some(freeze_at(at)),
+                ..Default::default()
+            };
+            recorder.tick(0, &snapshot);
+        }
+        // Первое ушло в очередь, два ждут своей очереди у окна.
+        assert_eq!(recorder.waiting.len(), 2);
+
+        // Диск отпустил — со следующим тиком уходят оба.
+        let _ = inbox.try_recv();
+        recorder.tick(0, &Snapshot::default());
+        assert!(recorder.waiting.is_empty());
+        match inbox.try_recv() {
+            Ok(Job::Tick { freezes, .. }) => assert_eq!(freezes.len(), 2),
+            _ => panic!("подвисания не дошли до записи"),
+        }
+    }
+
+    #[test]
+    fn stopping_does_not_wait_for_a_stuck_writer() {
+        // Выход не должен ждать диск: сторож закрывает процесс на шестой
+        // секунде, и всё важное обязано успеть до него.
+        let (mut recorder, _inbox) = stuck_recorder();
+        recorder.tick(0, &Snapshot::default());
+        let started = std::time::Instant::now();
+        recorder.stop(0, std::time::Duration::from_millis(150));
+        assert!(started.elapsed() < std::time::Duration::from_secs(2));
+    }
 
     fn line(name: &str, memory_mb: u64) -> ProcessLine {
         ProcessLine {
