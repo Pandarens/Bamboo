@@ -19,6 +19,7 @@ pub mod digest;
 pub mod etw;
 pub mod eventlog;
 pub mod extensions;
+pub mod foldermark;
 pub mod freeze;
 pub mod frequency;
 mod games;
@@ -82,8 +83,8 @@ pub use service::{
 };
 pub use services::{service_by_pid, service_names, stop_service, ServiceOwner};
 pub use settings::{
-    autopilot_enabled, language, set_autopilot_enabled, set_language, set_show_widget_on_start,
-    show_widget_on_start,
+    autopilot_enabled, language, mark_junk_enabled, set_autopilot_enabled, set_language,
+    set_mark_junk_enabled, set_show_widget_on_start, show_widget_on_start,
 };
 pub use startup::{
     add_to_startup, is_elevated, is_in_startup, is_scheduled_at_logon, remove_from_startup,

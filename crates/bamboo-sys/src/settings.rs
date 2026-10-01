@@ -23,6 +23,9 @@ const SHOW_WIDGET: &str = "ShowWidgetOnStart";
 /// Разрешение на самостоятельную оптимизацию.
 const AUTOPILOT: &str = "Autopilot";
 
+/// Помечать ли мусор красным значком в Проводнике.
+const MARK_JUNK: &str = "MarkJunkInExplorer";
+
 struct Key(HKEY);
 
 impl Drop for Key {
@@ -166,6 +169,19 @@ pub fn autopilot_enabled() -> bool {
 /// Запоминает разрешение на самостоятельную оптимизацию.
 pub fn set_autopilot_enabled(enabled: bool) -> Result<()> {
     write_flag(AUTOPILOT, enabled)
+}
+
+/// Помечать ли мусор в Проводнике.
+///
+/// По умолчанию нет: пометка — файл desktop.ini в чужой папке, и класть
+/// его без спроса Bamboo не вправе, как бы полезно это ни было.
+pub fn mark_junk_enabled() -> bool {
+    read_flag(MARK_JUNK, false)
+}
+
+/// Запоминает, помечать ли мусор в Проводнике.
+pub fn set_mark_junk_enabled(enabled: bool) -> Result<()> {
+    write_flag(MARK_JUNK, enabled)
 }
 
 /// Читает строковое значение из реестра.
