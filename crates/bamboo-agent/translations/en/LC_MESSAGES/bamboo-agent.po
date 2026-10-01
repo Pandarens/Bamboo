@@ -552,3 +552,43 @@ msgstr "not visible in Task Manager"
 msgctxt "MainWindow"
 msgid "Температура"
 msgstr "Temperature"
+
+msgctxt "MainWindow"
+msgid "Мусор"
+msgstr "Junk"
+
+msgctxt "MainWindow"
+msgid "Мусор на диске"
+msgstr "Junk on disk"
+
+msgctxt "MainWindow"
+msgid "Только то, что программы создают сами и создадут заново: кэши сборки, скачанные пакеты, временные файлы, дампы сбоев. Документы, фотографии и загрузки Bamboo не ищет и удалять не предлагает — нужны ли они, решаете вы."
+msgstr "Only what programs create themselves and will create again: build caches, downloaded packages, temporary files, crash dumps. Bamboo never looks for documents, photos or downloads and never offers to delete them — whether you need them is your call."
+
+msgctxt "MainWindow"
+msgid "Ищу…"
+msgstr "Searching…"
+
+msgctxt "MainWindow"
+msgid "Найти заново"
+msgstr "Search again"
+
+msgctxt "MainWindow"
+msgid "Точно?"
+msgstr "Sure?"
+
+msgctxt "MainWindow"
+msgid "Удалить"
+msgstr "Delete"
+
+msgctxt "MainWindow"
+msgid "Помечать мусор красным в Проводнике"
+msgstr "Mark junk red in File Explorer"
+
+msgctxt "MainWindow"
+msgid "Папки с мусором в ваших проектах получают красный значок, а при наведении — подсказку, что это и сколько весит. Пометка — скрытый файл desktop.ini внутри папки. Выключите, и Bamboo уберёт все свои пометки."
+msgstr "Junk folders in your projects get a red icon and, on hover, a tip saying what it is and how big. The mark is a hidden desktop.ini file inside the folder. Turn this off and Bamboo removes all of its marks."
+
+msgctxt "MainWindow"
+msgid "Выключено. Включите — и папки с мусором в ваших проектах, например target или node_modules, станут в Проводнике красными, с подсказкой при наведении."
+msgstr "Off. Turn it on and junk folders in your projects, such as target or node_modules, turn red in File Explorer, with a tip on hover."

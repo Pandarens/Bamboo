@@ -25,6 +25,8 @@ mod gamemode;
 #[cfg(windows)]
 mod history;
 #[cfg(windows)]
+mod junk;
+#[cfg(windows)]
 mod mainwin;
 #[cfg(windows)]
 mod selfwatch;
@@ -389,11 +391,31 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     let recording: std::rc::Rc<std::cell::RefCell<Option<session::Session>>> =
         std::rc::Rc::new(std::cell::RefCell::new(None));
 
-    // Найденное обновление. Держим здесь, потому что кнопка «Обновить»
-    // ставит именно то, о чём человеку сказали, а не спрашивает GitHub
-    // заново: между сообщением и нажатием выпуск мог смениться.
+    // Найденное обновление. Перед скачиванием кнопка всё равно спрашивает
+    // GitHub ещё раз: найденное утром к вечеру могло устареть. Найденное
+    // здесь — запасной вариант, если GitHub не ответит.
     let pending_update: std::sync::Arc<std::sync::Mutex<Option<update::Release>>> =
         std::sync::Arc::new(std::sync::Mutex::new(None));
+
+    // Мусор на диске. Первый поиск — через десять минут после запуска,
+    // когда схлынет всё, что стартует вместе с Windows; дальше раз в сутки.
+    // Обход читает десятки тысяч папок, и делать это при загрузке значило бы
+    // добавить к ней ещё одну причину тормозить.
+    let junk: junk::Shared = std::sync::Arc::new(std::sync::Mutex::new(junk::State::default()));
+    let junk_seen: junk::Seen = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+    {
+        let shared = junk.clone();
+        let seen = junk_seen.clone();
+        let _ = std::thread::Builder::new()
+            .name("bamboo-junk-daily".into())
+            .spawn(move || {
+                std::thread::sleep(Duration::from_secs(10 * 60));
+                loop {
+                    junk::run_scan(&shared, &seen);
+                    std::thread::sleep(Duration::from_secs(24 * 60 * 60));
+                }
+            });
+    }
 
     // Игровой режим помнит, что и кому менял: без этого вернуть прежние
     // настройки было бы нечем.
@@ -1063,6 +1085,63 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         });
     }
 
+    // Мусор: поиск, удаление и пометки в Проводнике.
+    main_window.set_junk_marks(bamboo_sys::mark_junk_enabled());
+    {
+        let weak = main_window.as_weak();
+        let shared = junk.clone();
+        let seen = junk_seen.clone();
+        main_window.on_find_junk(move || {
+            junk::start_scan(&shared, &seen);
+            if let Some(win) = weak.upgrade() {
+                fill_junk(&win, &shared, &seen);
+            }
+        });
+    }
+    {
+        let weak = main_window.as_weak();
+        let shared = junk.clone();
+        let seen = junk_seen.clone();
+        main_window.on_delete_junk(move |path| {
+            junk::start_delete(&shared, std::path::PathBuf::from(path.as_str()));
+            if let Some(win) = weak.upgrade() {
+                fill_junk(&win, &shared, &seen);
+            }
+        });
+    }
+    {
+        let weak = main_window.as_weak();
+        let shared = junk.clone();
+        let seen = junk_seen.clone();
+        main_window.on_toggle_junk_marks(move || {
+            let Some(win) = weak.upgrade() else {
+                return;
+            };
+            let wanted = !win.get_junk_marks();
+            if bamboo_sys::set_mark_junk_enabled(wanted).is_err() {
+                win.set_action_note(SharedString::from("Настройку сохранить не удалось."));
+                return;
+            }
+            win.set_junk_marks(bamboo_sys::mark_junk_enabled());
+            // Искать ещё не искали — пометит сам поиск, когда закончит.
+            let searched = shared
+                .lock()
+                .map(|state| state.finished_at.is_some())
+                .unwrap_or(false);
+            if wanted && !searched {
+                junk::start_scan(&shared, &seen);
+            } else {
+                junk::start_sync_marks(&shared, wanted);
+            }
+            win.set_action_note(SharedString::from(if wanted {
+                "Мусор в проектах будет красным в Проводнике."
+            } else {
+                "Пометки в Проводнике сняты."
+            }));
+            fill_junk(&win, &shared, &seen);
+        });
+    }
+
     // Показывать ли виджет при запуске.
     {
         let weak = main_window.as_weak();
@@ -1460,6 +1539,8 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     let tick_holds = autopilot_holds.clone();
     let tick_temperatures = temperatures.clone();
     let tick_history = history.clone();
+    let tick_junk = junk.clone();
+    let tick_junk_seen = junk_seen.clone();
     // Защита переднего плана: её удержания отдельно от удержаний «пока
     // человека нет» — у них противоположное правило снятия.
     let shield_holds: std::rc::Rc<std::cell::RefCell<autopilot::ShieldHolds>> =
@@ -1709,6 +1790,9 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
 
                     // Свой расход показываем наравне с чужим.
                     if let Some(main) = main_weak.upgrade() {
+                        if main.window().is_visible() && main.get_section() == 12 {
+                            fill_junk(&main, &tick_junk, &tick_junk_seen);
+                        }
                         if main.window().is_visible() && main.get_section() == 5 {
                             fill_budget(&main, &selfwatch);
                             let note = match (&history_error, &status) {
@@ -2116,6 +2200,31 @@ fn shorten(text: &str, limit: usize) -> String {
 #[cfg(windows)]
 fn own_written() -> u64 {
     bamboo_sys::budget::own_write_bytes().unwrap_or(0)
+}
+
+/// Наполняет раздел «Мусор». Замок не ждём: занят — это поиск или
+/// удаление как раз обновляют состояние, покажем на следующем тике.
+#[cfg(windows)]
+fn fill_junk(main: &MainWindow, shared: &junk::Shared, seen: &junk::Seen) {
+    let Ok(state) = shared.try_lock() else {
+        return;
+    };
+    let rows: Vec<JunkRow> = junk::rows(&state)
+        .into_iter()
+        .map(|row| JunkRow {
+            path: SharedString::from(row.path),
+            what: SharedString::from(row.what),
+            size: SharedString::from(row.size),
+            note: SharedString::from(row.note),
+            done: row.done,
+        })
+        .collect();
+    main.set_junk(ModelRc::new(VecModel::from(rows)));
+    main.set_junk_status(SharedString::from(junk::status(
+        &state,
+        seen.load(std::sync::atomic::Ordering::Relaxed),
+    )));
+    main.set_junk_scanning(state.scanning);
 }
 
 /// Показывает отчёт о собственном бюджете.
@@ -2809,5 +2918,91 @@ mod tests {
             fullscreen_action(false, false, true, false),
             FullscreenAction::None
         );
+    }
+}
+
+/// Окно, нарисованное в картинку без экрана.
+///
+/// Второй агент рядом с работающим не запустится — защита от двойного
+/// запуска, — а смотреть на новый раздел глазами надо до выпуска, не после.
+/// Программный рендерер у Bamboo и так единственный, поэтому картинка
+/// та же, что на экране.
+#[cfg(all(windows, test))]
+mod drawn {
+    use super::*;
+    use slint::platform::software_renderer::{
+        MinimalSoftwareWindow, PremultipliedRgbaColor, RepaintBufferType,
+    };
+
+    struct Offscreen {
+        window: std::rc::Rc<MinimalSoftwareWindow>,
+    }
+
+    impl slint::platform::Platform for Offscreen {
+        fn create_window_adapter(
+            &self,
+        ) -> Result<std::rc::Rc<dyn slint::platform::WindowAdapter>, slint::PlatformError> {
+            Ok(self.window.clone())
+        }
+    }
+
+    /// Рисует главное окно и пишет картинку в формате PPM.
+    fn draw(main: &MainWindow, window: &MinimalSoftwareWindow, out: &std::path::Path) {
+        const WIDTH: u32 = 1180;
+        const HEIGHT: u32 = 820;
+        window.set_size(slint::PhysicalSize::new(WIDTH, HEIGHT));
+        main.show().expect("окно");
+        let mut buffer = vec![PremultipliedRgbaColor::default(); (WIDTH * HEIGHT) as usize];
+        window.request_redraw();
+        window.draw_if_needed(|renderer| {
+            renderer.render(&mut buffer, WIDTH as usize);
+        });
+        let mut ppm = format!("P6\n{WIDTH} {HEIGHT}\n255\n").into_bytes();
+        for pixel in &buffer {
+            ppm.extend_from_slice(&[pixel.red, pixel.green, pixel.blue]);
+        }
+        std::fs::write(out, ppm).expect("картинка");
+    }
+
+    /// Раздел «Мусор» с настоящими находками этой машины. Ничего не удаляет
+    /// и не помечает. Запуск:
+    /// cargo test -p bamboo-agent draw_the_junk_section -- --ignored
+    #[test]
+    #[ignore]
+    fn draw_the_junk_section() {
+        let window = MinimalSoftwareWindow::new(RepaintBufferType::NewBuffer);
+        slint::platform::set_platform(Box::new(Offscreen {
+            window: window.clone(),
+        }))
+        .expect("платформа");
+        let main = MainWindow::new().expect("главное окно");
+        main.set_section(12);
+
+        let seen = std::sync::atomic::AtomicU64::new(0);
+        let found = junk::scan(
+            &junk::project_roots(),
+            &junk::known_places(),
+            &[],
+            junk::WORTH,
+            &std::sync::atomic::AtomicBool::new(false),
+            &seen,
+        );
+        let shared: junk::Shared = std::sync::Arc::new(std::sync::Mutex::new(junk::State {
+            found,
+            finished_at: Some(std::time::SystemTime::now()),
+            ..Default::default()
+        }));
+        let seen: junk::Seen = std::sync::Arc::new(seen);
+        fill_junk(&main, &shared, &seen);
+        main.set_junk_confirm(
+            main.get_junk()
+                .row_data(1)
+                .map(|row| row.path)
+                .unwrap_or_default(),
+        );
+
+        let out = std::env::temp_dir().join("bamboo-junk-section.ppm");
+        draw(&main, &window, &out);
+        println!("{}", out.display());
     }
 }

@@ -153,6 +153,15 @@ struct WakeRow {
     source: string,
 }
 
+// Найденный мусор: путь, что это, размер и итог удаления.
+struct JunkRow {
+    path: string,
+    what: string,
+    size: string,
+    note: string,
+    done: bool,
+}
+
 struct JournalRow {
     when: string,
     action: string,
@@ -417,6 +426,16 @@ export component MainWindow inherits Window {
     in property <string> memory-kernel: "";
     in property <string> memory-verdict: "";
     in property <string> memory-copies: "";
+    // Мусор на диске.
+    in property <[JunkRow]> junk: [];
+    in property <string> junk-status: "";
+    in property <bool> junk-scanning: false;
+    in property <bool> junk-marks: false;
+    // Путь, для которого «Удалить» уже нажато один раз.
+    in-out property <string> junk-confirm: "";
+    callback find-junk();
+    callback delete-junk(string);
+    callback toggle-junk-marks();
     in property <string> temperature: "";
     in property <[VolumeRow]> volumes: [];
     in property <[SuggestionRow]> suggestions: [];
@@ -717,6 +736,11 @@ export component MainWindow inherits Window {
                     label: @tr("Диск");
                     active: root.section == 2;
                     chosen => { root.section = 2; root.refresh(); }
+                }
+                NavButton {
+                    label: @tr("Мусор");
+                    active: root.section == 12;
+                    chosen => { root.section = 12; root.refresh(); }
                 }
                 NavButton {
                     label: @tr("Питание");
@@ -1527,6 +1551,130 @@ export component MainWindow inherits Window {
                         Text { text: root.disk-note; font-size: 11px; color: #62736a; wrap: word-wrap; }
                         Rectangle { vertical-stretch: 1; }
     }
+                }
+
+                // --- Мусор ---
+                // Только то, что восстанавливается само. Список длинный
+                // бывает редко, но прокрутка нужна: на машине разработчика
+                // проектов с кэшем сборки — десятки.
+                if root.section == 12: Flickable {
+                    vertical-stretch: 1;
+                    VerticalLayout {
+                        spacing: 8px;
+                        Text { text: @tr("Мусор на диске"); font-size: 20px; color: #e8f0ec; }
+                        Text {
+                            text: @tr("Только то, что программы создают сами и создадут заново: кэши сборки, скачанные пакеты, временные файлы, дампы сбоев. Документы, фотографии и загрузки Bamboo не ищет и удалять не предлагает — нужны ли они, решаете вы.");
+                            font-size: 11px; color: #7d8f86; wrap: word-wrap;
+                        }
+                        Rectangle {
+                            background: #1e2a24; border-radius: 8px;
+                            height: junkhead.preferred-height;
+                            junkhead := HorizontalLayout {
+                                padding: 12px; spacing: 12px;
+                                Text {
+                                    text: root.junk-status; font-size: 12px; color: #b6c6bd;
+                                    wrap: word-wrap; horizontal-stretch: 1;
+                                    vertical-alignment: center;
+                                }
+                                Rectangle {
+                                    width: 110px;
+                                    VerticalLayout {
+                                        alignment: center;
+                                        RowButton {
+                                            label: root.junk-scanning ? @tr("Ищу…") : @tr("Найти заново");
+                                            width: 110px;
+                                            pressed => {
+                                                if !root.junk-scanning {
+                                                    root.find-junk();
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        for item in root.junk: Rectangle {
+                            background: #1b2521; border-radius: 6px;
+                            height: junkrow.preferred-height;
+                            junkrow := HorizontalLayout {
+                                padding: 10px; spacing: 10px;
+                                VerticalLayout {
+                                    spacing: 3px; horizontal-stretch: 1;
+                                    // Красным — как и в Проводнике: это то,
+                                    // что можно удалить.
+                                    Text {
+                                        text: item.path; font-size: 12px;
+                                        color: item.done ? #7d8f86 : #e05c58;
+                                        wrap: word-wrap;
+                                    }
+                                    Text {
+                                        text: item.what; font-size: 11px; color: #7d8f86;
+                                        wrap: word-wrap;
+                                    }
+                                    if item.note != "": Text {
+                                        text: item.note; font-size: 11px; color: #b6c6bd;
+                                        wrap: word-wrap;
+                                    }
+                                }
+                                Text {
+                                    text: item.size; font-size: 13px; color: #e8f0ec;
+                                    vertical-alignment: center;
+                                }
+                                Rectangle {
+                                    width: 80px;
+                                    VerticalLayout {
+                                        alignment: center;
+                                        // Удаление не отменить, поэтому
+                                        // вторым нажатием: «Удалить» → «Точно?».
+                                        if !item.done: RowButton {
+                                            label: root.junk-confirm == item.path ? @tr("Точно?") : @tr("Удалить");
+                                            danger: true;
+                                            pressed => {
+                                                if root.junk-confirm == item.path {
+                                                    root.junk-confirm = "";
+                                                    root.delete-junk(item.path);
+                                                } else {
+                                                    root.junk-confirm = item.path;
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        Rectangle {
+                            background: #1e2a24; border-radius: 8px;
+                            height: junkmarks.preferred-height;
+                            junkmarks := HorizontalLayout {
+                                padding: 12px; spacing: 12px;
+                                VerticalLayout {
+                                    spacing: 3px; horizontal-stretch: 1;
+                                    Text {
+                                        text: @tr("Помечать мусор красным в Проводнике");
+                                        font-size: 13px; color: #e8f0ec;
+                                    }
+                                    Text {
+                                        text: root.junk-marks
+                                            ? @tr("Папки с мусором в ваших проектах получают красный значок, а при наведении — подсказку, что это и сколько весит. Пометка — скрытый файл desktop.ini внутри папки. Выключите, и Bamboo уберёт все свои пометки.")
+                                            : @tr("Выключено. Включите — и папки с мусором в ваших проектах, например target или node_modules, станут в Проводнике красными, с подсказкой при наведении.");
+                                        font-size: 11px; color: #7d8f86; wrap: word-wrap;
+                                    }
+                                }
+                                Rectangle {
+                                    width: 110px;
+                                    VerticalLayout {
+                                        alignment: center;
+                                        RowButton {
+                                            label: root.junk-marks ? @tr("Выключить") : @tr("Включить");
+                                            width: 110px;
+                                            pressed => { root.toggle-junk-marks(); }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        Rectangle { vertical-stretch: 1; }
+                    }
                 }
 
                 // --- Анализ программы ---
