@@ -29,6 +29,7 @@ pub mod inventory;
 mod iolimit;
 pub mod memmap;
 pub mod memory;
+pub mod net;
 pub mod notify;
 pub mod nt;
 pub mod paging;
