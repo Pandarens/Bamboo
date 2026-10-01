@@ -1412,6 +1412,18 @@ export component MainWindow inherits Window {
                                                 font-size: 12px;
                                                 font-weight: process.is-group ? 700 : 400;
                                                 vertical-alignment: center;
+                                                horizontal-stretch: process.badge == "" ? 1 : 0;
+                                                overflow: elide;
+                                            }
+                                            // Что выполняет node.exe и родня:
+                                            // «vite (stanica_club) · codegraph ×5».
+                                            // Без этого семнадцать одинаковых
+                                            // имён не говорят, что закрывать.
+                                            if process.badge != "": Text {
+                                                text: process.badge;
+                                                color: #7d8f86;
+                                                font-size: 10px;
+                                                vertical-alignment: center;
                                                 horizontal-stretch: 1;
                                                 overflow: elide;
                                             }

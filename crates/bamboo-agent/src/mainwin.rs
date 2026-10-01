@@ -594,13 +594,10 @@ pub fn process_rows(
             cpu: format!("{:.1}%", line.cpu_percent),
             memory: line.memory.to_string(),
             threads: line.threads.to_string(),
-            badge: if line.label.is_empty() {
-                line.badge.clone()
-            } else if line.badge.is_empty() {
-                line.label.clone()
-            } else {
-                format!("{} · {}", line.label, line.badge)
-            },
+            // В таблице — только подпись исполнителя. Пояснения виджета
+            // («под наблюдением 5 ч») у каждой строки были бы шумом, а
+            // для диска здесь свой столбец.
+            badge: line.label.clone(),
             growth: describe_growth(line),
             leak: line.memory_growth.is_some_and(|trend| trend.suspected_leak),
             // Про отвечающий процесс не пишем ничего: строка «отвечает»
@@ -986,7 +983,22 @@ pub fn disk_user_rows(snapshot: &Snapshot) -> (Vec<DiskUserRow>, String) {
     let mut groups: Vec<(String, u64)> = group_by_app(snapshot)
         .into_iter()
         .filter(|group| group.disk_per_second > 0)
-        .map(|group| (group.name, group.disk_per_second))
+        .map(|group| {
+            // У node.exe и родни — что именно пишет: «node.exe · eslint».
+            let writing: Vec<GroupMember> = group
+                .members
+                .iter()
+                .filter(|member| member.disk_per_second > 0)
+                .cloned()
+                .collect();
+            let labels = labels_inside(&writing);
+            let name = if labels.is_empty() {
+                group.name
+            } else {
+                format!("{} · {labels}", group.name)
+            };
+            (name, group.disk_per_second)
+        })
         .collect();
     groups.sort_by_key(|(_, rate)| core::cmp::Reverse(*rate));
     groups.truncate(10);
@@ -1475,6 +1487,11 @@ struct Copies<'a> {
 /// С живой машины: пять сессий Claude держали каждая свой сервер PDF и свой
 /// индексатор кода — десять node.exe, больше гигабайта. Сессии были
 /// открыты с позавчера, а работали в одной.
+///
+/// Считается выделенная память, а не лежащая в ОЗУ. У забытого сервера
+/// почти всё вытеснено в подкачку, и в ОЗУ он выглядит мелочью — а место
+/// в подкачке и в общем счёте выделенного занимает целиком. Закрыть его —
+/// значит освободить именно это.
 fn copies_line(processes: &[crate::collector::ProcessLine]) -> String {
     use std::collections::HashMap;
 
@@ -1515,7 +1532,7 @@ fn copies_line(processes: &[crate::collector::ProcessLine]) -> String {
             }
         };
         let group = &mut groups[at];
-        group.bytes += line.resident.as_u64();
+        group.bytes += line.memory.as_u64();
         if is_copy_root {
             group.count += 1;
             if let Some(launcher) = chain.iter().find(|parent| {
