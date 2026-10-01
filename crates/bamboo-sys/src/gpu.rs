@@ -323,23 +323,50 @@ impl GpuMemoryCounter {
                 *by_pid.entry(pid).or_default() += value.max(0.0);
             }
         }
-        let mut shared_by_pid: Vec<(u32, bamboo_core::Bytes)> = by_pid
-            .into_iter()
-            .filter(|(_, bytes)| *bytes >= 1.0)
-            .map(|(pid, bytes)| (pid, bamboo_core::Bytes(bytes as u64)))
-            .collect();
-        shared_by_pid.sort_by_key(|entry| core::cmp::Reverse(entry.1));
-
         Ok(GpuMemory {
             shared_total: bamboo_core::Bytes(total as u64),
-            shared_by_pid,
+            shared_by_pid: plausible(by_pid, total),
         })
     }
+}
+
+/// Оставляет правдоподобные значения по процессам, крупные первыми.
+///
+/// Процесс не может держать больше общей памяти видеокарты, чем её занято
+/// всего. А Windows говорит именно так: на живой машине у отрисовки окон
+/// (dwm) счётчик показывал 15,7 ГБ при 1,3 ГБ на весь адаптер — в её
+/// число входят поверхности всех окон, которые она только показывает.
+/// Такое число не «её память», и Bamboo его не повторяет.
+fn plausible(
+    by_pid: std::collections::HashMap<u32, f64>,
+    total: f64,
+) -> Vec<(u32, bamboo_core::Bytes)> {
+    let mut shared: Vec<(u32, bamboo_core::Bytes)> = by_pid
+        .into_iter()
+        .filter(|(_, bytes)| *bytes >= 1.0 && *bytes <= total)
+        .map(|(pid, bytes)| (pid, bamboo_core::Bytes(bytes as u64)))
+        .collect();
+    shared.sort_by_key(|entry| core::cmp::Reverse(entry.1));
+    shared
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_process_cannot_hold_more_than_the_whole_adapter() {
+        // Живой замер: dwm 15,7 ГБ при 1,3 ГБ на адаптер.
+        const MB: f64 = 1024.0 * 1024.0;
+        let by_pid = std::collections::HashMap::from([
+            (1588, 15_757.0 * MB),
+            (15240, 427.0 * MB),
+            (3796, 194.0 * MB),
+        ]);
+        let shared = plausible(by_pid, 1277.0 * MB);
+        let pids: Vec<u32> = shared.iter().map(|(pid, _)| *pid).collect();
+        assert_eq!(pids, vec![15240, 3796]);
+    }
 
     #[test]
     fn a_pid_is_read_out_of_the_instance_name() {
