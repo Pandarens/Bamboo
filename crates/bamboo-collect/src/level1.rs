@@ -194,6 +194,24 @@ impl Level1Series {
                 .map_or(0, |_| core::mem::size_of::<MinuteAccumulator>())
     }
 
+    /// Сколько последних завершённых минут процесс провёл без дела: процессора
+    /// не больше `cpu_ms` за минуту и без записи на диск.
+    ///
+    /// Для забытых серверов разработки. Сервер, к которому обращается
+    /// браузер или который пересобирает изменённые файлы, тратит процессор;
+    /// забытый — нет, и это видно по минутам подряд, а не по одному тику.
+    pub fn quiet_minutes(&self, cpu_ms: u32) -> u32 {
+        // Кольцевой буфер обходится только вперёд: считаем хвост тишины,
+        // обнуляя счёт на каждой рабочей минуте.
+        self.history.iter().fold(0, |quiet, minute| {
+            if minute.cpu_ms <= cpu_ms && minute.write_kib == 0 {
+                quiet + 1
+            } else {
+                0
+            }
+        })
+    }
+
     /// Временной ряд приватной памяти для анализатора роста: пары
     /// «время, байты». Берётся среднее за минуту.
     pub fn private_series(&self) -> Vec<(u64, f64)> {
@@ -216,6 +234,30 @@ mod tests {
             read_kib: 10,
             write_kib: 20,
         }
+    }
+
+    #[test]
+    fn quiet_minutes_count_back_from_the_latest() {
+        let mut series = Level1Series::new();
+        let quiet = MetricPoint {
+            cpu_ms: 1,
+            ..point(0, 1000)
+        };
+        let quiet = MetricPoint {
+            write_kib: 0,
+            ..quiet
+        };
+        // Минута работы, затем три минуты тишины и начало пятой.
+        for second in 0..60 {
+            series.push(second * 1000, &point(100, 1000));
+        }
+        for second in 60..240 {
+            series.push(second * 1000, &quiet);
+        }
+        series.push(240_000, &quiet);
+        assert_eq!(series.quiet_minutes(200), 3);
+        // Строже порог — и тишины нет: по секунде процессора в минуту.
+        assert_eq!(series.quiet_minutes(10), 0);
     }
 
     #[test]
