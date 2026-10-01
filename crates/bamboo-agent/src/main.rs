@@ -240,6 +240,10 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     main_window.set_memory_parts(ModelRc::new(VecModel::from(Vec::<MemoryPartRow>::new())));
     main_window.set_volumes(ModelRc::new(VecModel::from(Vec::<VolumeRow>::new())));
     main_window.set_suggestions(ModelRc::new(VecModel::from(Vec::<SuggestionRow>::new())));
+    // Без своей модели список «Кто занимает диск» молча оставался пустым:
+    // обновление пишет только в модель-вектор, а пустой массив из окна
+    // ею не является. Так было с самого появления раздела.
+    main_window.set_disk_users(ModelRc::new(VecModel::from(Vec::<DiskUserRow>::new())));
     main_window.set_autostart(bamboo_sys::is_in_startup());
     main_window.set_app_version(SharedString::from(update::CURRENT));
     main_window.set_language(SharedString::from(language.clone()));
@@ -2870,6 +2874,146 @@ fn apply_window_look(widget: &Widget) {
 mod tests {
     use super::{fullscreen_action, FullscreenAction};
 
+    /// Провалы из пробелов внутри строк: «слово                  слово».
+    /// Так выглядит потерянный перенос строки «\» с переводом строки,
+    /// и в окне получается дыра посреди фразы. Нашлось пятьдесят четыре
+    /// строки сразу — значит, без сторожа появится снова.
+    fn gaps_in_strings(text: &str) -> Vec<usize> {
+        let chars: Vec<char> = text.chars().collect();
+        let (mut i, n) = (0, chars.len());
+        let mut in_string = false;
+        let mut lines = Vec::new();
+        let line_of = |at: usize| chars[..at].iter().filter(|c| **c == '\n').count() + 1;
+        while i < n {
+            let c = chars[i];
+            if !in_string {
+                if c == '/' && chars.get(i + 1) == Some(&'/') {
+                    while i < n && chars[i] != '\n' {
+                        i += 1;
+                    }
+                    continue;
+                }
+                if c == '\'' {
+                    if chars.get(i + 2) == Some(&'\'') {
+                        i += 3;
+                        continue;
+                    }
+                    if chars.get(i + 1) == Some(&'\\') && chars.get(i + 3) == Some(&'\'') {
+                        i += 4;
+                        continue;
+                    }
+                }
+                if c == 'r' && chars.get(i + 1) == Some(&'#') && chars.get(i + 2) == Some(&'"') {
+                    i += 3;
+                    while i + 1 < n && !(chars[i] == '"' && chars[i + 1] == '#') {
+                        i += 1;
+                    }
+                    i += 2;
+                    continue;
+                }
+                in_string = c == '"';
+                i += 1;
+                continue;
+            }
+            match c {
+                '\\' => i += 2,
+                '"' => {
+                    in_string = false;
+                    i += 1;
+                }
+                ' ' if !matches!(chars[i - 1], ' ' | '\n' | '\r' | '\t') => {
+                    let start = i;
+                    while i < n && chars[i] == ' ' {
+                        i += 1;
+                    }
+                    if i - start >= 4 && i < n && !matches!(chars[i], '\r' | '\n' | '"') {
+                        lines.push(line_of(start));
+                    }
+                }
+                _ => i += 1,
+            }
+        }
+        lines
+    }
+
+    #[test]
+    fn no_text_has_a_hole_of_spaces() {
+        let crates = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("папка крейтов");
+        let mut found = Vec::new();
+        let mut stack = vec![crates.to_path_buf()];
+        while let Some(dir) = stack.pop() {
+            for entry in std::fs::read_dir(&dir).into_iter().flatten().flatten() {
+                let path = entry.path();
+                let shown = path.display().to_string();
+                // Справки CLI и службы выровнены колонками, SQL — тоже.
+                if shown.contains("bamboo-cli")
+                    || shown.contains("bamboo-service")
+                    || shown.ends_with("schema.rs")
+                {
+                    continue;
+                }
+                if path.is_dir() {
+                    stack.push(path);
+                } else if shown.ends_with(".rs") {
+                    let text = std::fs::read_to_string(&path).unwrap_or_default();
+                    for line in gaps_in_strings(&text) {
+                        found.push(format!("{shown}:{line}"));
+                    }
+                }
+            }
+        }
+        assert!(found.is_empty(), "провалы в текстах: {found:#?}");
+    }
+
+    #[test]
+    fn the_hole_finder_finds_holes() {
+        // Пробелы собираем на ходу: впиши их сюда рядом — сторож нашёл бы
+        // собственный пример.
+        let gap = " ".repeat(10);
+        assert_eq!(
+            gaps_in_strings(&format!("let a = \"раз{gap}два\";")),
+            vec![1]
+        );
+        assert!(gaps_in_strings(&format!("let a = \"раз два\"; // много{gap}пробелов")).is_empty());
+        assert!(
+            gaps_in_strings(&format!("let a = '\"'; let b = \"x\";{gap}let c = 1;")).is_empty()
+        );
+    }
+
+    #[test]
+    fn every_list_that_is_refreshed_has_its_own_model() {
+        // replace() пишет только в модель-вектор и молчит, если её нет.
+        // Так «Кто занимает диск» был пуст с самого появления: список
+        // обновлялся каждым тиком, а модель ему никто не дал.
+        // Только рабочий код: в проверочном модели задаются вручную,
+        // и сторож нашёл бы их там, а не там, где они нужны.
+        let main = include_str!("main.rs")
+            .split("#[cfg(all(windows, test))]")
+            .next()
+            .unwrap_or_default();
+        let window = include_str!("../ui/main_window.slint");
+        let mut missing = Vec::new();
+        for line in window.lines() {
+            let line = line.trim();
+            let Some(rest) = line.strip_prefix("in property <[") else {
+                continue;
+            };
+            let Some(name) = rest.split("]> ").nth(1) else {
+                continue;
+            };
+            let name = name.split([':', ';']).next().unwrap_or_default().trim();
+            let rust = name.replace('-', "_");
+            let refreshed = main.contains(&format!("replace(&main.get_{rust}()"));
+            let given = main.contains(&format!("set_{rust}("));
+            if refreshed && !given {
+                missing.push(name.to_string());
+            }
+        }
+        assert!(missing.is_empty(), "без модели: {missing:?}");
+    }
+
     #[test]
     fn entering_fullscreen_hides_a_visible_widget() {
         // Вошли в полный экран (переход false→true), виджет на экране.
@@ -2950,6 +3094,70 @@ mod drawn {
     fn draw(main: &MainWindow, window: &MinimalSoftwareWindow, out: &std::path::Path) {
         const WIDTH: u32 = 1180;
         const HEIGHT: u32 = 820;
+        window.set_size(slint::PhysicalSize::new(WIDTH, HEIGHT));
+        main.show().expect("окно");
+        let mut buffer = vec![PremultipliedRgbaColor::default(); (WIDTH * HEIGHT) as usize];
+        window.request_redraw();
+        window.draw_if_needed(|renderer| {
+            renderer.render(&mut buffer, WIDTH as usize);
+        });
+        let mut ppm = format!("P6\n{WIDTH} {HEIGHT}\n255\n").into_bytes();
+        for pixel in &buffer {
+            ppm.extend_from_slice(&[pixel.red, pixel.green, pixel.blue]);
+        }
+        std::fs::write(out, ppm).expect("картинка");
+    }
+
+    /// «Обзор», «Процессы» и «Диск» на живом снимке этой машины.
+    /// Запуск: cargo test -p bamboo-agent draw_live_sections -- --ignored
+    #[test]
+    #[ignore]
+    fn draw_live_sections() {
+        let window = MinimalSoftwareWindow::new(RepaintBufferType::NewBuffer);
+        slint::platform::set_platform(Box::new(Offscreen {
+            window: window.clone(),
+        }))
+        .expect("платформа");
+        let main = MainWindow::new().expect("главное окно");
+        let processes: ModelRc<MainProcessRow> = ModelRc::new(VecModel::from(Vec::new()));
+        main.set_processes(processes.clone());
+        main.set_disk_load(ModelRc::new(VecModel::from(Vec::<DiskLoadRow>::new())));
+        main.set_pagefiles(ModelRc::new(VecModel::from(Vec::<PagefileRow>::new())));
+        main.set_memory_parts(ModelRc::new(VecModel::from(Vec::<MemoryPartRow>::new())));
+        main.set_volumes(ModelRc::new(VecModel::from(Vec::<VolumeRow>::new())));
+        main.set_suggestions(ModelRc::new(VecModel::from(Vec::<SuggestionRow>::new())));
+        main.set_disk_users(ModelRc::new(VecModel::from(Vec::<DiskUserRow>::new())));
+
+        // Третий снимок: на первом нет скоростей, на втором — разниц.
+        let (snapshots, _) = collector::spawn();
+        let mut snapshot = None;
+        for _ in 0..3 {
+            snapshot = snapshots.recv().ok().or(snapshot);
+        }
+        let snapshot = snapshot.expect("снимок");
+        let autopilot = std::cell::RefCell::new(autopilot::Autopilot::new());
+        apply_overview(
+            &main,
+            &snapshot,
+            &processes,
+            &actions::IoLimits::new(),
+            &autopilot,
+            &std::sync::Mutex::new(Vec::new()),
+            &bamboo_policy::Rejections::new(),
+        );
+
+        for (section, name) in [(0, "overview"), (1, "processes"), (2, "disk")] {
+            main.set_section(section);
+            let out = std::env::temp_dir().join(format!("bamboo-{name}.ppm"));
+            draw_tall(&main, &window, &out);
+            println!("{}", out.display());
+        }
+    }
+
+    /// Высокое окно: прокручиваемый раздел виден целиком.
+    fn draw_tall(main: &MainWindow, window: &MinimalSoftwareWindow, out: &std::path::Path) {
+        const WIDTH: u32 = 1420;
+        const HEIGHT: u32 = 2600;
         window.set_size(slint::PhysicalSize::new(WIDTH, HEIGHT));
         main.show().expect("окно");
         let mut buffer = vec![PremultipliedRgbaColor::default(); (WIDTH * HEIGHT) as usize];
