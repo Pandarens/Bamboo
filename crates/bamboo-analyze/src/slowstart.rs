@@ -91,8 +91,8 @@ pub fn slow_starters(costs: &[BootCost], startup: &[StartupEntry]) -> Vec<SlowSt
             found.push(SlowStarter {
                 startup_name: entry.name.clone(),
                 reason: say(
-                    "{app} задержал загрузку на {cost} и стоит в автозагрузке.                      Это измерено журналом диагностики Windows, а не предположено.                      Выключение обратимо: программа останется установленной                      и запустится вручную.",
-                    "{app} delayed startup by {cost} and sits in autostart.                      This is measured by the Windows diagnostics log, not guessed.                      Turning it off is reversible: the program stays installed                      and starts manually.",
+                    "{app} задержал загрузку на {cost} и стоит в автозагрузке. Это измерено журналом диагностики Windows, а не предположено. Выключение обратимо: программа останется установленной и запустится вручную.",
+                    "{app} delayed startup by {cost} and sits in autostart. This is measured by the Windows diagnostics log, not guessed. Turning it off is reversible: the program stays installed and starts manually.",
                     &[
                         ("app", entry.name.as_str()),
                         ("cost", &spell_cost(cost.total_ms)),

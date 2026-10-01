@@ -319,7 +319,7 @@ pub fn check() -> UpdateState {
             return UpdateState {
                 available: None,
                 note: format!(
-                    "Проверить обновления не удалось: {error}. Это не поломка —                      Bamboo спросит ещё раз позже."
+                    "Проверить обновления не удалось: {error}. Это не поломка — Bamboo спросит ещё раз позже."
                 ),
             }
         }
@@ -431,7 +431,7 @@ fn check_payload(bytes: &[u8], release: &Release) -> Result<(), String> {
     match bamboo_sys::sha256_hex(bytes) {
         Ok(actual) if actual == *expected => Ok(()),
         Ok(actual) => Err(format!(
-            "Контрольная сумма не сошлась: ожидалась {expected}, получилась {actual}.              Файл повреждён при загрузке — установка отменена."
+            "Контрольная сумма не сошлась: ожидалась {expected}, получилась {actual}. Файл повреждён при загрузке — установка отменена."
         )),
         Err(error) => Err(format!("Проверить контрольную сумму не удалось: {error}")),
     }
@@ -453,7 +453,7 @@ fn replace_self(bytes: &[u8]) -> Result<(), String> {
 
     std::fs::rename(&current, &old).map_err(|error| {
         format!(
-            "Заменить себя не удалось: {error}. Обычно это значит, что папка              с Bamboo защищена от записи — например, он лежит в Program Files."
+            "Заменить себя не удалось: {error}. Обычно это значит, что папка с Bamboo защищена от записи — например, он лежит в Program Files."
         )
     })?;
 

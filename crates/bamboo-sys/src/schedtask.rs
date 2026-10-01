@@ -82,7 +82,7 @@ pub fn channel_enabled(channel: &str) -> Result<bool> {
 pub fn started_by_task(pid: u32, look_back: usize) -> Result<Option<StartedByTask>> {
     if !channel_enabled(CHANNEL)? {
         return Err(Error::Unsupported(
-            "журнал планировщика заданий выключен: узнать имя задачи нельзя.              Включить его можно в просмотре событий, ветка Microsoft-Windows-TaskScheduler",
+            "журнал планировщика заданий выключен: узнать имя задачи нельзя. Включить его можно в просмотре событий, ветка Microsoft-Windows-TaskScheduler",
         ));
     }
 

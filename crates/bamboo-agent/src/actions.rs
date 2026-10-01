@@ -364,8 +364,8 @@ impl IoLimits {
                     String::new()
                 };
                 bamboo_core::say(
-                    "{app}: диск придержан — {limit}. Полного запрета не бывает:                      процесс, которому отказали в чтении, просто упал бы.                      Ограничение снимется само, когда Bamboo закроется.{others}",
-                    "{app}: the disk is held back — {limit}. A full ban does not exist:                      a process denied a read would simply crash. The limit lifts                      itself when Bamboo closes.{others}",
+                    "{app}: диск придержан — {limit}. Полного запрета не бывает: процесс, которому отказали в чтении, просто упал бы. Ограничение снимется само, когда Bamboo закроется.{others}",
+                    "{app}: the disk is held back — {limit}. A full ban does not exist: a process denied a read would simply crash. The limit lifts itself when Bamboo closes.{others}",
                     &[
                         ("app", image_name),
                         ("limit", limit.describe()),
@@ -617,7 +617,7 @@ impl Terminated {
             self.culprit = bamboo_sys::service_by_pid(*parent_pid);
             if let Some(service) = &self.culprit {
                 return Some(format!(
-                    "{name} вернулся через {seconds} с (PID {pid}). Его поднимает служба                      «{}». Завершать процесс повторно бесполезно — он будет возвращаться,                      пока служба работает. Остановить её можно кнопкой ниже: это                      действие уровня 5, и служба поднимется обратно при перезагрузке.",
+                    "{name} вернулся через {seconds} с (PID {pid}). Его поднимает служба «{}». Завершать процесс повторно бесполезно — он будет возвращаться, пока служба работает. Остановить её можно кнопкой ниже: это действие уровня 5, и служба поднимется обратно при перезагрузке.",
                     service.display
                 ));
             }

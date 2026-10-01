@@ -473,13 +473,13 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
 
             let note = match outcome {
                 Ok(()) if done => bamboo_core::pick(
-                    "Готово: при входе Bamboo поднимется со всеми правами.                      Обычную запись автозапуска можно выключить — она больше                      не нужна.",
-                    "Done: Bamboo will start at logon with full rights. The plain                      autostart entry can be turned off — it is no longer needed.",
+                    "Готово: при входе Bamboo поднимется со всеми правами. Обычную запись автозапуска можно выключить — она больше не нужна.",
+                    "Done: Bamboo will start at logon with full rights. The plain autostart entry can be turned off — it is no longer needed.",
                 )
                 .to_string(),
                 Ok(()) => bamboo_core::pick(
-                    "Задача убрана. При входе Bamboo больше сам не запустится                      с правами.",
-                    "The task is removed. Bamboo will no longer start with rights                      at logon.",
+                    "Задача убрана. При входе Bamboo больше сам не запустится с правами.",
+                    "The task is removed. Bamboo will no longer start with rights at logon.",
                 )
                 .to_string(),
                 Err(error) => bamboo_core::say(
@@ -511,9 +511,9 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 Ok(()) => {
                     win.set_language(SharedString::from(wanted));
                     if wanted == "en" {
-                        "Язык переключён на английский. Он вступит в силу                          после перезапуска Bamboo — закройте его из трея                          и запустите снова."
+                        "Язык переключён на английский. Он вступит в силу после перезапуска Bamboo — закройте его из трея и запустите снова."
                     } else {
-                        "Язык переключён на русский. Он вступит в силу после                          перезапуска Bamboo."
+                        "Язык переключён на русский. Он вступит в силу после перезапуска Bamboo."
                     }
                     .to_string()
                 }
@@ -546,10 +546,10 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             }
 
             let note = match bamboo_sys::set_autopilot_enabled(now_on) {
-                Ok(()) if now_on => "Автоматика включена. Пока вас нет, Bamboo придержит                     фоновую работу, а как только вы тронете мышь — вернёт всё                     на место. Каждое действие попадёт в журнал."
+                Ok(()) if now_on => "Автоматика включена. Пока вас нет, Bamboo придержит фоновую работу, а как только вы тронете мышь — вернёт всё на место. Каждое действие попадёт в журнал."
                     .to_string(),
                 Ok(()) => format!(
-                    "Автоматика выключена, вернулось процессов: {}. Bamboo снова                      только предлагает.",
+                    "Автоматика выключена, вернулось процессов: {}. Bamboo снова только предлагает.",
                     returned.len()
                 ),
                 Err(error) => format!("Настройку сохранить не удалось: {error}"),
@@ -597,10 +597,10 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
 
             let note = match learned {
                 bamboo_policy::Learned::Silenced => format!(
-                    "{name}: больше не предложу «{what}». Передумаете — удалите строку                      из файла отказов рядом с журналом."
+                    "{name}: больше не предложу «{what}». Передумаете — удалите строку из файла отказов рядом с журналом."
                 ),
                 bamboo_policy::Learned::Counted { .. } => format!(
-                    "{name}: понял, «{what}» пока пропускаю. Откажетесь ещё раз —                      перестану предлагать совсем."
+                    "{name}: понял, «{what}» пока пропускаю. Откажетесь ещё раз — перестану предлагать совсем."
                 ),
                 // Тот же самый отказ пришёл дважды: считать его вторым
                 // нельзя, иначе одно нажатие замолчит предложение навсегда.
@@ -609,7 +609,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
 
             if let Err(error) = actions::save_rejections(&rejections.borrow()) {
                 win.set_action_note(SharedString::from(format!(
-                    "Отказ учтён, но сохранить его не удалось: {error}.                      После перезапуска предложение вернётся."
+                    "Отказ учтён, но сохранить его не удалось: {error}. После перезапуска предложение вернётся."
                 )));
                 return;
             }
@@ -636,7 +636,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 // и отказать, и человек должен видеть, что вышло.
                 Ok(true) if wanted => format!("{name}: будет запускаться вместе с Windows."),
                 Ok(true) => format!(
-                    "{name}: больше не запускается сам. Программа осталась                      установленной — запустить её можно как обычно."
+                    "{name}: больше не запускается сам. Программа осталась установленной — запустить её можно как обычно."
                 ),
                 Ok(false) => format!("{name}: состояние не изменилось."),
                 Err(error) => format!("{name}: изменить не удалось — {error}"),
@@ -704,7 +704,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 *recording = None;
                 win.set_recording(false);
                 win.set_record_status(SharedString::from(
-                    "Запись остановлена. График и разбор ниже — они никуда                      не денутся, пока вы не начнёте новую запись.",
+                    "Запись остановлена. График и разбор ниже — они никуда не денутся, пока вы не начнёте новую запись.",
                 ));
                 return;
             }
@@ -712,7 +712,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             let app = app.trim().to_string();
             if app.is_empty() {
                 win.set_record_status(SharedString::from(
-                    "Впишите имя программы — так, как оно стоит в списке процессов:                      например, game.exe.",
+                    "Впишите имя программы — так, как оно стоит в списке процессов: например, game.exe.",
                 ));
                 return;
             }
@@ -721,7 +721,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             win.set_recording(true);
             win.set_record_verdict(SharedString::from(""));
             win.set_record_status(SharedString::from(format!(
-                "Записываю {app}. Переключайтесь в программу и работайте как                  обычно — Bamboo замеряет раз в секунду. Разбор появится примерно                  через десять секунд: на меньшем отрезке любой вывод был бы                  гаданием."
+                "Записываю {app}. Переключайтесь в программу и работайте как обычно — Bamboo замеряет раз в секунду. Разбор появится примерно через десять секунд: на меньшем отрезке любой вывод был бы гаданием."
             )));
         });
     }
@@ -2389,7 +2389,7 @@ fn show_recording(main: &MainWindow, recording: &session::Session) {
         ))),
         // Меньше десяти секунд — вывода ещё нет, и выдумывать его нельзя.
         None => main.set_record_verdict(SharedString::from(
-            "Наблюдений пока мало. Вывод появится, когда наберётся десять             секунд: на меньшем отрезке он был бы гаданием.",
+            "Наблюдений пока мало. Вывод появится, когда наберётся десять секунд: на меньшем отрезке он был бы гаданием.",
         )),
     }
 }
