@@ -140,6 +140,12 @@ const UNUSED_AFTER_MS: u64 = 30 * 60 * 1000;
 #[cfg(windows)]
 const AUTO_UPDATE_IDLE_MS: u64 = 15 * 60 * 1000;
 
+/// С какой занятости памяти напоминать о забытом сервере. Восемьдесят
+/// процентов — порог, с которого включается и защита переднего плана:
+/// ниже память не в дефиците, и сервер никому не мешает.
+#[cfg(windows)]
+const FORGOTTEN_NOTICE_PRESSURE: f64 = 0.80;
+
 /// Как часто напоминать об утечке одной и той же программы.
 #[cfg(windows)]
 const LEAK_NOTICE_EVERY: Duration = Duration::from_secs(24 * 60 * 60);
@@ -244,6 +250,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     // обновление пишет только в модель-вектор, а пустой массив из окна
     // ею не является. Так было с самого появления раздела.
     main_window.set_disk_users(ModelRc::new(VecModel::from(Vec::<DiskUserRow>::new())));
+    main_window.set_forgotten(ModelRc::new(VecModel::from(Vec::<ForgottenRow>::new())));
     main_window.set_autostart(bamboo_sys::is_in_startup());
     main_window.set_app_version(SharedString::from(update::CURRENT));
     main_window.set_language(SharedString::from(language.clone()));
@@ -1045,6 +1052,64 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         });
     }
 
+    // Закрыть забытый сервер разработки: сам сервер и всё, что он запустил.
+    {
+        let weak = main_window.as_weak();
+        let snapshot = last_snapshot.clone();
+        let killed = terminated.clone();
+        main_window.on_close_forgotten(move |pids, label| {
+            let Some(win) = weak.upgrade() else {
+                return;
+            };
+            let wanted: Vec<u32> = pids
+                .split(',')
+                .filter_map(|pid| pid.trim().parse::<u32>().ok())
+                .collect();
+            let names: Vec<(u32, String)> = snapshot
+                .borrow()
+                .as_ref()
+                .map(|snapshot| {
+                    wanted
+                        .iter()
+                        .filter_map(|pid| {
+                            snapshot
+                                .top
+                                .iter()
+                                .find(|line| line.pid == *pid)
+                                .map(|line| (*pid, line.name.clone()))
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+            // Процесс, которого уже нет в снимке, не трогаем: номер мог
+            // достаться другому.
+            let mut closed = 0usize;
+            let mut failure: Option<String> = None;
+            for (pid, name) in &names {
+                let note = actions::terminate(*pid, name);
+                if note.contains("завершён") {
+                    closed += 1;
+                    killed.borrow_mut().remember(name);
+                } else if failure.is_none() {
+                    failure = Some(note);
+                }
+            }
+            let note = match failure {
+                None if closed > 0 => format!(
+                    "{label}: сервер закрыт, его память вернётся системе. Понадобится — запустите снова."
+                ),
+                None => format!("{label}: сервер уже закрыт."),
+                Some(failure) => format!("{label}: закрыто {closed} из {}. {failure}", names.len()),
+            };
+            win.set_action_note(SharedString::from(note));
+            if let Some(snapshot) = snapshot.borrow_mut().as_mut() {
+                snapshot.top.retain(|line| !wanted.contains(&line.pid));
+                let rows = forgotten_rows(snapshot);
+                replace(&win.get_forgotten(), rows);
+            }
+        });
+    }
+
     // Автозапуск из раздела настроек: та же операция, что и галочка в трее.
     {
         let weak = main_window.as_weak();
@@ -1559,6 +1624,9 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     // О каких утечках уже говорили и когда.
     let mut leak_notified: std::collections::HashMap<String, std::time::Instant> =
         std::collections::HashMap::new();
+    // О каких забытых серверах уже говорили и когда.
+    let mut forgotten_notified: std::collections::HashMap<String, std::time::Instant> =
+        std::collections::HashMap::new();
     let timer = slint::Timer::default();
     // Состояние автоскрытия в полноэкранном режиме (ТЗ 14.2). Реагируем на
     // переходы, а не на само состояние: иначе, если пользователь вручную
@@ -2009,6 +2077,38 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                     }
                 }
 
+                // Забытый сервер разработки — говорим, только когда памяти
+                // не хватает: в остальное время он никому не мешает. Раз
+                // в сутки на сервер, как и об утечке.
+                if let Some(notifier) = &notifier {
+                    if snapshot.memory_pressure() >= FORGOTTEN_NOTICE_PRESSURE
+                        && bamboo_sys::notification_state().may_notify()
+                    {
+                        let server = mainwin::forgotten_servers(&snapshot)
+                            .into_iter()
+                            .find(|(server, _)| {
+                                forgotten_notified
+                                    .get(&server.label)
+                                    .is_none_or(|at| at.elapsed() >= LEAK_NOTICE_EVERY)
+                            });
+                        if let Some((server, name)) = server {
+                            forgotten_notified
+                                .insert(server.label.clone(), std::time::Instant::now());
+                            let text = format!(
+                                "{} держит {} и последний час ничего не делал: {}. Закрыть можно в Bamboo, на «Обзоре».",
+                                server.label,
+                                server.bytes,
+                                mainwin::forgotten_details(&server, &name),
+                            );
+                            let _ = notifier.show(
+                                "Bamboo: забытый сервер разработки",
+                                &shorten(&text, 240),
+                                bamboo_sys::Importance::Notice,
+                            );
+                        }
+                    }
+                }
+
                 // Обновляем главное окно, только если оно на экране.
                 if let Some(main) = main_weak.upgrade() {
                     if main.window().is_visible() {
@@ -2204,6 +2304,20 @@ fn shorten(text: &str, limit: usize) -> String {
 #[cfg(windows)]
 fn own_written() -> u64 {
     bamboo_sys::budget::own_write_bytes().unwrap_or(0)
+}
+
+/// Строки карточки «Забытые серверы разработки».
+#[cfg(windows)]
+fn forgotten_rows(snapshot: &collector::Snapshot) -> Vec<ForgottenRow> {
+    mainwin::forgotten_rows(snapshot)
+        .into_iter()
+        .map(|row| ForgottenRow {
+            label: SharedString::from(row.label),
+            details: SharedString::from(row.details),
+            size: SharedString::from(row.size),
+            pids: SharedString::from(row.pids),
+        })
+        .collect()
 }
 
 /// Наполняет раздел «Мусор». Замок не ждём: занят — это поиск или
@@ -2469,6 +2583,7 @@ fn apply_overview(
     main.set_memory_kernel(SharedString::from(memory.kernel));
     main.set_memory_verdict(SharedString::from(memory.verdict));
     main.set_memory_copies(SharedString::from(memory.copies));
+    replace(&main.get_forgotten(), forgotten_rows(snapshot));
 
     // Накопители и подкачка: дашборд в обзоре отвечает на вопрос «что
     // именно грузит диск», который иначе приходится выяснять на ощупь.
@@ -3127,6 +3242,7 @@ mod drawn {
         main.set_volumes(ModelRc::new(VecModel::from(Vec::<VolumeRow>::new())));
         main.set_suggestions(ModelRc::new(VecModel::from(Vec::<SuggestionRow>::new())));
         main.set_disk_users(ModelRc::new(VecModel::from(Vec::<DiskUserRow>::new())));
+        main.set_forgotten(ModelRc::new(VecModel::from(Vec::<ForgottenRow>::new())));
 
         // Третий снимок: на первом нет скоростей, на втором — разниц.
         let (snapshots, _) = collector::spawn();
@@ -3134,7 +3250,18 @@ mod drawn {
         for _ in 0..3 {
             snapshot = snapshots.recv().ok().or(snapshot);
         }
-        let snapshot = snapshot.expect("снимок");
+        let mut snapshot = snapshot.expect("снимок");
+        // У только что запущенного сборщика нет часа истории, и простоя
+        // он не знает. Для картинки подставляем два часа тишины
+        // исполнителям сценариев — иначе карточку забытых серверов
+        // не увидеть до выпуска.
+        for line in snapshot
+            .top
+            .iter_mut()
+            .filter(|line| !line.label.is_empty())
+        {
+            line.quiet_ms = line.quiet_ms.max(2 * 60 * 60 * 1000);
+        }
         let autopilot = std::cell::RefCell::new(autopilot::Autopilot::new());
         apply_overview(
             &main,
@@ -3170,6 +3297,31 @@ mod drawn {
             ppm.extend_from_slice(&[pixel.red, pixel.green, pixel.blue]);
         }
         std::fs::write(out, ppm).expect("картинка");
+    }
+
+    /// Исполнители сценариев этой машины: порты, возраст, простой.
+    /// Запуск: cargo test -p bamboo-agent probe_servers -- --ignored --nocapture
+    #[test]
+    #[ignore]
+    fn probe_servers() {
+        let (snapshots, _) = collector::spawn();
+        let mut snapshot = None;
+        for _ in 0..2 {
+            snapshot = snapshots.recv().ok().or(snapshot);
+        }
+        let snapshot = snapshot.expect("снимок");
+        let now = bamboo_core::SampleTime::wall_clock_now();
+        for line in snapshot.top.iter().filter(|line| !line.label.is_empty()) {
+            println!(
+                "{:>6} {:<10} {:>9} порты {:?} работает {:.1} ч  {}",
+                line.pid,
+                line.name,
+                line.memory.to_string(),
+                line.ports,
+                (now - line.started_unix_ms) as f64 / 3_600_000.0,
+                line.label
+            );
+        }
     }
 
     /// Раздел «Мусор» с настоящими находками этой машины. Ничего не удаляет

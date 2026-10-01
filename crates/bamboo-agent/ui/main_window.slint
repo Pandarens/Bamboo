@@ -162,6 +162,14 @@ struct JunkRow {
     done: bool,
 }
 
+// Забытый сервер разработки.
+struct ForgottenRow {
+    label: string,
+    details: string,
+    size: string,
+    pids: string,
+}
+
 struct JournalRow {
     when: string,
     action: string,
@@ -426,6 +434,10 @@ export component MainWindow inherits Window {
     in property <string> memory-kernel: "";
     in property <string> memory-verdict: "";
     in property <string> memory-copies: "";
+    // Забытые серверы разработки.
+    in property <[ForgottenRow]> forgotten: [];
+    in-out property <string> forgotten-confirm: "";
+    callback close-forgotten(string, string);
     // Мусор на диске.
     in property <[JunkRow]> junk: [];
     in property <string> junk-status: "";
@@ -1011,6 +1023,62 @@ export component MainWindow inherits Window {
                                             root.filter = root.freeze-culprits;
                                             root.apply-filter();
                                             root.section = 1;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        // --- Забытые серверы разработки ---
+                        // Слушают порт, работают дольше рабочего дня и
+                        // последний час ничего не делали. Только по кнопке:
+                        // сервер может быть нужен, решать человеку.
+                        if root.forgotten.length > 0: Rectangle {
+                            background: #2a2620; border-radius: 8px;
+                            height: forgottenbox.preferred-height;
+                            forgottenbox := VerticalLayout {
+                                padding: 12px; spacing: 6px;
+                                Text {
+                                    text: @tr("Забытые серверы разработки");
+                                    font-size: 13px; color: #e8f0ec;
+                                }
+                                Text {
+                                    text: @tr("Слушают порт, работают дольше рабочего дня и последний час ничего не делали: ни запроса из браузера, ни пересборки. Закрыть — значит вернуть их память; понадобятся — запустите снова.");
+                                    font-size: 11px; color: #7d8f86; wrap: word-wrap;
+                                }
+                                for server in root.forgotten: HorizontalLayout {
+                                    spacing: 10px;
+                                    VerticalLayout {
+                                        spacing: 2px; horizontal-stretch: 1;
+                                        Text {
+                                            text: server.label; font-size: 12px; color: #e0a44a;
+                                            wrap: word-wrap;
+                                        }
+                                        Text {
+                                            text: server.details; font-size: 11px; color: #b6c6bd;
+                                            wrap: word-wrap;
+                                        }
+                                    }
+                                    Text {
+                                        text: server.size; font-size: 13px; color: #e8f0ec;
+                                        vertical-alignment: center;
+                                    }
+                                    Rectangle {
+                                        width: 80px;
+                                        VerticalLayout {
+                                            alignment: center;
+                                            RowButton {
+                                                label: root.forgotten-confirm == server.pids ? @tr("Точно?") : @tr("Закрыть");
+                                                danger: true;
+                                                pressed => {
+                                                    if root.forgotten-confirm == server.pids {
+                                                        root.forgotten-confirm = "";
+                                                        root.close-forgotten(server.pids, server.label);
+                                                    } else {
+                                                        root.forgotten-confirm = server.pids;
+                                                    }
+                                                }
+                                            }
                                         }
                                     }
                                 }

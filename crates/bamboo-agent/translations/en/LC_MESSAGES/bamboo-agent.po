@@ -592,3 +592,15 @@ msgstr "Junk folders in your projects get a red icon and, on hover, a tip saying
 msgctxt "MainWindow"
 msgid "Выключено. Включите — и папки с мусором в ваших проектах, например target или node_modules, станут в Проводнике красными, с подсказкой при наведении."
 msgstr "Off. Turn it on and junk folders in your projects, such as target or node_modules, turn red in File Explorer, with a tip on hover."
+
+msgctxt "MainWindow"
+msgid "Забытые серверы разработки"
+msgstr "Forgotten development servers"
+
+msgctxt "MainWindow"
+msgid "Слушают порт, работают дольше рабочего дня и последний час ничего не делали: ни запроса из браузера, ни пересборки. Закрыть — значит вернуть их память; понадобятся — запустите снова."
+msgstr "They listen on a port, have run longer than a working day and did nothing in the last hour: not a single browser request, not a single rebuild. Closing them returns their memory; if you need them, start them again."
+
+msgctxt "MainWindow"
+msgid "Закрыть"
+msgstr "Close"

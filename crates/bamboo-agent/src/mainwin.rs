@@ -1605,6 +1605,130 @@ fn copy_count(count: usize) -> String {
     format!("{count} {}", bamboo_core::pick(russian, english))
 }
 
+/// Забытый сервер разработки для окна.
+pub struct ForgottenRowData {
+    /// «vite (stanica_club)».
+    pub label: String,
+    /// «node · порт 5173 · работает 1 сут 4 ч · без дела 3 ч · запустил claude».
+    pub details: String,
+    pub size: String,
+    /// Кого завершать, через запятую.
+    pub pids: String,
+}
+
+/// Забытые серверы разработки из снимка.
+pub fn forgotten_rows(snapshot: &Snapshot) -> Vec<ForgottenRowData> {
+    forgotten_servers(snapshot)
+        .into_iter()
+        .map(|(server, name)| ForgottenRowData {
+            details: forgotten_details(&server, &name),
+            size: server.bytes.to_string(),
+            pids: server
+                .close
+                .iter()
+                .map(u32::to_string)
+                .collect::<Vec<_>>()
+                .join(","),
+            label: server.label,
+        })
+        .collect()
+}
+
+/// Забытые серверы с именем образа сервера.
+pub fn forgotten_servers(
+    snapshot: &Snapshot,
+) -> Vec<(bamboo_analyze::forgotten::Forgotten, String)> {
+    use bamboo_analyze::forgotten::{forgotten, ServerFacts};
+
+    let now = bamboo_core::SampleTime::wall_clock_now();
+    let facts: Vec<ServerFacts<'_>> = snapshot
+        .top
+        .iter()
+        .map(|line| ServerFacts {
+            pid: line.pid,
+            parent_pid: line.parent_pid,
+            name: &line.name,
+            label: &line.label,
+            memory: line.memory,
+            ports: &line.ports,
+            age_ms: if line.started_unix_ms > 0 {
+                now.saturating_sub(line.started_unix_ms).max(0) as u64
+            } else {
+                0
+            },
+            quiet_ms: line.quiet_ms,
+        })
+        .collect();
+    forgotten(&facts)
+        .into_iter()
+        .map(|server| {
+            let name = snapshot
+                .top
+                .iter()
+                .find(|line| line.pid == server.pid)
+                .map(|line| line.name.clone())
+                .unwrap_or_default();
+            (server, name)
+        })
+        .collect()
+}
+
+/// «node · порт 5173 · работает 1 сут 4 ч · без дела 3 ч · запустил claude».
+pub fn forgotten_details(server: &bamboo_analyze::forgotten::Forgotten, name: &str) -> String {
+    let ports: Vec<String> = server.ports.iter().map(u16::to_string).collect();
+    let mut text = bamboo_core::say(
+        "{name} · {port} {ports} · работает {age} · без дела {quiet}",
+        "{name} · {port} {ports} · running {age} · idle {quiet}",
+        &[
+            ("name", display_name(name)),
+            (
+                "port",
+                if ports.len() == 1 {
+                    bamboo_core::pick("порт", "port")
+                } else {
+                    bamboo_core::pick("порты", "ports")
+                },
+            ),
+            ("ports", &ports.join(", ")),
+            ("age", &span(server.age_ms)),
+            ("quiet", &span(server.quiet_ms)),
+        ],
+    );
+    if let Some(launcher) = &server.launcher {
+        text.push_str(&bamboo_core::say(
+            " · запустил {launcher}",
+            " · started by {launcher}",
+            &[("launcher", display_name(launcher))],
+        ));
+    }
+    text
+}
+
+/// «1 сут 4 ч», «9 ч», «40 мин».
+fn span(ms: u64) -> String {
+    let minutes = ms / 60_000;
+    let (days, hours) = (minutes / 1440, minutes / 60 % 24);
+    if days > 0 {
+        bamboo_core::say(
+            "{days} сут {hours} ч",
+            "{days} d {hours} h",
+            &[("days", &days.to_string()), ("hours", &hours.to_string())],
+        )
+    } else if minutes >= 60 {
+        bamboo_core::say(
+            "{hours} ч",
+            "{hours} h",
+            &[("hours", &(minutes / 60).to_string())],
+        )
+    } else {
+        bamboo_core::say(
+            "{minutes} мин",
+            "{minutes} min",
+            &[("minutes", &minutes.to_string())],
+        )
+    }
+}
+
 /// Имя программы без хвоста «.exe»: в раскладке это подпись, не путь.
 fn display_name(name: &str) -> &str {
     let lower = name.to_ascii_lowercase();
@@ -1676,6 +1800,9 @@ mod tests {
             write_per_second: 0,
             resident: bamboo_core::Bytes::ZERO,
             label: String::new(),
+            started_unix_ms: 0,
+            ports: Vec::new(),
+            quiet_ms: 0,
         }
     }
 
@@ -1825,6 +1952,9 @@ mod grouping_tests {
             write_per_second: 0,
             resident: bamboo_core::Bytes::ZERO,
             label: String::new(),
+            started_unix_ms: 0,
+            ports: Vec::new(),
+            quiet_ms: 0,
         }
     }
 
@@ -2058,6 +2188,9 @@ mod expansion_tests {
             write_per_second: 0,
             resident: bamboo_core::Bytes::ZERO,
             label: String::new(),
+            started_unix_ms: 0,
+            ports: Vec::new(),
+            quiet_ms: 0,
         }
     }
 
@@ -2155,6 +2288,9 @@ mod filter_tests {
             write_per_second: 0,
             resident: bamboo_core::Bytes::ZERO,
             label: String::new(),
+            started_unix_ms: 0,
+            ports: Vec::new(),
+            quiet_ms: 0,
         }
     }
 
@@ -2229,6 +2365,9 @@ mod explain_tests {
             write_per_second: 0,
             resident: bamboo_core::Bytes::ZERO,
             label: String::new(),
+            started_unix_ms: 0,
+            ports: Vec::new(),
+            quiet_ms: 0,
         }
     }
 
@@ -2777,6 +2916,37 @@ mod translation_tests {
             "{}",
             view.apps
         );
+    }
+
+    #[test]
+    fn a_forgotten_dev_server_gets_a_row_with_everything_to_close() {
+        bamboo_core::set_language(bamboo_core::Language::Russian);
+        const HOUR: i64 = 60 * 60 * 1000;
+        let now = bamboo_core::SampleTime::wall_clock_now();
+        let mut lines = vec![
+            launched("claude.exe", 1, 0, "", 500),
+            launched("cmd.exe", 10, 1, "", 4),
+            launched("node.exe", 11, 10, "npm run dev", 59),
+            launched("node.exe", 13, 11, "vite (stanica_club)", 813),
+        ];
+        lines[3].ports = vec![5173];
+        lines[3].started_unix_ms = now - 28 * HOUR;
+        lines[3].quiet_ms = 3 * 60 * 60 * 1000;
+        // Обёртка npm тоже без дела: она лишь ждёт, пока vite закончит.
+        lines[2].quiet_ms = 3 * 60 * 60 * 1000;
+        let snapshot = crate::collector::Snapshot {
+            top: lines,
+            ..Default::default()
+        };
+        let rows = super::forgotten_rows(&snapshot);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].label, "vite (stanica_club)");
+        assert_eq!(rows[0].pids, "11,13", "закрывается вместе с обёрткой npm");
+        let details = &rows[0].details;
+        assert!(details.contains("порт 5173"), "{details}");
+        assert!(details.contains("работает 1 сут 4 ч"), "{details}");
+        assert!(details.contains("без дела 3 ч"), "{details}");
+        assert!(details.contains("запустил claude"), "{details}");
     }
 
     #[test]

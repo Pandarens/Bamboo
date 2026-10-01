@@ -58,6 +58,13 @@ pub struct ProcessLine {
     /// Что выполняет исполнитель сценариев: «vite (stanica_club)» у node.exe.
     /// Пусто у обычных программ — им хватает своего имени.
     pub label: String,
+    /// Когда процесс запущен, миллисекунды эпохи Unix. Ноль — неизвестно.
+    pub started_unix_ms: i64,
+    /// Какие порты процесс слушает. Пусто почти у всех.
+    pub ports: Vec<u16>,
+    /// Сколько последних минут подряд исполнитель сценариев ничего не делал,
+    /// в миллисекундах. Считается только для них: у прочих ноль.
+    pub quiet_ms: u64,
 }
 
 /// Снимок для интерфейса.
@@ -216,6 +223,11 @@ const PAGEFILES_EVERY: std::time::Duration = std::time::Duration::from_secs(30);
 /// памяти на процесс.
 const BROWSER_ROLES_EVERY: std::time::Duration = std::time::Duration::from_secs(30);
 
+/// Сколько процессора в минуту ещё считается простоем: полсекунды, то есть
+/// меньше процента ядра. Сервер, отвечающий браузеру или пересобирающий
+/// изменённое, тратит заметно больше; ожидающий — почти ноль.
+const QUIET_CPU_MS: u32 = 500;
+
 /// Как часто записывать размер пула ядра для слежения за ростом.
 ///
 /// Раз в минуту: утечка драйвера растёт часами, и чаще мерить незачем.
@@ -248,6 +260,12 @@ fn run(sender: Sender<Snapshot>, visible: WidgetVisible) {
     // полминуты незачем.
     let mut labels: std::collections::HashMap<u32, Option<String>> =
         std::collections::HashMap::new();
+    // Кто какой порт слушает: по нему сервер разработки отличается от
+    // прочего node.exe. Таблица одна на всю машину, читается за раз.
+    let mut ports: std::collections::HashMap<u32, Vec<u16>> = std::collections::HashMap::new();
+    // Сколько минут подряд исполнители сценариев простаивают. Пересчёт
+    // вместе с трендами роста: ряд минутный, чаще он не меняется.
+    let mut quiet: std::collections::HashMap<u32, u64> = std::collections::HashMap::new();
     // Подвисания: копим их непрерывно. Смотреть надо в момент подвисания,
     // а он короткий — пока человек откроет окно, всё уже прошло.
     let mut freezes = bamboo_analyze::FreezeLog::new();
@@ -317,12 +335,21 @@ fn run(sender: Sender<Snapshot>, visible: WidgetVisible) {
                 }
             }
             growth_at = Some(std::time::Instant::now());
+
+            quiet.clear();
+            for process in collector.table().iter() {
+                if bamboo_sys::is_script_host(&process.image_name) {
+                    let minutes = process.level1.quiet_minutes(QUIET_CPU_MS);
+                    quiet.insert(process.pid(), u64::from(minutes) * 60_000);
+                }
+            }
         }
 
         // Состав браузеров: читаем редко и только для них.
         if roles_at.is_none_or(|at| at.elapsed() >= BROWSER_ROLES_EVERY) {
             refresh_browser_roles(collector.table(), &mut roles);
             refresh_script_labels(collector.table(), &mut labels);
+            ports = bamboo_sys::net::listening_ports();
             roles_at = Some(std::time::Instant::now());
         }
 
@@ -372,6 +399,9 @@ fn run(sender: Sender<Snapshot>, visible: WidgetVisible) {
                     .cloned()
                     .flatten()
                     .unwrap_or_default(),
+                started_unix_ms: bamboo_core::time::filetime_to_unix_ms(process.id.create_time),
+                ports: ports.get(&process.pid()).cloned().unwrap_or_default(),
+                quiet_ms: quiet.get(&process.pid()).copied().unwrap_or(0),
             })
             .collect();
 
@@ -862,6 +892,9 @@ mod pressure_tests {
             read_per_second: 0,
             write_per_second: write,
             label: String::new(),
+            started_unix_ms: 0,
+            ports: Vec::new(),
+            quiet_ms: 0,
         }
     }
 
