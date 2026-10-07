@@ -1211,6 +1211,8 @@ pub struct MemoryView {
     pub verdict: String,
     /// Одинаковые копии одного и того же сценария, если их набралось много.
     pub copies: String,
+    /// Что накопилось за долгую работу без перезагрузки.
+    pub uptime: String,
 }
 
 /// Раскладывает память снимка по частям.
@@ -1364,6 +1366,7 @@ pub fn memory_view(snapshot: &Snapshot) -> MemoryView {
         kernel,
         verdict,
         copies: copies_line(&snapshot.top),
+        uptime: uptime_line(snapshot),
     }
 }
 
@@ -1594,6 +1597,59 @@ fn copies_line(processes: &[crate::collector::ProcessLine]) -> String {
     text
 }
 
+/// С какого срока без перезагрузки о накопленном стоит говорить. Неделя:
+/// меньше — накопиться не успевает ничего заметного.
+const LONG_UPTIME_MS: u64 = 7 * 24 * 60 * 60 * 1000;
+
+/// Строка о том, что накопилось за долгую работу без перезагрузки.
+///
+/// С живой машины: компьютер работал круглосуточно 19 дней. Неподкачиваемая
+/// память ядра — та, что всегда лежит в ОЗУ, — дошла до 866 МБ, Проводник
+/// держал 650 МБ и 18 тысяч дескрипторов. Ни одно из этого не утечка по
+/// меркам суток, но за три недели набегает гигабайт. Говорим только
+/// с числами и только когда есть что назвать.
+fn uptime_line(snapshot: &Snapshot) -> String {
+    if snapshot.uptime_ms < LONG_UPTIME_MS {
+        return String::new();
+    }
+    let mut piles: Vec<String> = Vec::new();
+    if let Some(pool) = snapshot
+        .system_memory
+        .pool_nonpaged
+        .filter(|pool| pool.as_u64() >= 512 * 1024 * 1024)
+    {
+        piles.push(bamboo_core::say(
+            "память ядра и драйверов, которая всегда лежит в ОЗУ, — {pool}",
+            "kernel and driver memory that always stays in RAM — {pool}",
+            &[("pool", &pool.to_string())],
+        ));
+    }
+    if let Some(explorer) = snapshot.top.iter().find(|line| {
+        line.name.eq_ignore_ascii_case("explorer.exe")
+            && (line.memory.as_u64() >= 400 * 1024 * 1024 || line.handles >= 10_000)
+    }) {
+        piles.push(bamboo_core::say(
+            "Проводник — {memory} и {handles} дескрипторов",
+            "File Explorer — {memory} and {handles} handles",
+            &[
+                ("memory", &explorer.memory.to_string()),
+                ("handles", &explorer.handles.to_string()),
+            ],
+        ));
+    }
+    if piles.is_empty() {
+        return String::new();
+    }
+    bamboo_core::say(
+        "Компьютер работает без перезагрузки {days} сут. За это время накопилось: {piles}. Перезагрузка возвращает это разом — ядро и Проводник начинают заново.",
+        "The computer has run without a restart for {days} days. Meanwhile this has piled up: {piles}. A restart returns it all at once — the kernel and File Explorer start afresh.",
+        &[
+            ("days", &(snapshot.uptime_ms / (24 * 60 * 60 * 1000)).to_string()),
+            ("piles", &piles.join("; ")),
+        ],
+    )
+}
+
 /// «5 копий», «2 копии», «1 копия».
 fn copy_count(count: usize) -> String {
     let russian = match (count % 10, count % 100) {
@@ -1657,6 +1713,9 @@ pub fn forgotten_servers(
                 0
             },
             quiet_ms: line.quiet_ms,
+            busy_ms: line.busy_ms,
+            cpu_percent: line.cpu_percent,
+            handles: line.handles,
         })
         .collect();
     forgotten(&facts)
@@ -1675,25 +1734,47 @@ pub fn forgotten_servers(
 
 /// «node · порт 5173 · работает 1 сут 4 ч · без дела 3 ч · запустил claude».
 pub fn forgotten_details(server: &bamboo_analyze::forgotten::Forgotten, name: &str) -> String {
+    use bamboo_analyze::forgotten::Why;
+
     let ports: Vec<String> = server.ports.iter().map(u16::to_string).collect();
-    let mut text = bamboo_core::say(
-        "{name} · {port} {ports} · работает {age} · без дела {quiet}",
-        "{name} · {port} {ports} · running {age} · idle {quiet}",
-        &[
-            ("name", display_name(name)),
-            (
-                "port",
-                if ports.len() == 1 {
-                    bamboo_core::pick("порт", "port")
-                } else {
-                    bamboo_core::pick("порты", "ports")
-                },
-            ),
-            ("ports", &ports.join(", ")),
-            ("age", &span(server.age_ms)),
-            ("quiet", &span(server.quiet_ms)),
-        ],
-    );
+    let port = if ports.len() == 1 {
+        bamboo_core::pick("порт", "port")
+    } else {
+        bamboo_core::pick("порты", "ports")
+    };
+    let mut text = match server.why {
+        Why::Idle => bamboo_core::say(
+            "{name} · {port} {ports} · работает {age} · без дела {quiet}",
+            "{name} · {port} {ports} · running {age} · idle {quiet}",
+            &[
+                ("name", display_name(name)),
+                ("port", port),
+                ("ports", &ports.join(", ")),
+                ("age", &span(server.age_ms)),
+                ("quiet", &span(server.quiet_ms)),
+            ],
+        ),
+        Why::Spinning { cores } => bamboo_core::say(
+            "{name} · {port} {ports} · без перерыва занимает {cores} ядра уже {busy} — похоже на холостой цикл, перезапуск обычно лечит",
+            "{name} · {port} {ports} · has kept {cores} cores busy non-stop for {busy} — looks like an idle loop; a restart usually cures it",
+            &[
+                ("name", display_name(name)),
+                ("port", port),
+                ("ports", &ports.join(", ")),
+                ("cores", &format!("{cores:.1}")),
+                ("busy", &span(server.busy_ms)),
+            ],
+        ),
+    };
+    // Тысячи дескрипторов у сервера разработки — тоже признак утечки:
+    // открытые и не закрытые наблюдатели за файлами, соединения.
+    if server.handles >= 10_000 {
+        text.push_str(&bamboo_core::say(
+            " · держит {handles} дескрипторов",
+            " · holds {handles} handles",
+            &[("handles", &server.handles.to_string())],
+        ));
+    }
     if let Some(launcher) = &server.launcher {
         text.push_str(&bamboo_core::say(
             " · запустил {launcher}",
@@ -1803,6 +1884,8 @@ mod tests {
             started_unix_ms: 0,
             ports: Vec::new(),
             quiet_ms: 0,
+            busy_ms: 0,
+            handles: 0,
         }
     }
 
@@ -1955,6 +2038,8 @@ mod grouping_tests {
             started_unix_ms: 0,
             ports: Vec::new(),
             quiet_ms: 0,
+            busy_ms: 0,
+            handles: 0,
         }
     }
 
@@ -2191,6 +2276,8 @@ mod expansion_tests {
             started_unix_ms: 0,
             ports: Vec::new(),
             quiet_ms: 0,
+            busy_ms: 0,
+            handles: 0,
         }
     }
 
@@ -2291,6 +2378,8 @@ mod filter_tests {
             started_unix_ms: 0,
             ports: Vec::new(),
             quiet_ms: 0,
+            busy_ms: 0,
+            handles: 0,
         }
     }
 
@@ -2368,6 +2457,8 @@ mod explain_tests {
             started_unix_ms: 0,
             ports: Vec::new(),
             quiet_ms: 0,
+            busy_ms: 0,
+            handles: 0,
         }
     }
 
@@ -2947,6 +3038,51 @@ mod translation_tests {
         assert!(details.contains("работает 1 сут 4 ч"), "{details}");
         assert!(details.contains("без дела 3 ч"), "{details}");
         assert!(details.contains("запустил claude"), "{details}");
+    }
+
+    #[test]
+    fn a_spinning_dev_server_says_so_with_numbers() {
+        bamboo_core::set_language(bamboo_core::Language::Russian);
+        let mut lines = vec![
+            launched("claude.exe", 1, 0, "", 500),
+            launched("node.exe", 13, 1, "vite (stanica_club)", 1513),
+        ];
+        lines[1].ports = vec![5173];
+        lines[1].busy_ms = 4 * 24 * 60 * 60 * 1000;
+        lines[1].cpu_percent = 143.0;
+        lines[1].handles = 12_272;
+        let snapshot = crate::collector::Snapshot {
+            top: lines,
+            ..Default::default()
+        };
+        let rows = super::forgotten_rows(&snapshot);
+        assert_eq!(rows.len(), 1);
+        let details = &rows[0].details;
+        assert!(details.contains("1.4 ядра уже 4 сут 0 ч"), "{details}");
+        assert!(details.contains("холостой цикл"), "{details}");
+        assert!(details.contains("12272 дескрипторов"), "{details}");
+    }
+
+    #[test]
+    fn a_long_uptime_names_what_piled_up() {
+        bamboo_core::set_language(bamboo_core::Language::Russian);
+        const DAY: u64 = 24 * 60 * 60 * 1000;
+        let mut explorer = launched("explorer.exe", 3796, 1, "", 648);
+        explorer.handles = 18_174;
+        let mut snapshot = crate::collector::Snapshot {
+            top: vec![explorer],
+            uptime_ms: 19 * DAY + 3_600_000,
+            ..Default::default()
+        };
+        snapshot.system_memory.pool_nonpaged = Some(bamboo_core::Bytes::from_mib(866));
+        let line = super::uptime_line(&snapshot);
+        assert!(line.contains("19 сут"), "{line}");
+        assert!(line.contains("866"), "{line}");
+        assert!(line.contains("18174 дескрипторов"), "{line}");
+
+        // Неделя не прошла — молчим.
+        snapshot.uptime_ms = 3 * DAY;
+        assert_eq!(super::uptime_line(&snapshot), "");
     }
 
     #[test]

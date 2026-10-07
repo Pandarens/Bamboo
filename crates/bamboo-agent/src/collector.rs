@@ -65,6 +65,11 @@ pub struct ProcessLine {
     /// Сколько последних минут подряд исполнитель сценариев ничего не делал,
     /// в миллисекундах. Считается только для них: у прочих ноль.
     pub quiet_ms: u64,
+    /// Сколько последних минут исполнитель сценариев без перерыва занят,
+    /// в миллисекундах. У прочих ноль.
+    pub busy_ms: u64,
+    /// Сколько дескрипторов держит процесс.
+    pub handles: u32,
 }
 
 /// Снимок для интерфейса.
@@ -125,6 +130,8 @@ pub struct Snapshot {
     pub gpu_shared_by_pid: Vec<(u32, Bytes)>,
     /// Как растёт невыгружаемый пул ядра. `None` — не растёт или рано судить.
     pub kernel_trend: Option<bamboo_analyze::MemoryTrend>,
+    /// Сколько система работает с последней загрузки, миллисекунды.
+    pub uptime_ms: u64,
     /// Сколько памяти программы запросили всего — вместе с тем, что лежит
     /// в подкачке. Больше физической — памяти не хватает по-настоящему.
     pub commit_used: Bytes,
@@ -228,6 +235,13 @@ const BROWSER_ROLES_EVERY: std::time::Duration = std::time::Duration::from_secs(
 /// изменённое, тратит заметно больше; ожидающий — почти ноль.
 const QUIET_CPU_MS: u32 = 500;
 
+/// Сколько процессора в минуту — уже «занят»: полминуты, половина ядра.
+/// Сборщик в холостом цикле держит больше, ожидающий — почти ноль.
+const SPIN_CPU_MS: u32 = 30_000;
+
+/// Сколько минут затишья подряд не рвут серию занятости.
+const SPIN_TOLERANCE: u32 = 5;
+
 /// Как часто записывать размер пула ядра для слежения за ростом.
 ///
 /// Раз в минуту: утечка драйвера растёт часами, и чаще мерить незачем.
@@ -266,6 +280,7 @@ fn run(sender: Sender<Snapshot>, visible: WidgetVisible) {
     // Сколько минут подряд исполнители сценариев простаивают. Пересчёт
     // вместе с трендами роста: ряд минутный, чаще он не меняется.
     let mut quiet: std::collections::HashMap<u32, u64> = std::collections::HashMap::new();
+    let mut busy: std::collections::HashMap<u32, u64> = std::collections::HashMap::new();
     // Подвисания: копим их непрерывно. Смотреть надо в момент подвисания,
     // а он короткий — пока человек откроет окно, всё уже прошло.
     let mut freezes = bamboo_analyze::FreezeLog::new();
@@ -337,10 +352,13 @@ fn run(sender: Sender<Snapshot>, visible: WidgetVisible) {
             growth_at = Some(std::time::Instant::now());
 
             quiet.clear();
+            busy.clear();
             for process in collector.table().iter() {
                 if bamboo_sys::is_script_host(&process.image_name) {
                     let minutes = process.level1.quiet_minutes(QUIET_CPU_MS);
                     quiet.insert(process.pid(), u64::from(minutes) * 60_000);
+                    let minutes = process.level1.busy_streak(SPIN_CPU_MS, SPIN_TOLERANCE);
+                    busy.insert(process.pid(), u64::from(minutes) * 60_000);
                 }
             }
         }
@@ -402,6 +420,8 @@ fn run(sender: Sender<Snapshot>, visible: WidgetVisible) {
                 started_unix_ms: bamboo_core::time::filetime_to_unix_ms(process.id.create_time),
                 ports: ports.get(&process.pid()).cloned().unwrap_or_default(),
                 quiet_ms: quiet.get(&process.pid()).copied().unwrap_or(0),
+                busy_ms: busy.get(&process.pid()).copied().unwrap_or(0),
+                handles: process.handles,
             })
             .collect();
 
@@ -572,6 +592,7 @@ fn run(sender: Sender<Snapshot>, visible: WidgetVisible) {
                 .map(|memory| memory.shared_by_pid)
                 .unwrap_or_default(),
             kernel_trend,
+            uptime_ms: bamboo_sys::clock::monotonic_ms(),
             commit_used: tick.system.memory.commit_used,
         };
 
@@ -895,6 +916,8 @@ mod pressure_tests {
             started_unix_ms: 0,
             ports: Vec::new(),
             quiet_ms: 0,
+            busy_ms: 0,
+            handles: 0,
         }
     }
 

@@ -433,6 +433,7 @@ export component MainWindow inherits Window {
     in property <string> memory-graphics: "";
     in property <string> memory-kernel: "";
     in property <string> memory-verdict: "";
+    in property <string> memory-uptime: "";
     in property <string> memory-copies: "";
     // Забытые серверы разработки.
     in property <[ForgottenRow]> forgotten: [];
@@ -955,6 +956,10 @@ export component MainWindow inherits Window {
                                     text: root.memory-verdict; font-size: 12px; color: #e0a44a;
                                     wrap: word-wrap;
                                 }
+                                if root.memory-uptime != "": Text {
+                                    text: root.memory-uptime; font-size: 11px; color: #e0a44a;
+                                    wrap: word-wrap;
+                                }
                                 if root.memory-apps != "": Text {
                                     text: root.memory-apps; font-size: 11px; color: #b6c6bd;
                                     wrap: word-wrap;
@@ -1039,11 +1044,11 @@ export component MainWindow inherits Window {
                             forgottenbox := VerticalLayout {
                                 padding: 12px; spacing: 6px;
                                 Text {
-                                    text: @tr("Забытые серверы разработки");
+                                    text: @tr("Серверы разработки, которые стоит закрыть");
                                     font-size: 13px; color: #e8f0ec;
                                 }
                                 Text {
-                                    text: @tr("Слушают порт, работают дольше рабочего дня и последний час ничего не делали: ни запроса из браузера, ни пересборки. Закрыть — значит вернуть их память; понадобятся — запустите снова.");
+                                    text: @tr("Одни забыты и простаивают: последний час ни запроса из браузера, ни пересборки. Другие часами без перерыва крутят процессор вхолостую — так выглядит зависший сборщик. Закрыть — вернуть память и процессор; понадобятся — запустите снова.");
                                     font-size: 11px; color: #7d8f86; wrap: word-wrap;
                                 }
                                 for server in root.forgotten: HorizontalLayout {

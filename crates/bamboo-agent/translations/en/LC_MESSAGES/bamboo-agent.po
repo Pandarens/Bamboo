@@ -594,12 +594,12 @@ msgid "Выключено. Включите — и папки с мусором 
 msgstr "Off. Turn it on and junk folders in your projects, such as target or node_modules, turn red in File Explorer, with a tip on hover."
 
 msgctxt "MainWindow"
-msgid "Забытые серверы разработки"
-msgstr "Forgotten development servers"
+msgid "Серверы разработки, которые стоит закрыть"
+msgstr "Development servers worth closing"
 
 msgctxt "MainWindow"
-msgid "Слушают порт, работают дольше рабочего дня и последний час ничего не делали: ни запроса из браузера, ни пересборки. Закрыть — значит вернуть их память; понадобятся — запустите снова."
-msgstr "They listen on a port, have run longer than a working day and did nothing in the last hour: not a single browser request, not a single rebuild. Closing them returns their memory; if you need them, start them again."
+msgid "Одни забыты и простаивают: последний час ни запроса из браузера, ни пересборки. Другие часами без перерыва крутят процессор вхолостую — так выглядит зависший сборщик. Закрыть — вернуть память и процессор; понадобятся — запустите снова."
+msgstr "Some are forgotten and idle: not a single browser request or rebuild in the last hour. Others have spun the processor non-stop for hours — that is what a stuck bundler looks like. Closing returns memory and processor; if you need them, start them again."
 
 msgctxt "MainWindow"
 msgid "Закрыть"

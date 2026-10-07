@@ -2077,31 +2077,50 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                     }
                 }
 
-                // Забытый сервер разработки — говорим, только когда памяти
-                // не хватает: в остальное время он никому не мешает. Раз
+                // Сервер разработки, который стоит закрыть. Забытый и
+                // простаивающий — только когда памяти не хватает: в остальное
+                // время он никому не мешает. Крутящийся вхолостую — всегда:
+                // процессор, нагрев и шум он тратит при любой памяти. Раз
                 // в сутки на сервер, как и об утечке.
                 if let Some(notifier) = &notifier {
-                    if snapshot.memory_pressure() >= FORGOTTEN_NOTICE_PRESSURE
-                        && bamboo_sys::notification_state().may_notify()
-                    {
+                    if bamboo_sys::notification_state().may_notify() {
+                        let squeezed = snapshot.memory_pressure() >= FORGOTTEN_NOTICE_PRESSURE;
                         let server = mainwin::forgotten_servers(&snapshot)
                             .into_iter()
                             .find(|(server, _)| {
-                                forgotten_notified
-                                    .get(&server.label)
-                                    .is_none_or(|at| at.elapsed() >= LEAK_NOTICE_EVERY)
+                                let spinning = matches!(
+                                    server.why,
+                                    bamboo_analyze::forgotten::Why::Spinning { .. }
+                                );
+                                (spinning || squeezed)
+                                    && forgotten_notified
+                                        .get(&server.label)
+                                        .is_none_or(|at| at.elapsed() >= LEAK_NOTICE_EVERY)
                             });
                         if let Some((server, name)) = server {
                             forgotten_notified
                                 .insert(server.label.clone(), std::time::Instant::now());
-                            let text = format!(
-                                "{} держит {} и последний час ничего не делал: {}. Закрыть можно в Bamboo, на «Обзоре».",
-                                server.label,
-                                server.bytes,
-                                mainwin::forgotten_details(&server, &name),
-                            );
+                            let (title, text) = match server.why {
+                                bamboo_analyze::forgotten::Why::Spinning { .. } => (
+                                    "Bamboo: сервер разработки крутится вхолостую",
+                                    format!(
+                                        "{}: {}. Закрыть можно в Bamboo, на «Обзоре».",
+                                        server.label,
+                                        mainwin::forgotten_details(&server, &name),
+                                    ),
+                                ),
+                                bamboo_analyze::forgotten::Why::Idle => (
+                                    "Bamboo: забытый сервер разработки",
+                                    format!(
+                                        "{} держит {} и последний час ничего не делал: {}. Закрыть можно в Bamboo, на «Обзоре».",
+                                        server.label,
+                                        server.bytes,
+                                        mainwin::forgotten_details(&server, &name),
+                                    ),
+                                ),
+                            };
                             let _ = notifier.show(
-                                "Bamboo: забытый сервер разработки",
+                                title,
                                 &shorten(&text, 240),
                                 bamboo_sys::Importance::Notice,
                             );
@@ -2582,6 +2601,7 @@ fn apply_overview(
     main.set_memory_graphics(SharedString::from(memory.graphics));
     main.set_memory_kernel(SharedString::from(memory.kernel));
     main.set_memory_verdict(SharedString::from(memory.verdict));
+    main.set_memory_uptime(SharedString::from(memory.uptime));
     main.set_memory_copies(SharedString::from(memory.copies));
     replace(&main.get_forgotten(), forgotten_rows(snapshot));
 
@@ -3260,7 +3280,12 @@ mod drawn {
             .iter_mut()
             .filter(|line| !line.label.is_empty())
         {
-            line.quiet_ms = line.quiet_ms.max(2 * 60 * 60 * 1000);
+            // Занятым — четыре часа без перерыва: так виден и холостой ход.
+            if line.cpu_percent >= 50.0 {
+                line.busy_ms = line.busy_ms.max(4 * 60 * 60 * 1000);
+            } else {
+                line.quiet_ms = line.quiet_ms.max(2 * 60 * 60 * 1000);
+            }
         }
         let autopilot = std::cell::RefCell::new(autopilot::Autopilot::new());
         apply_overview(
