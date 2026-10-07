@@ -28,6 +28,11 @@ pub const QUIET_ENOUGH_MS: u64 = 60 * 60 * 1000;
 /// С какого размера о сервере стоит говорить.
 pub const WORTH: Bytes = Bytes(100 * 1024 * 1024);
 
+/// Сколько сервер должен без перерыва жечь процессор, чтобы это был
+/// холостой ход, а не работа. Три часа: самая долгая пересборка — минуты,
+/// а сервер, который три часа подряд держит полядра, ничего не собирает.
+pub const SPINNING_MS: u64 = 3 * 60 * 60 * 1000;
+
 /// Оболочки и обёртки: они запускают, но сами ничего не значат. Ища, кто
 /// запустил сервер, их проходим насквозь.
 const PASS_THROUGH: &[&str] = &[
@@ -57,11 +62,31 @@ pub struct ServerFacts<'a> {
     pub age_ms: u64,
     /// Сколько последних минут подряд он ничего не делал, в миллисекундах.
     pub quiet_ms: u64,
+    /// Сколько последних минут он без перерыва занят, в миллисекундах.
+    pub busy_ms: u64,
+    /// Сколько процессора занимает сейчас, в процентах одного ядра.
+    pub cpu_percent: f32,
+    /// Сколько дескрипторов держит.
+    pub handles: u32,
+}
+
+/// Почему сервер стоит закрыть.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Why {
+    /// Забыт и простаивает: держит память, ничего не делая.
+    Idle,
+    /// Без перерыва жжёт процессор — холостой цикл. `cores` — сколько
+    /// ядер занимает сейчас.
+    Spinning { cores: f32 },
 }
 
 /// Забытый сервер.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct Forgotten {
+    pub why: Why,
+    /// Сколько он уже без перерыва занят — для холостого хода.
+    pub busy_ms: u64,
+    pub handles: u32,
     pub pid: u32,
     pub label: String,
     pub ports: Vec<u16>,
@@ -162,9 +187,17 @@ pub fn forgotten(processes: &[ServerFacts<'_>]) -> Vec<Forgotten> {
             .min()
             .unwrap_or(0);
         let bytes = Bytes(tree.iter().map(|facts| facts.memory.as_u64()).sum());
-        if server.age_ms < OLD_ENOUGH_MS || quiet_ms < QUIET_ENOUGH_MS || bytes < WORTH {
+        // Холостой ход — по самому серверу: у Jupyter долгий расчёт идёт
+        // в дочернем ядре, и это работа, а не зависание.
+        let why = if server.busy_ms >= SPINNING_MS {
+            Why::Spinning {
+                cores: server.cpu_percent / 100.0,
+            }
+        } else if server.age_ms >= OLD_ENOUGH_MS && quiet_ms >= QUIET_ENOUGH_MS && bytes >= WORTH {
+            Why::Idle
+        } else {
             continue;
-        }
+        };
 
         let launcher = chain
             .iter()
@@ -176,6 +209,9 @@ pub fn forgotten(processes: &[ServerFacts<'_>]) -> Vec<Forgotten> {
             .map(|parent| parent.name.to_string());
 
         found.push(Forgotten {
+            why,
+            busy_ms: server.busy_ms,
+            handles: server.handles,
             pid: server.pid,
             label: server.label.to_string(),
             ports: server.ports.to_vec(),
@@ -214,6 +250,9 @@ mod tests {
             ports,
             age_ms: 30 * HOUR,
             quiet_ms: 3 * HOUR,
+            busy_ms: 0,
+            cpu_percent: 0.0,
+            handles: 200,
         }
     }
 
@@ -315,6 +354,31 @@ mod tests {
         assert_eq!(found.len(), 1, "{found:?}");
         assert_eq!(found[0].close, vec![3, 4]);
         assert_eq!(found[0].launcher.as_deref(), Some("WindowsTerminal.exe"));
+    }
+
+    #[test]
+    fn a_spinning_server_is_found_even_though_someone_is_connected() {
+        // Живой случай: vite четверо суток держал полтора ядра и 12 тысяч
+        // дескрипторов, а к нему были подключены забытые вкладки.
+        let mut processes = the_live_machine();
+        processes[4].quiet_ms = 0;
+        processes[4].busy_ms = 4 * 24 * HOUR;
+        processes[4].cpu_percent = 143.0;
+        processes[4].handles = 12_272;
+        let found = forgotten(&processes);
+        assert_eq!(found.len(), 1, "{found:?}");
+        assert_eq!(found[0].why, Why::Spinning { cores: 1.43 });
+        assert_eq!(found[0].close, vec![11, 12, 13]);
+    }
+
+    #[test]
+    fn a_long_rebuild_is_not_spinning() {
+        // Полчаса сборки после большого обновления — работа.
+        let mut processes = the_live_machine();
+        processes[4].quiet_ms = 0;
+        processes[4].busy_ms = 30 * 60 * 1000;
+        processes[4].cpu_percent = 180.0;
+        assert!(forgotten(&processes).is_empty());
     }
 
     #[test]

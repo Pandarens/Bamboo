@@ -212,6 +212,30 @@ impl Level1Series {
         })
     }
 
+    /// Сколько последних минут процесс был занят без перерыва: не меньше
+    /// `cpu_ms` процессора за минуту. Короткие паузы до `tolerance` минут
+    /// подряд серию не рвут — сборщик, крутящийся вхолостую, всё равно
+    /// иногда ждёт таймера.
+    ///
+    /// Написано по живому случаю: vite четверо суток без перерыва держал
+    /// полтора ядра, и признак «без дела» его, конечно, не находил.
+    pub fn busy_streak(&self, cpu_ms: u32, tolerance: u32) -> u32 {
+        let (mut streak, mut gap) = (0u32, 0u32);
+        for minute in self.history.iter() {
+            if minute.cpu_ms >= cpu_ms {
+                streak += gap + 1;
+                gap = 0;
+            } else {
+                gap += 1;
+                if gap > tolerance {
+                    streak = 0;
+                    gap = 0;
+                }
+            }
+        }
+        streak
+    }
+
     /// Временной ряд приватной памяти для анализатора роста: пары
     /// «время, байты». Берётся среднее за минуту.
     pub fn private_series(&self) -> Vec<(u64, f64)> {
@@ -234,6 +258,35 @@ mod tests {
             read_kib: 10,
             write_kib: 20,
         }
+    }
+
+    #[test]
+    fn a_busy_streak_survives_short_pauses_but_not_long_ones() {
+        let mut series = Level1Series::new();
+        let busy = point(40_000, 1000);
+        let idle = point(0, 1000);
+        let mut second = 0u64;
+        let mut minute = |series: &mut Level1Series, p: &MetricPoint| {
+            series.push(second * 1000, p);
+            second += 60;
+        };
+        // Час покоя, затем десять минут работы, пауза в две, ещё пять.
+        for _ in 0..60 {
+            minute(&mut series, &idle);
+        }
+        for _ in 0..10 {
+            minute(&mut series, &busy);
+        }
+        for _ in 0..2 {
+            minute(&mut series, &idle);
+        }
+        for _ in 0..5 {
+            minute(&mut series, &busy);
+        }
+        minute(&mut series, &busy); // закрывает последнюю минуту
+        assert_eq!(series.busy_streak(30_000, 3), 17);
+        // Пауза длиннее допуска — серия начинается заново.
+        assert_eq!(series.busy_streak(30_000, 1), 5);
     }
 
     #[test]
