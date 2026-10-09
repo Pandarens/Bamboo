@@ -337,6 +337,15 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         }
     });
 
+    // Задача автозапуска, заведённая прежней версией, поднимала Bamboo только
+    // при входе, останавливала через 72 часа и на батарее. Обновляем её сами:
+    // человек не знает, что она устарела. В фоне — это вызов планировщика.
+    if bamboo_sys::is_elevated() {
+        std::thread::spawn(|| {
+            let _ = bamboo_sys::refresh_scheduled_task();
+        });
+    }
+
     // Температуры: диски из SMART и термозоны там, где они есть. Чтение
     // SMART открывает устройство и обращается к драйверу — поэтому в фоне
     // и раз в пять минут, а не на каждом тике.
@@ -1615,6 +1624,11 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     let shield_holds: std::rc::Rc<std::cell::RefCell<autopilot::ShieldHolds>> =
         std::rc::Rc::new(std::cell::RefCell::new(autopilot::ShieldHolds::default()));
     let tick_shield = shield_holds.clone();
+    // Серверы разработки, которые автоматика перевела в экономичный режим
+    // за холостой ход: номер процесса — номер записи журнала.
+    let spin_holds: std::rc::Rc<std::cell::RefCell<std::collections::HashMap<u32, i64>>> =
+        std::rc::Rc::new(std::cell::RefCell::new(std::collections::HashMap::new()));
+    let tick_spin = spin_holds.clone();
     let mut shield = bamboo_analyze::shield::Shield::new();
     // Когда программа последний раз была на переднем плане — по имени,
     // в миллисекундах от запуска агента. Нет записи — считаем с запуска:
@@ -2077,6 +2091,37 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                     }
                 }
 
+                // Сервер, крутящийся вхолостую, автоматика переводит
+                // в экономичный режим: процессор уйдёт тому, с чем работает
+                // человек. Держим, пока процесс жив, — иначе режим снимался
+                // бы, как только сервер под ним притих, и всё начиналось
+                // заново. Выключили автоматику — возвращаем как было.
+                {
+                    let enabled = tick_pilot.borrow().enabled();
+                    let mut held = tick_spin.borrow_mut();
+                    if enabled {
+                        for (server, name) in mainwin::forgotten_servers(&snapshot) {
+                            if !matches!(server.why, bamboo_analyze::forgotten::Why::Spinning { .. })
+                                || held.contains_key(&server.pid)
+                            {
+                                continue;
+                            }
+                            if let Some(journal_id) = actions::apply_automatically(
+                                server.pid,
+                                &name,
+                                actions::RowAction::EcoQos,
+                            ) {
+                                held.insert(server.pid, journal_id);
+                            }
+                        }
+                        held.retain(|pid, _| snapshot.top.iter().any(|line| line.pid == *pid));
+                    } else {
+                        for (_, journal_id) in held.drain() {
+                            actions::revert_automatically(journal_id, "автоматика выключена");
+                        }
+                    }
+                }
+
                 // Сервер разработки, который стоит закрыть. Забытый и
                 // простаивающий — только когда памяти не хватает: в остальное
                 // время он никому не мешает. Крутящийся вхолостую — всегда:
@@ -2104,9 +2149,14 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                                 bamboo_analyze::forgotten::Why::Spinning { .. } => (
                                     "Bamboo: сервер разработки крутится вхолостую",
                                     format!(
-                                        "{}: {}. Закрыть можно в Bamboo, на «Обзоре».",
+                                        "{}: {}.{} Закрыть можно в Bamboo, на «Обзоре».",
                                         server.label,
                                         mainwin::forgotten_details(&server, &name),
+                                        if tick_spin.borrow().contains_key(&server.pid) {
+                                            " Bamboo уже перевёл его в экономичный режим: процессор достанется тому, с чем вы работаете."
+                                        } else {
+                                            ""
+                                        },
                                     ),
                                 ),
                                 bamboo_analyze::forgotten::Why::Idle => (
@@ -2194,7 +2244,14 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     // Bamboo — фоновый наблюдатель, он живёт в трее и обязан пережить
     // закрытие виджета. Раньше вместе с виджетом исчезала и иконка.
     slint::run_event_loop_until_quit()?;
-    shutdown(started, &autopilot_holds, &shield_holds, &history, timer)
+    shutdown(
+        started,
+        &autopilot_holds,
+        &shield_holds,
+        &spin_holds,
+        &history,
+        timer,
+    )
 }
 
 /// Завершает Bamboo, укладываясь во время.
@@ -2212,6 +2269,7 @@ fn shutdown(
         std::cell::RefCell<std::collections::HashMap<(u32, &'static str), i64>>,
     >,
     shield_holds: &std::rc::Rc<std::cell::RefCell<autopilot::ShieldHolds>>,
+    spin_holds: &std::rc::Rc<std::cell::RefCell<std::collections::HashMap<u32, i64>>>,
     history: &std::rc::Rc<std::cell::RefCell<Option<history::Recorder>>>,
     timer: slint::Timer,
 ) -> ! {
@@ -2223,6 +2281,9 @@ fn shutdown(
     // Первым — вернуть придержанное: это чужие программы, и оставлять
     // их придержанными после ухода Bamboo нельзя.
     for (_, journal_id) in away_holds.borrow_mut().drain() {
+        actions::revert_automatically(journal_id, "Bamboo завершает работу");
+    }
+    for (_, journal_id) in spin_holds.borrow_mut().drain() {
         actions::revert_automatically(journal_id, "Bamboo завершает работу");
     }
     for (_, journal_id) in shield_holds.borrow_mut().drain() {

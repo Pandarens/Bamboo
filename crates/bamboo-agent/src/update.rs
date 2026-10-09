@@ -399,9 +399,28 @@ pub const AFTER_UPDATE_FLAG: &str = "--after-update";
 /// из трея и открыть снова. На живой машине это кончилось плохо: старый
 /// процесс завис на выходе, Windows закрыл его как не отвечающий, и в ту же
 /// минуту база наблюдений перестала писаться на четыре дня.
+///
+/// Новая версия запускается вне задания (job) своего родителя. На живой
+/// машине Bamboo однажды запустили из сеанса другой программы, и все его
+/// перезапуски после обновлений оставались в её задании: когда та
+/// программа обновилась и перезапустилась, Windows закрыла задание
+/// целиком — и Bamboo вместе с ним, молча, без единой записи в журнале.
+/// Двое суток подвисаний прошли без наблюдателя. Не дали выйти из задания —
+/// запускаемся как обычно: тогда поднимет сторож планировщика.
 pub fn restart_into_new_version() -> Result<(), String> {
+    use std::os::windows::process::CommandExt;
+    /// Выйти из задания родителя, если оно это разрешает.
+    const CREATE_BREAKAWAY_FROM_JOB: u32 = 0x0100_0000;
+
     let current = std::env::current_exe()
         .map_err(|error| format!("Свой путь определить не удалось: {error}"))?;
+    let detached = std::process::Command::new(&current)
+        .arg(AFTER_UPDATE_FLAG)
+        .creation_flags(CREATE_BREAKAWAY_FROM_JOB)
+        .spawn();
+    if detached.is_ok() {
+        return Ok(());
+    }
     std::process::Command::new(current)
         .arg(AFTER_UPDATE_FLAG)
         .spawn()
