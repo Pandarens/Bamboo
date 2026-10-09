@@ -588,29 +588,39 @@ use std::os::windows::process::CommandExt;
 /// разом и не спрашивает подтверждения при каждом входе.
 ///
 /// Требует прав администратора **один раз**, при создании.
+///
+/// Задача описывается целиком, а не ключами schtasks: у тех нет ни
+/// повтора, ни снятия лимитов, а умолчания оказались вредными. На живой
+/// машине Bamboo тихо исчез на двое суток — его убили вместе с чужим
+/// процессом, а поднять было некому: задача срабатывала только при входе,
+/// а компьютер не перезагружали три недели. Да и сама задача по умолчанию
+/// останавливала Bamboo через 72 часа и при переходе на батарею.
 pub fn schedule_at_logon() -> Result<()> {
     let exe = std::env::current_exe()
         .map_err(|_| Error::Unsupported("не удалось определить путь к себе"))?;
+    let user = current_user();
+    let xml = task_xml(&exe.to_string_lossy(), &user);
+
+    // Описание задачи — во временный файл в UTF-16: так его ждёт schtasks.
+    let path = std::env::temp_dir().join(format!("bamboo-task-{}.xml", std::process::id()));
+    let mut bytes: Vec<u8> = vec![0xFF, 0xFE];
+    for unit in xml.encode_utf16() {
+        bytes.extend_from_slice(&unit.to_le_bytes());
+    }
+    std::fs::write(&path, bytes)
+        .map_err(|_| Error::Unsupported("не удалось записать описание задачи"))?;
 
     let output = std::process::Command::new("schtasks.exe")
-        .args([
-            "/create",
-            "/tn",
-            TASK_NAME,
-            "/tr",
-            &format!("\"{}\"", exe.to_string_lossy()),
-            "/sc",
-            "onlogon",
-            // Наивысшие права — то, ради чего всё и затевалось.
-            "/rl",
-            "highest",
-            // Перезаписать существующую: повторное включение не должно
-            // спотыкаться о прошлую задачу.
-            "/f",
-        ])
+        .args(["/create", "/tn", TASK_NAME, "/xml"])
+        .arg(&path)
+        // Перезаписать существующую: повторное включение не должно
+        // спотыкаться о прошлую задачу.
+        .arg("/f")
         .creation_flags(CREATE_NO_WINDOW)
-        .output()
-        .map_err(|_| Error::Unsupported("не удалось вызвать планировщик заданий"))?;
+        .output();
+    let _ = std::fs::remove_file(&path);
+    let output =
+        output.map_err(|_| Error::Unsupported("не удалось вызвать планировщик заданий"))?;
 
     if !output.status.success() {
         return Err(Error::Unsupported(
@@ -618,6 +628,139 @@ pub fn schedule_at_logon() -> Result<()> {
         ));
     }
     Ok(())
+}
+
+/// Как часто задача проверяет, что Bamboo работает. Второй экземпляр
+/// уходит сразу же, увидев первый, — проверка стоит доли секунды.
+const KEEPER_INTERVAL: &str = "PT15M";
+
+/// Пользователь в виде «КОМПЬЮТЕР\имя» — так его ждёт планировщик.
+fn current_user() -> String {
+    let domain = std::env::var("USERDOMAIN").unwrap_or_default();
+    let name = std::env::var("USERNAME").unwrap_or_default();
+    if domain.is_empty() {
+        name
+    } else {
+        format!("{domain}\\{name}")
+    }
+}
+
+/// Экранирование для XML: путь к программе может содержать «&».
+fn xml_escape(text: &str) -> String {
+    text.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+}
+
+/// Описание задачи автозапуска.
+///
+/// - при входе — как и прежде;
+/// - каждые пятнадцать минут — сторож: умер Bamboo, задача поднимет его;
+/// - без предела времени работы (по умолчанию — 72 часа);
+/// - без остановки на батарее: наблюдатель, который уходит, когда ноутбук
+///   отключили от сети, бесполезен ровно тогда, когда нужнее всего.
+pub fn task_xml(exe: &str, user: &str) -> String {
+    let exe = xml_escape(exe);
+    let user = xml_escape(user);
+    format!(
+        r#"<?xml version="1.0" encoding="UTF-16"?>
+<Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
+  <RegistrationInfo>
+    <Description>Bamboo: запуск при входе и проверка раз в 15 минут, что наблюдатель работает.</Description>
+  </RegistrationInfo>
+  <Triggers>
+    <LogonTrigger>
+      <Enabled>true</Enabled>
+      <UserId>{user}</UserId>
+    </LogonTrigger>
+    <TimeTrigger>
+      <Repetition>
+        <Interval>{KEEPER_INTERVAL}</Interval>
+        <StopAtDurationEnd>false</StopAtDurationEnd>
+      </Repetition>
+      <StartBoundary>2026-01-01T00:00:00</StartBoundary>
+      <Enabled>true</Enabled>
+    </TimeTrigger>
+  </Triggers>
+  <Principals>
+    <Principal id="Author">
+      <UserId>{user}</UserId>
+      <LogonType>InteractiveToken</LogonType>
+      <RunLevel>HighestAvailable</RunLevel>
+    </Principal>
+  </Principals>
+  <Settings>
+    <MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>
+    <DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>
+    <StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>
+    <AllowHardTerminate>true</AllowHardTerminate>
+    <StartWhenAvailable>true</StartWhenAvailable>
+    <IdleSettings>
+      <StopOnIdleEnd>false</StopOnIdleEnd>
+      <RestartOnIdle>false</RestartOnIdle>
+    </IdleSettings>
+    <AllowStartOnDemand>true</AllowStartOnDemand>
+    <Enabled>true</Enabled>
+    <Hidden>false</Hidden>
+    <ExecutionTimeLimit>PT0S</ExecutionTimeLimit>
+    <Priority>7</Priority>
+  </Settings>
+  <Actions Context="Author">
+    <Exec>
+      <Command>{exe}</Command>
+    </Exec>
+  </Actions>
+</Task>
+"#
+    )
+}
+
+/// Устарела ли задача: нет сторожа, стоит предел в 72 часа, остановка
+/// на батарее или путь не к этой программе.
+pub fn task_is_outdated(xml: &str, exe: &str) -> bool {
+    !xml.contains(KEEPER_INTERVAL)
+        || !xml.contains("<ExecutionTimeLimit>PT0S</ExecutionTimeLimit>")
+        || xml.contains("<StopIfGoingOnBatteries>true</StopIfGoingOnBatteries>")
+        || !xml.to_lowercase().contains(&xml_escape(exe).to_lowercase())
+}
+
+/// Обновляет задачу автозапуска, если она есть и устарела. Возвращает,
+/// обновлена ли.
+///
+/// Задачу, заведённую прежней версией, человек сам пересоздавать не станет —
+/// он не знает, что она устарела. Нужны права администратора; без них
+/// оставляем как есть.
+pub fn refresh_scheduled_task() -> bool {
+    let Ok(output) = std::process::Command::new("schtasks.exe")
+        .args(["/query", "/tn", TASK_NAME, "/xml"])
+        .creation_flags(CREATE_NO_WINDOW)
+        .output()
+    else {
+        return false;
+    };
+    if !output.status.success() {
+        return false; // задачи нет — автозапуск не включали, не навязываем
+    }
+    let xml = decode_utf16_or_utf8(&output.stdout);
+    let Ok(exe) = std::env::current_exe() else {
+        return false;
+    };
+    task_is_outdated(&xml, &exe.to_string_lossy()) && schedule_at_logon().is_ok()
+}
+
+/// Вывод schtasks: в XML-режиме он бывает и в UTF-16, и в кодировке консоли.
+fn decode_utf16_or_utf8(bytes: &[u8]) -> String {
+    if bytes.len() >= 2 && (bytes[0] == 0xFF && bytes[1] == 0xFE || bytes.get(1) == Some(&0)) {
+        let start = if bytes[0] == 0xFF { 2 } else { 0 };
+        let units: Vec<u16> = bytes[start..]
+            .chunks_exact(2)
+            .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
+            .collect();
+        String::from_utf16_lossy(&units)
+    } else {
+        String::from_utf8_lossy(bytes).into_owned()
+    }
 }
 
 /// Убирает задачу автозапуска.
@@ -640,6 +783,65 @@ pub fn unschedule_at_logon() -> Result<()> {
 #[cfg(test)]
 mod scheduled_startup_tests {
     use super::*;
+
+    /// Принимает ли планировщик Windows такое описание. Заводит пробную
+    /// задачу под другим именем и без повышенных прав и сразу удаляет.
+    /// Запуск: cargo test -p bamboo-sys probe_task_xml -- --ignored
+    #[test]
+    #[ignore]
+    fn probe_task_xml_is_accepted_by_windows() {
+        let xml = task_xml(
+            r"C:\Windows\System32
+otepad.exe",
+            &current_user(),
+        )
+        .replace("HighestAvailable", "LeastPrivilege");
+        let path = std::env::temp_dir().join("bamboo-task-probe.xml");
+        let mut bytes: Vec<u8> = vec![0xFF, 0xFE];
+        for unit in xml.encode_utf16() {
+            bytes.extend_from_slice(&unit.to_le_bytes());
+        }
+        std::fs::write(&path, bytes).unwrap();
+        let created = std::process::Command::new("schtasks.exe")
+            .args(["/create", "/tn", "BambooXmlProbe", "/xml"])
+            .arg(&path)
+            .arg("/f")
+            .output()
+            .unwrap();
+        let _ = std::process::Command::new("schtasks.exe")
+            .args(["/delete", "/tn", "BambooXmlProbe", "/f"])
+            .output();
+        let _ = std::fs::remove_file(&path);
+        assert!(
+            created.status.success(),
+            "планировщик не принял: {}",
+            String::from_utf8_lossy(&created.stderr)
+        );
+    }
+
+    #[test]
+    fn the_task_keeps_bamboo_alive() {
+        let xml = task_xml(r"C:\Tools & Co\bamboo-agent.exe", r"PC\user");
+        assert!(xml.contains("<Interval>PT15M</Interval>"), "нет сторожа");
+        assert!(xml.contains("<ExecutionTimeLimit>PT0S</ExecutionTimeLimit>"));
+        assert!(xml.contains("<StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>"));
+        assert!(xml.contains("<RunLevel>HighestAvailable</RunLevel>"));
+        assert!(xml.contains(r"C:\Tools &amp; Co\bamboo-agent.exe"), "{xml}");
+        assert!(!task_is_outdated(&xml, r"C:\Tools & Co\bamboo-agent.exe"));
+    }
+
+    #[test]
+    fn the_old_task_is_recognised_as_outdated() {
+        // Та, что заводила прежняя версия: только вход, 72 часа, батарея.
+        let old = r#"<Triggers><LogonTrigger></LogonTrigger></Triggers>
+<Settings><StopIfGoingOnBatteries>true</StopIfGoingOnBatteries>
+<ExecutionTimeLimit>PT72H</ExecutionTimeLimit></Settings>
+<Command>"C:\b\bamboo-agent.exe"</Command>"#;
+        assert!(task_is_outdated(old, r"C:\b\bamboo-agent.exe"));
+        // Новая задача, но для другого пути — тоже устарела.
+        let moved = task_xml(r"C:\old\bamboo-agent.exe", "PC\\user");
+        assert!(task_is_outdated(&moved, r"C:\new\bamboo-agent.exe"));
+    }
 
     #[test]
     fn the_state_of_the_task_is_answerable() {
