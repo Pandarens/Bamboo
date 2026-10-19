@@ -561,6 +561,72 @@ mod elevation_tests {
     }
 }
 
+/// Можно ли получить права администратора, оставшись собой.
+///
+/// Да — у администратора с контролем учётных записей: окно подтверждения
+/// выдаст ему его же полный токен. Нет — у обычной учётной записи: там
+/// окно спросит пароль другого человека, и программа запустится уже
+/// от его имени, с его настройками и данными. Такого Bamboo не просит.
+pub fn can_elevate_in_place() -> bool {
+    use windows_sys::Win32::Foundation::{CloseHandle, HANDLE};
+    use windows_sys::Win32::Security::{GetTokenInformation, TokenElevationType};
+    use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
+
+    /// TokenElevationTypeLimited: администратор, работающий урезанным.
+    const LIMITED: i32 = 3;
+
+    let mut token: HANDLE = core::ptr::null_mut();
+    if unsafe { OpenProcessToken(GetCurrentProcess(), 0x0008, &mut token) } == 0 {
+        return false;
+    }
+    let mut kind: i32 = 0;
+    let mut returned: u32 = 0;
+    let ok = unsafe {
+        GetTokenInformation(
+            token,
+            TokenElevationType,
+            (&mut kind as *mut i32).cast(),
+            core::mem::size_of::<i32>() as u32,
+            &mut returned,
+        )
+    };
+    unsafe { CloseHandle(token) };
+    ok != 0 && kind == LIMITED
+}
+
+/// Запускает себя же с правами администратора через окно подтверждения.
+///
+/// `Err` — человек отказался или окно не показалось. Это не беда:
+/// Bamboo работает и без прав, просто часть разделов пустеет.
+pub fn relaunch_elevated(arguments: &str) -> Result<()> {
+    use windows_sys::Win32::UI::Shell::ShellExecuteW;
+    use windows_sys::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
+
+    let exe = std::env::current_exe()
+        .map_err(|_| Error::Unsupported("не удалось определить путь к себе"))?;
+    let wide =
+        |text: &str| -> Vec<u16> { text.encode_utf16().chain(core::iter::once(0)).collect() };
+    let verb = wide("runas");
+    let file = wide(&exe.to_string_lossy());
+    let params = wide(arguments);
+    let result = unsafe {
+        ShellExecuteW(
+            core::ptr::null_mut(),
+            verb.as_ptr(),
+            file.as_ptr(),
+            params.as_ptr(),
+            core::ptr::null(),
+            SW_SHOWNORMAL,
+        )
+    };
+    // По договору ShellExecute успех — число больше 32.
+    if result as usize > 32 {
+        Ok(())
+    } else {
+        Err(Error::Unsupported("права администратора не выданы"))
+    }
+}
+
 /// Имя задачи планировщика, запускающей Bamboo при входе.
 const TASK_NAME: &str = "Bamboo";
 

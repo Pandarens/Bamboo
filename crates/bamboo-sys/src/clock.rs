@@ -13,6 +13,18 @@ pub fn monotonic_ms() -> u64 {
     unsafe { GetTickCount64() }
 }
 
+/// Местное время строкой «19.10 09:45:01» — для дневника, который читает
+/// человек: время UTC в нём пришлось бы пересчитывать в уме.
+pub fn local_stamp() -> String {
+    use windows_sys::Win32::System::SystemInformation::GetLocalTime;
+    let mut time = unsafe { core::mem::zeroed() };
+    unsafe { GetLocalTime(&mut time) };
+    format!(
+        "{:02}.{:02} {:02}:{:02}:{:02}",
+        time.wDay, time.wMonth, time.wHour, time.wMinute, time.wSecond
+    )
+}
+
 /// Отметка «сейчас» для сэмпла: монотонная и настенная шкалы вместе.
 pub fn now() -> SampleTime {
     SampleTime::new(monotonic_ms(), SampleTime::wall_clock_now())

@@ -331,9 +331,26 @@ pub fn script_label(command_line: &str) -> Option<String> {
             if let Some(at) = rest.iter().position(|arg| arg == "-jar") {
                 return rest.get(at + 1).map(|jar| stem(file_name(jar)).to_string());
             }
+            // Ключи модульной системы со значением: без них значение
+            // «java.base/sun.nio.ch=ALL-UNNAMED» принималось за главный
+            // класс, и демон Kotlin на два гигабайта звался «ch=ALL-UNNAMED».
             let positional = positionals(
                 rest,
-                &["-cp", "-classpath", "--class-path", "-p", "--module-path"],
+                &[
+                    "-cp",
+                    "-classpath",
+                    "--class-path",
+                    "-p",
+                    "--module-path",
+                    "--add-exports",
+                    "--add-opens",
+                    "--add-reads",
+                    "--add-modules",
+                    "--patch-module",
+                    "--limit-modules",
+                    "--upgrade-module-path",
+                    "--enable-native-access",
+                ],
             );
             // Главный класс: «org.gradle.launcher.daemon.bootstrap.GradleDaemon»
             // говорит о себе последним словом.
@@ -704,6 +721,12 @@ mod script_tests {
             script_label(r#"javaw.exe -jar "C:\Apps\Tool Box\tool.jar""#).as_deref(),
             Some("tool")
         );
+    }
+
+    #[test]
+    fn the_kotlin_daemon_is_not_named_after_a_module_flag() {
+        let line = r#""C:\Program Files\Android\Android Studio\jbr\bin\java" -Djava.awt.headless=true -Xmx3g -cp C:\k\kotlin-compiler.jar --add-exports java.base/sun.nio.ch=ALL-UNNAMED org.jetbrains.kotlin.daemon.KotlinCompileDaemon --daemon-runFilesPath C:\k\daemon"#;
+        assert_eq!(script_label(line).as_deref(), Some("KotlinCompileDaemon"));
     }
 
     #[test]

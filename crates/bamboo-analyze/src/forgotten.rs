@@ -28,6 +28,20 @@ pub const QUIET_ENOUGH_MS: u64 = 60 * 60 * 1000;
 /// С какого размера о сервере стоит говорить.
 pub const WORTH: Bytes = Bytes(100 * 1024 * 1024);
 
+/// Демоны сборки: живут после сборки часами ради того, чтобы следующая
+/// прошла на несколько секунд быстрее. На живой машине GradleDaemon
+/// и его KotlinCompileDaemon держали вместе 2,9 ГБ при памяти, занятой
+/// на 85%, и упоминались в 90 подвисаниях. Закрыть их безопасно: следующая
+/// сборка поднимет новые.
+const BUILD_DAEMONS: &[&str] = &["GradleDaemon", "KotlinCompileDaemon", "GradleWorkerMain"];
+
+/// Сколько демон сборки должен простоять, чтобы о нём сказать. Двадцать
+/// минут: правка и пересборка укладываются в меньшее.
+pub const DAEMON_QUIET_MS: u64 = 20 * 60 * 1000;
+
+/// С какого размера демон сборки стоит упоминания.
+pub const DAEMON_WORTH: Bytes = Bytes(300 * 1024 * 1024);
+
 /// Сколько сервер должен без перерыва жечь процессор, чтобы это был
 /// холостой ход, а не работа. Три часа: самая долгая пересборка — минуты,
 /// а сервер, который три часа подряд держит полядра, ничего не собирает.
@@ -78,6 +92,8 @@ pub enum Why {
     /// Без перерыва жжёт процессор — холостой цикл. `cores` — сколько
     /// ядер занимает сейчас.
     Spinning { cores: f32 },
+    /// Демон сборки после сборки: ждёт следующую, держа память.
+    IdleDaemon,
 }
 
 /// Забытый сервер.
@@ -193,6 +209,11 @@ pub fn forgotten(processes: &[ServerFacts<'_>]) -> Vec<Forgotten> {
             Why::Spinning {
                 cores: server.cpu_percent / 100.0,
             }
+        } else if BUILD_DAEMONS.contains(&server.label)
+            && quiet_ms >= DAEMON_QUIET_MS
+            && bytes >= DAEMON_WORTH
+        {
+            Why::IdleDaemon
         } else if server.age_ms >= OLD_ENOUGH_MS && quiet_ms >= QUIET_ENOUGH_MS && bytes >= WORTH {
             Why::Idle
         } else {
@@ -378,6 +399,46 @@ mod tests {
         processes[4].quiet_ms = 0;
         processes[4].busy_ms = 30 * 60 * 1000;
         processes[4].cpu_percent = 180.0;
+        assert!(forgotten(&processes).is_empty());
+    }
+
+    #[test]
+    fn an_idle_build_daemon_goes_with_its_kotlin_child() {
+        // Живая машина: сборка в 9:29, к 9:50 демоны Gradle и Kotlin
+        // держат 2,9 ГБ и ничего не делают. Kotlin — дочерний у Gradle
+        // и тоже слушает порт: это одна связка, закрывать вместе.
+        let processes = vec![
+            ServerFacts {
+                quiet_ms: 21 * 60 * 1000,
+                age_ms: HOUR / 2,
+                ..facts(19708, 1, "java.exe", "GradleDaemon", 955, &[59099])
+            },
+            ServerFacts {
+                quiet_ms: 21 * 60 * 1000,
+                age_ms: HOUR / 2,
+                ..facts(
+                    27512,
+                    19708,
+                    "java.exe",
+                    "KotlinCompileDaemon",
+                    1983,
+                    &[17419],
+                )
+            },
+        ];
+        let found = forgotten(&processes);
+        assert_eq!(found.len(), 1, "{found:?}");
+        assert_eq!(found[0].why, Why::IdleDaemon);
+        assert_eq!(found[0].close, vec![19708, 27512]);
+        assert_eq!(found[0].bytes, Bytes(2938 * MB));
+    }
+
+    #[test]
+    fn a_daemon_during_a_build_is_left_alone() {
+        let processes = vec![ServerFacts {
+            quiet_ms: 2 * 60 * 1000,
+            ..facts(19708, 1, "java.exe", "GradleDaemon", 955, &[59099])
+        }];
         assert!(forgotten(&processes).is_empty());
     }
 
