@@ -604,3 +604,7 @@ msgstr "Some are forgotten and idle: not a single browser request or rebuild in 
 msgctxt "MainWindow"
 msgid "Закрыть"
 msgstr "Close"
+
+msgctxt "MainWindow"
+msgid "Ограничить WSL"
+msgstr "Limit WSL"

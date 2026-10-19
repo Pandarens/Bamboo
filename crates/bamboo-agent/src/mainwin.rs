@@ -1754,6 +1754,11 @@ pub fn forgotten_details(server: &bamboo_analyze::forgotten::Forgotten, name: &s
                 ("quiet", &span(server.quiet_ms)),
             ],
         ),
+        Why::IdleDaemon => bamboo_core::say(
+            "{name} · демон сборки без дела {quiet} — следующая сборка поднимет новый, первая будет на несколько секунд дольше",
+            "{name} · build daemon idle for {quiet} — the next build starts a new one, a few seconds slower the first time",
+            &[("name", display_name(name)), ("quiet", &span(server.quiet_ms))],
+        ),
         Why::Spinning { cores } => bamboo_core::say(
             "{name} · {port} {ports} · без перерыва занимает {cores} ядра уже {busy} — похоже на холостой цикл, перезапуск обычно лечит",
             "{name} · {port} {ports} · has kept {cores} cores busy non-stop for {busy} — looks like an idle loop; a restart usually cures it",
@@ -1808,6 +1813,58 @@ fn span(ms: u64) -> String {
             &[("minutes", &minutes.to_string())],
         )
     }
+}
+
+/// Файл настроек WSL в профиле.
+pub fn wslconfig_path() -> Option<std::path::PathBuf> {
+    std::env::var_os("USERPROFILE").map(|home| std::path::PathBuf::from(home).join(".wslconfig"))
+}
+
+/// Предел памяти для WSL: четверть ОЗУ, но не меньше 2 и не больше 8 ГБ.
+pub fn wsl_limit_gb(total: bamboo_core::Bytes) -> u64 {
+    (total.as_u64() / (1024 * 1024 * 1024) / 4).clamp(2, 8)
+}
+
+/// Что записать в новый .wslconfig.
+pub fn wslconfig_text(limit_gb: u64) -> String {
+    format!(
+        "# Записано Bamboo: без предела WSL разрешено до половины ОЗУ,\r\n\
+         # а кэш файлов он отдаёт Windows неохотно. Удалите файл — вернётся как было.\r\n\
+         [wsl2]\r\nmemory={limit_gb}GB\r\n\r\n[experimental]\r\nautoMemoryReclaim=gradual\r\n"
+    )
+}
+
+/// Строка о WSL, если его машина держит много, и можно ли ограничить кнопкой.
+///
+/// С живой машины: vmmem — виртуальная машина WSL — держал 4 ГБ при 15,8
+/// и упоминался в 54 подвисаниях. Без .wslconfig ему разрешено до половины
+/// ОЗУ, а память, занятую кэшем файлов внутри Linux, он возвращает Windows
+/// только когда его остановят.
+pub fn wsl_line(snapshot: &Snapshot, config: Option<&str>) -> (String, bool) {
+    let Some(vm) = snapshot.top.iter().find(|line| {
+        (line.name.eq_ignore_ascii_case("vmmem") || line.name.eq_ignore_ascii_case("vmmemWSL"))
+            && line.memory.as_u64() >= 2 * 1024 * 1024 * 1024
+    }) else {
+        return (String::new(), false);
+    };
+    let limited = config.is_some_and(|text| text.to_ascii_lowercase().contains("memory="));
+    if limited {
+        return (String::new(), false);
+    }
+    let limit = wsl_limit_gb(snapshot.memory_total);
+    let text = match config {
+        None => bamboo_core::say(
+            "WSL держит {size}. Без предела ему разрешено до половины ОЗУ, а кэш файлов он возвращает Windows неохотно. Кнопка ниже запишет в .wslconfig предел {limit} ГБ и постепенный возврат памяти; заработает после перезапуска WSL (wsl --shutdown).",
+            "WSL holds {size}. Without a limit it may take up to half of RAM, and it is slow to give file cache back. The button below writes a {limit} GB limit and gradual reclaim to .wslconfig; it applies after WSL restarts (wsl --shutdown).",
+            &[("size", &vm.memory.to_string()), ("limit", &limit.to_string())],
+        ),
+        Some(_) => bamboo_core::say(
+            "WSL держит {size}, а в вашем .wslconfig предела памяти нет. Добавьте в раздел [wsl2] строку memory={limit}GB — файл ваш, Bamboo его не трогает.",
+            "WSL holds {size}, and your .wslconfig sets no memory limit. Add memory={limit}GB under [wsl2] — the file is yours, Bamboo leaves it alone.",
+            &[("size", &vm.memory.to_string()), ("limit", &limit.to_string())],
+        ),
+    };
+    (text, config.is_none())
 }
 
 /// Имя программы без хвоста «.exe»: в раскладке это подпись, не путь.
@@ -3083,6 +3140,26 @@ mod translation_tests {
         // Неделя не прошла — молчим.
         snapshot.uptime_ms = 3 * DAY;
         assert_eq!(super::uptime_line(&snapshot), "");
+    }
+
+    #[test]
+    fn a_big_wsl_without_a_limit_is_named_with_a_fix() {
+        bamboo_core::set_language(bamboo_core::Language::Russian);
+        let snapshot = crate::collector::Snapshot {
+            top: vec![launched("vmmem", 9000, 0, "", 4100)],
+            memory_total: bamboo_core::Bytes::from_mib(16 * 1024),
+            ..Default::default()
+        };
+        let (text, button) = super::wsl_line(&snapshot, None);
+        assert!(text.contains("предел 4 ГБ"), "{text}");
+        assert!(button);
+        // Свой файл без предела — совет, но не кнопка.
+        let (text, button) = super::wsl_line(&snapshot, Some("[wsl2]\nprocessors=4\n"));
+        assert!(text.contains("memory=4GB"), "{text}");
+        assert!(!button);
+        // Предел уже есть — молчим.
+        assert_eq!(super::wsl_line(&snapshot, Some("[wsl2]\nmemory=6GB")).0, "");
+        assert!(super::wslconfig_text(4).contains("memory=4GB"));
     }
 
     #[test]

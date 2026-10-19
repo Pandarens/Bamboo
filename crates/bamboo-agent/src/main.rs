@@ -21,6 +21,8 @@ mod actions;
 mod autopilot;
 mod collector;
 #[cfg(windows)]
+mod diary;
+#[cfg(windows)]
 mod gamemode;
 #[cfg(windows)]
 mod history;
@@ -92,7 +94,78 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             return run();
         }
     };
+
+    // Запустились без прав — просим их сразу, а не ждём, пока человек
+    // найдёт объяснение в настройках. Без прав пустеют история загрузок,
+    // здоровье накопителя и планировщик, а действия над чужими службами
+    // невозможны.
+    //
+    // Просим после проверки единственности: если Bamboo уже работает,
+    // второй запуск уходит молча, без окна подтверждения. Новая копия
+    // стартует с ключом перезапуска и подождёт, пока эта освободит место.
+    // Отказ запоминаем на сутки — сторож планировщика будит Bamboo каждые
+    // пятнадцать минут, и окно не должно всплывать так же часто.
+    if !bamboo_sys::is_elevated() && bamboo_sys::can_elevate_in_place() && elevation::may_ask() {
+        elevation::remember_asked();
+        if bamboo_sys::relaunch_elevated(update::AFTER_UPDATE_FLAG).is_ok() {
+            return Ok(());
+        }
+    }
     run()
+}
+
+/// Сколько не переспрашивать права после отказа или неудачи.
+#[cfg(windows)]
+mod elevation {
+    const KEY: &str = r"Software\Bamboo";
+    const VALUE: &str = "ElevationAskedAt";
+    /// Сутки: чаще окно подтверждения превратилось бы в назойливость.
+    const PAUSE_SECS: u64 = 24 * 60 * 60;
+
+    fn now_secs() -> u64 {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|age| age.as_secs())
+            .unwrap_or(0)
+    }
+
+    fn stored() -> u64 {
+        std::process::Command::new("reg.exe")
+            .args(["query", &format!(r"HKCU\{KEY}"), "/v", VALUE])
+            .output()
+            .ok()
+            .and_then(|out| {
+                String::from_utf8_lossy(&out.stdout)
+                    .split_whitespace()
+                    .last()
+                    .and_then(|value| value.parse::<u64>().ok())
+            })
+            .unwrap_or(0)
+    }
+
+    /// Можно ли спросить: в последние сутки не спрашивали.
+    pub fn may_ask() -> bool {
+        now_secs().saturating_sub(stored()) >= PAUSE_SECS
+    }
+
+    /// Запоминает, что спросили.
+    pub fn remember_asked() {
+        use std::os::windows::process::CommandExt;
+        let _ = std::process::Command::new("reg.exe")
+            .args([
+                "add",
+                &format!(r"HKCU\{KEY}"),
+                "/v",
+                VALUE,
+                "/t",
+                "REG_SZ",
+                "/d",
+                &now_secs().to_string(),
+                "/f",
+            ])
+            .creation_flags(0x0800_0000)
+            .output();
+    }
 }
 
 /// Имя места, которое занимает единственный агент.
@@ -151,6 +224,24 @@ const FORGOTTEN_NOTICE_PRESSURE: f64 = 0.80;
 const LEAK_NOTICE_EVERY: Duration = Duration::from_secs(24 * 60 * 60);
 
 fn run() -> Result<(), Box<dyn std::error::Error>> {
+    // Падения кода — в дневник: у программы с окном консоли нет, и без
+    // этого сбой в цикле был бы невидим.
+    diary::catch_panics();
+    diary::note(&format!(
+        "Bamboo {} запущен: права администратора — {}, автоматика — {}",
+        update::CURRENT,
+        if bamboo_sys::is_elevated() {
+            "есть"
+        } else {
+            "нет"
+        },
+        if bamboo_sys::autopilot_enabled() {
+            "включена"
+        } else {
+            "выключена"
+        },
+    ));
+
     // Программный рендерер: GPU-контекст не создаётся вообще (ТЗ, раздел 4.1).
     // Виджету он не нужен, а его создание стоит памяти и держит загруженным
     // драйвер видеокарты.
@@ -1163,6 +1254,44 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         });
     }
 
+    // Предел памяти для WSL: новый .wslconfig, только если своего нет.
+    {
+        let weak = main_window.as_weak();
+        let snapshot = last_snapshot.clone();
+        main_window.on_limit_wsl(move || {
+            let Some(win) = weak.upgrade() else {
+                return;
+            };
+            let Some(path) = mainwin::wslconfig_path() else {
+                return;
+            };
+            if path.exists() {
+                win.set_action_note(SharedString::from(
+                    "У вас уже есть свой .wslconfig — Bamboo его не трогает.",
+                ));
+                return;
+            }
+            let total = snapshot
+                .borrow()
+                .as_ref()
+                .map(|snapshot| snapshot.memory_total)
+                .unwrap_or_default();
+            let limit = mainwin::wsl_limit_gb(total);
+            let note = match std::fs::write(&path, mainwin::wslconfig_text(limit)) {
+                Ok(()) => {
+                    diary::note(&format!("WSL: записан предел памяти {limit} ГБ в {}", path.display()));
+                    win.set_memory_wsl_button(false);
+                    format!(
+                        "Предел WSL — {limit} ГБ. Заработает после перезапуска WSL: команда wsl --shutdown или перезагрузка. Вернуть как было — удалить файл {}.",
+                        path.display()
+                    )
+                }
+                Err(error) => format!("Записать .wslconfig не удалось: {error}"),
+            };
+            win.set_action_note(SharedString::from(note));
+        });
+    }
+
     // Мусор: поиск, удаление и пометки в Проводнике.
     main_window.set_junk_marks(bamboo_sys::mark_junk_enabled());
     {
@@ -1630,6 +1759,8 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         std::rc::Rc::new(std::cell::RefCell::new(std::collections::HashMap::new()));
     let tick_spin = spin_holds.clone();
     let mut shield = bamboo_analyze::shield::Shield::new();
+    // Включена ли защита на прошлом тике — для записи в дневник перехода.
+    let mut shield_was_engaged = false;
     // Когда программа последний раз была на переднем плане — по имени,
     // в миллисекундах от запуска агента. Нет записи — считаем с запуска:
     // первые полчаса «давно не трогали» не скажешь ни про кого.
@@ -2022,9 +2153,18 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                             })
                             .collect();
                         holds.forget_gone(&|pid| snapshot.top.iter().any(|line| line.pid == pid));
+                        if shield.engaged() != shield_was_engaged {
+                            shield_was_engaged = shield.engaged();
+                            diary::note(&format!(
+                                "защита {}: память занята на {:.0}%",
+                                if shield_was_engaged { "включилась" } else { "снята" },
+                                snapshot.memory_pressure() * 100.0
+                            ));
+                        }
                         let step = holds.step(&wanted);
                         for (pid, journal_id) in step.release {
                             holds.release(pid);
+                            diary::note(&format!("защита: возвращён приоритет памяти PID {pid}"));
                             // Завершившемуся возвращать нечего.
                             if snapshot.top.iter().any(|line| line.pid == pid) {
                                 actions::revert_automatically(
@@ -2039,10 +2179,18 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                                 &name,
                                 actions::RowAction::LowerMemory,
                             ) {
-                                Some(journal_id) => holds.hold(pid, name, journal_id),
+                                Ok(journal_id) => {
+                                    diary::note(&format!(
+                                        "защита: понижен приоритет памяти {name} (PID {pid}), запись журнала №{journal_id}"
+                                    ));
+                                    holds.hold(pid, name, journal_id)
+                                }
                                 // Отказ запоминаем: иначе попытка повторялась бы
                                 // каждый тик, и каждая — запись в журнал на диск.
-                                None => holds.refuse(pid, name),
+                                Err(why) => {
+                                    diary::note(&format!("защита: {name} (PID {pid}) — {why}"));
+                                    holds.refuse(pid, name)
+                                }
                             }
                         }
                     } else {
@@ -2106,18 +2254,35 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                             {
                                 continue;
                             }
-                            if let Some(journal_id) = actions::apply_automatically(
+                            match actions::apply_automatically(
                                 server.pid,
                                 &name,
                                 actions::RowAction::EcoQos,
                             ) {
-                                held.insert(server.pid, journal_id);
+                                Ok(journal_id) => {
+                                    diary::note(&format!(
+                                        "холостой ход: {} (PID {}) переведён в экономичный режим",
+                                        server.label, server.pid
+                                    ));
+                                    held.insert(server.pid, journal_id);
+                                }
+                                // Не вышло — запоминаем нулём, чтобы не биться
+                                // каждый тик: процесс тот же, отказ будет тот же.
+                                Err(why) => {
+                                    diary::note(&format!(
+                                        "холостой ход: {} (PID {}) — {why}",
+                                        server.label, server.pid
+                                    ));
+                                    held.insert(server.pid, 0);
+                                }
                             }
                         }
                         held.retain(|pid, _| snapshot.top.iter().any(|line| line.pid == *pid));
                     } else {
                         for (_, journal_id) in held.drain() {
-                            actions::revert_automatically(journal_id, "автоматика выключена");
+                            if journal_id > 0 {
+                                actions::revert_automatically(journal_id, "автоматика выключена");
+                            }
                         }
                     }
                 }
@@ -2157,6 +2322,15 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                                         } else {
                                             ""
                                         },
+                                    ),
+                                ),
+                                bamboo_analyze::forgotten::Why::IdleDaemon => (
+                                    "Bamboo: демон сборки держит память",
+                                    format!(
+                                        "{} держит {}: {}. Закрыть можно в Bamboo, на «Обзоре».",
+                                        server.label,
+                                        server.bytes,
+                                        mainwin::forgotten_details(&server, &name),
                                     ),
                                 ),
                                 bamboo_analyze::forgotten::Why::Idle => (
@@ -2284,7 +2458,9 @@ fn shutdown(
         actions::revert_automatically(journal_id, "Bamboo завершает работу");
     }
     for (_, journal_id) in spin_holds.borrow_mut().drain() {
-        actions::revert_automatically(journal_id, "Bamboo завершает работу");
+        if journal_id > 0 {
+            actions::revert_automatically(journal_id, "Bamboo завершает работу");
+        }
     }
     for (_, journal_id) in shield_holds.borrow_mut().drain() {
         actions::revert_automatically(journal_id, "Bamboo завершает работу");
@@ -2336,15 +2512,21 @@ fn apply_autopilot_plan(
             }
         };
 
-        match actions::apply_automatically(held.pid, &held.name, what) {
-            Some(journal_id) => {
+        match actions::apply_automatically(held.pid, &held.name, what).map_err(|why| {
+            diary::note(&format!(
+                "автоматика: {} (PID {}) — {why}",
+                held.name, held.pid
+            ));
+            why
+        }) {
+            Ok(journal_id) => {
                 holds
                     .borrow_mut()
                     .insert((held.pid, remedy_key(held.remedy)), journal_id);
             }
             // Политика отказала или процесс исчез — забываем, иначе будем
             // показывать человеку неправду о числе придержанных.
-            None => pilot.forget(held.pid),
+            Err(_) => pilot.forget(held.pid),
         }
     }
 }
@@ -2663,6 +2845,10 @@ fn apply_overview(
     main.set_memory_kernel(SharedString::from(memory.kernel));
     main.set_memory_verdict(SharedString::from(memory.verdict));
     main.set_memory_uptime(SharedString::from(memory.uptime));
+    let config = mainwin::wslconfig_path().and_then(|path| std::fs::read_to_string(path).ok());
+    let (wsl, wsl_button) = mainwin::wsl_line(snapshot, config.as_deref());
+    main.set_memory_wsl(SharedString::from(wsl));
+    main.set_memory_wsl_button(wsl_button);
     main.set_memory_copies(SharedString::from(memory.copies));
     replace(&main.get_forgotten(), forgotten_rows(snapshot));
 
@@ -2751,7 +2937,16 @@ fn apply_overview(
     // сейчас делает.
     let pilot = autopilot.borrow();
     main.set_autopilot(pilot.enabled());
-    main.set_autopilot_status(SharedString::from(pilot.status(snapshot.user_idle_ms)));
+    // Последнее событие автоматики — рядом с её состоянием. Без этого
+    // нельзя было понять, работает ли она вообще.
+    let mut status = pilot.status(snapshot.user_idle_ms);
+    if let Some((ago, event)) = diary::last() {
+        status.push_str(&format!(
+            "\nПоследнее событие ({} мин назад): {event}. Весь дневник — файл автоматика.log рядом с базой.",
+            ago.as_secs() / 60
+        ));
+    }
+    main.set_autopilot_status(SharedString::from(status));
     main.set_disk_pressure(SharedString::from(
         snapshot.disk_pressure.clone().unwrap_or_default(),
     ));
@@ -3383,6 +3578,60 @@ mod drawn {
             ppm.extend_from_slice(&[pixel.red, pixel.green, pixel.blue]);
         }
         std::fs::write(out, ppm).expect("картинка");
+    }
+
+    /// Решение защиты переднего плана на живом снимке.
+    /// Запуск: cargo test -p bamboo-agent probe_shield -- --ignored --nocapture
+    #[test]
+    #[ignore]
+    fn probe_shield() {
+        let (snapshots, _) = collector::spawn();
+        let mut snapshot = None;
+        for _ in 0..2 {
+            snapshot = snapshots.recv().ok().or(snapshot);
+        }
+        let snapshot = snapshot.expect("снимок");
+        let foreground = bamboo_sys::window::foreground_pid();
+        println!(
+            "память занята: {:.2}, передний план: {foreground}",
+            snapshot.memory_pressure()
+        );
+        let facts: Vec<bamboo_analyze::shield::ShieldFacts<'_>> = snapshot
+            .top
+            .iter()
+            .map(|line| bamboo_analyze::shield::ShieldFacts {
+                pid: line.pid,
+                parent_pid: line.parent_pid,
+                name: &line.name,
+                memory: line.memory,
+                has_window: !line.window_title.is_empty(),
+                long_unused: false,
+                protected: false,
+                leaking: false,
+            })
+            .collect();
+        // Шаг автоматики, идущий в тике перед защитой.
+        let applied = actions::AppliedActions::load();
+        let raw = mainwin::suggestions_for(&snapshot, &|pid| !applied.marks(pid, false).is_empty());
+        println!("предложений: {}", raw.len());
+        let mut pilot = autopilot::Autopilot::new();
+        pilot.set_enabled(true);
+        let plan = pilot.decide(snapshot.user_idle_ms, &raw);
+        println!("план автоматики пуст: {}", plan.is_empty());
+        let mut shield = bamboo_analyze::shield::Shield::new();
+        let wanted = shield.wanted(
+            &facts,
+            snapshot.memory_pressure(),
+            foreground,
+            std::process::id(),
+            0,
+        );
+        println!("защита хочет придержать: {}", wanted.len());
+        for pid in wanted.iter().take(15) {
+            if let Some(line) = snapshot.top.iter().find(|line| line.pid == *pid) {
+                println!("  {} {} {}", line.pid, line.name, line.memory);
+            }
+        }
     }
 
     /// Исполнители сценариев этой машины: порты, возраст, простой.

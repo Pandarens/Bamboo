@@ -66,10 +66,12 @@ fn journal_path() -> std::path::PathBuf {
 /// возвращается номер записи — без него автоматика не смогла бы вернуть
 /// как было, а право вмешиваться она имеет ровно потому, что умеет вернуть.
 ///
-/// `None` — политика отказала либо действие не удалось. Это штатный исход:
-/// молча настаивать автоматика не будет.
-pub fn apply_automatically(pid: u32, image_name: &str, what: RowAction) -> Option<i64> {
-    let journal = open_journal()?;
+/// `Err` — политика отказала либо действие не удалось, с причиной. Это
+/// штатный исход: молча настаивать автоматика не будет, но причину пишет
+/// в дневник. Прежде здесь был `None`, и десять дней отказов прошли
+/// без единого следа.
+pub fn apply_automatically(pid: u32, image_name: &str, what: RowAction) -> Result<i64, String> {
+    let journal = open_journal().ok_or_else(|| "журнал действий не открылся".to_string())?;
     let executor = Executor::new(&journal, SystemBackend);
     let whitelist = UserWhitelist::new();
 
@@ -95,8 +97,10 @@ pub fn apply_automatically(pid: u32, image_name: &str, what: RowAction) -> Optio
 
     let now = bamboo_core::SampleTime::wall_clock_now();
     match executor.apply(now, &context, &target, Actor::Auto, false) {
-        Outcome::Applied { journal_id } => Some(journal_id),
-        _ => None,
+        Outcome::Applied { journal_id } => Ok(journal_id),
+        Outcome::Refused { reason } => Err(format!("отказ: {reason}")),
+        Outcome::Failed { error, .. } => Err(format!("не удалось: {error}")),
+        Outcome::Simulated { .. } => Err("только симуляция".to_string()),
     }
 }
 
@@ -421,6 +425,43 @@ pub fn terminate(pid: u32, image_name: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    /// Применение автоматикой на копии настоящего журнала. Ничего чужого
+    /// не трогает: цель — свой же дочерний ping.
+    /// Запуск: BAMBOO_PROBE_JOURNAL=путь_к_копии cargo test -p bamboo-agent probe_auto_apply -- --ignored --nocapture
+    #[test]
+    #[ignore]
+    fn probe_auto_apply_on_a_real_journal_copy() {
+        let Ok(copy) = std::env::var("BAMBOO_PROBE_JOURNAL") else {
+            return;
+        };
+        std::env::set_var("BAMBOO_DATA_DIR", &copy);
+        let mut child = std::process::Command::new("ping")
+            .args(["-n", "20", "127.0.0.1"])
+            .stdout(std::process::Stdio::null())
+            .spawn()
+            .unwrap();
+        println!("журнал открывается: {}", open_journal().is_some());
+        let started = std::time::Instant::now();
+        let applied = AppliedActions::load();
+        println!(
+            "прочитано применённое за {:?}: {}",
+            started.elapsed(),
+            applied.marks(child.id(), false).len()
+        );
+        let started = std::time::Instant::now();
+        let reverted = revert_stale_auto_holds();
+        println!("снято висящих: {reverted} за {:?}", started.elapsed());
+        if let Err(error) = Journal::open(journal_path()) {
+            println!("ошибка открытия: {error}");
+        }
+        let applied = apply_automatically(child.id(), "PING.EXE", RowAction::LowerMemory);
+        println!("применено: {applied:?}");
+        if let Ok(id) = applied {
+            println!("снято: {}", revert_automatically(id, "проверка"));
+        }
+        let _ = child.kill();
+        let _ = child.wait();
+    }
     use super::*;
 
     /// Журнал один на процесс, а тесты идут параллельно. Каждый тест,
