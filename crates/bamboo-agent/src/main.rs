@@ -2075,8 +2075,25 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                     if pilot.enabled() || pilot.holding() > 0 {
                         let applied = actions::AppliedActions::load();
                         let limits = io_limits.borrow();
+                        // Неприкасаемое не предлагаем вовсе: отказ политики был бы
+                        // тем же каждый тик, а каждый — строкой в дневнике.
+                        let untouchable = |pid: u32| {
+                            snapshot.top.iter().any(|line| {
+                                line.pid == pid
+                                    && bamboo_policy::immutable_reason(
+                                        &bamboo_policy::ProcessFacts {
+                                            image_name: &line.name,
+                                            session_id: 1,
+                                            ..Default::default()
+                                        },
+                                    )
+                                    .is_some()
+                            })
+                        };
                         let raw = mainwin::suggestions_for(&snapshot, &|pid| {
-                            limits.is_limited(pid) || !applied.marks(pid, false).is_empty()
+                            limits.is_limited(pid)
+                                || !applied.marks(pid, false).is_empty()
+                                || untouchable(pid)
                         });
                         drop(limits);
 

@@ -25,6 +25,14 @@ const SYSTEM_CORE: &[&str] = &[
     "explorer.exe",
     "runtimebroker.exe",
     "shellexperiencehost.exe",
+    // Память виртуальных машин (WSL, Docker, песочница). Процесс защищён
+    // самой Windows: открыть его не даёт даже администратору, и автоматика
+    // на живой машине билась о него каждые пятнадцать секунд, засоряя
+    // дневник отказами. Ограничивают его иначе — пределом в .wslconfig.
+    "vmmem",
+    "vmmemwsl",
+    "memory compression",
+    "secure system",
 ];
 
 /// Средства безопасности.
